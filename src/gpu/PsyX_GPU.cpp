@@ -3698,8 +3698,11 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			//      VirtualQuery; rely on the 1<<20 node safety counter.
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
 			if (nextPtr < 0x10000 ||
-			    nextPtr == static_cast<uintptr_t>(-1) ||
-			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+			    nextPtr == static_cast<uintptr_t>(-1)
+#if defined(_WIN32)
+			    || nextPtr >= 0x7FFFFFFFFFFFULL
+#endif
+			) {
 				static int s_badNextLogged = 0;
 				if (s_badNextLogged < 16) {
 					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",
