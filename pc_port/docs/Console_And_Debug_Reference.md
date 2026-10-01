@@ -196,7 +196,7 @@ when it is off.
 |---|---|
 | `xavolume <0..100>` / `xavol` | XA (FMV/voice) volume. **(saved)** |
 | `adsr [0\|1]` | SPU ADSR envelope for looping-SFX ring-out (WIP). |
-| `kf [n]` / `keyframe [n]` | Animation keyframe inspector: set/show frame (`K` toggles view, `,` `.` scrub). |
+| `kf [n]` / `keyframe [n]` | Animation keyframe viewer: bare toggles it on/off, `n` views that frame (`,` `.` scrub). |
 | `fmv` | List FMV movies (numbered). |
 | `fmv <name\|#>` | Play a movie (also aliases `intro1-2`, `end1-5`). |
 

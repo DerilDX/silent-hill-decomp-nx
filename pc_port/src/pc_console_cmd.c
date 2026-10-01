@@ -516,7 +516,7 @@ static const char* const HELP_LINES[] = {
     " invdim <pct>   off-center carousel dim strength",
     " fmv            list movies (numbered)",
     " fmv <name|#>   play a movie (also intro1-2, end1-5)",
-    " kf [n]         keyframe inspector: set/show frame (K key)",
+    " kf [n]         keyframe viewer: toggle, or view frame n",
     " playas [name]  play as another character (bare = list)",
     " minimapnomap [0|1]  minimap before the map is found: 0 hide, 1 empty panel",
     " bind <key> <cmd>[;<cmd>...]  run console commands from a key",
@@ -2309,10 +2309,11 @@ void Pc_ConsoleExec(const char* line)
             if (v < 0) v = 0;
             g_DebugAnimKf     = v;
             g_DebugAnimKfView = 1; /* setting a frame implies viewing it */
-            cprintf("keyframe %d (max %d) - K toggles, , . step", g_DebugAnimKf, maxKf);
+            cprintf("keyframe %d (max %d) - kf toggles, , . step", g_DebugAnimKf, maxKf);
         } else {
-            cprintf("keyframe %d / %d (view %s)", g_DebugAnimKf, maxKf,
-                    g_DebugAnimKfView ? "ON" : "OFF");
+            g_DebugAnimKfView = !g_DebugAnimKfView;
+            cprintf("keyframe viewer %s (keyframe %d / %d)",
+                    g_DebugAnimKfView ? "ON" : "OFF", g_DebugAnimKf, maxKf);
         }
     } else if (strcmp(cmd, "PLAYAS") == 0) {
         extern int         Pc_PlayAs_SetByName(const char* name, int save);
