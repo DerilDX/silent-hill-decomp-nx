@@ -85,6 +85,11 @@ void Font_PatchPortugueseGlyphs(void* pixels, int widthWords, int height);
 int  Font_PatchPackGlyphsHires(unsigned char* rgba, int w, int h, int scale);
 int  Font_HiresAtlasScale(int w, int h);
 
+/* Keep the decoded hi-res FONT16 pack, and re-register it for wherever the
+ * atlas lives now. Nothing here writes VRAM -- only the override table. */
+void Font_HiresCacheSet(const unsigned char* rgba, int w, int h, int bpp);
+void Font_HiresFollowAtlas(void);
+
 /* Russian replaces the whole atlas with the Cyrillic one (font_ru.inc). */
 void Font_UseRussianLayout(void);
 

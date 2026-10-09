@@ -13,6 +13,7 @@
 #include "bodyprog/text/text_draw.h"     /* GLYPH_TABLE_ASCII_OFFSET, FONT_12X16_* */
 #include "main/fileinfo.h"               /* g_GameRegion */
 #include "pc_config.h"
+#include "hires_override.h"
 #include "sh_log.h"
 
 /* US kerning table — must stay byte-identical to FONT_12X16_GLYPH_WIDTHS in
@@ -1022,6 +1023,121 @@ int Font_PatchPackGlyphsHires(unsigned char* rgba, int w, int h, int scale)
         }
     }
     return 1;
+}
+
+
+/* ---- A hi-res font pack follows FONT16 when it changes VRAM home ---------
+ *
+ * The override is matched by VRAM rect and CLUT, so importing the PAL atlas --
+ * which moves FONT16 -- leaves it matching nothing and the HD font silently
+ * reverts to the disc's own. Only English escaped it, because English is the
+ * one language that does not move the atlas.
+ *
+ * The earlier attempt re-queued a FONT16 read to make the loose-file path
+ * re-register it. That path also re-reads and re-UPLOADS the disc's own atlas,
+ * which landed an 84-cell strip and its palette on top of the 126-cell one and
+ * corrupted the glyphs. So nothing here touches VRAM: the decoded pack is kept
+ * from its first registration, re-laid for the layout now in force, and
+ * registered again for the new rect.
+ *
+ * Registering rather than editing in place means the old entry survives, which
+ * is what should happen -- it is still correct for the home it describes, so
+ * switching back to English finds it ready.
+ */
+static unsigned char* s_HiresCache;
+static int            s_HiresAtX = -1, s_HiresAtY = -1, s_HiresAtW, s_HiresAtH;
+static int            s_HiresCacheW;
+static int            s_HiresCacheH;
+static int            s_HiresBpp;
+
+void Font_HiresCacheSet(const unsigned char* rgba, int w, int h, int bpp)
+{
+    free(s_HiresCache);
+    s_HiresCache = NULL;
+
+    if (rgba == NULL || w <= 0 || h <= 0)
+        return;
+
+    s_HiresAtX = -1;
+    s_HiresAtY = -1;
+
+    s_HiresCache = (unsigned char*)malloc((size_t)w * h * 4);
+    if (s_HiresCache == NULL)
+        return;
+
+    memcpy(s_HiresCache, rgba, (size_t)w * h * 4);
+    s_HiresCacheW = w;
+    s_HiresCacheH = h;
+    s_HiresBpp    = bpp;
+}
+
+void Font_HiresFollowAtlas(void)
+{
+    unsigned char* fit  = NULL;
+    unsigned char* work = NULL;
+    int   w     = s_HiresCacheW;
+    int   h     = s_HiresCacheH;
+    int   units = 0;
+    int   rows  = 0;
+    int   scale;
+    int   vx;
+    int   vy;
+
+    if (s_HiresCache == NULL)
+        return;
+
+    /* Always on a copy: the glyph builder writes into the image, and the cache
+     * has to stay as the file decoded so the next layout starts from it. */
+    if (Font_FitHiresAtlasToLayout(s_HiresCache, s_HiresCacheW, s_HiresCacheH,
+                                   &fit, &w, &h, &units, &rows))
+    {
+        work = fit;
+    }
+    else
+    {
+        work = (unsigned char*)malloc((size_t)w * h * 4);
+        if (work == NULL)
+            return;
+        memcpy(work, s_HiresCache, (size_t)w * h * 4);
+    }
+
+    scale = Font_HiresAtlasScale(w, h);
+    if (scale < 1)
+    {
+        free(work);
+        return; /* not a whole multiple of this layout's atlas: leave it alone */
+    }
+    Font_PatchPackGlyphsHires(work, w, h, scale);
+
+    /* The native rect the image stands in for, derived from the image itself:
+     * its pixel size over the scale, with 4 pixels to a VRAM unit at 4bpp. */
+    units = (w / scale) / 4;
+    rows  = h / scale;
+
+    vx = g_Font16AtlasImg.u + ((g_Font16AtlasImg.tPage[1] & 0xF) << 6);
+    vy = g_Font16AtlasImg.v + ((g_Font16AtlasImg.tPage[1] << 4) & 0x100);
+
+    /* Nothing moved: the entry registered for this rect is still the right
+     * one, and re-uploading its texture on every language switch would be
+     * churn for no change. */
+    if (vx == s_HiresAtX && vy == s_HiresAtY &&
+        units == s_HiresAtW && rows == s_HiresAtH)
+    {
+        free(work);
+        return;
+    }
+    s_HiresAtX = vx; s_HiresAtY = vy;
+    s_HiresAtW = units; s_HiresAtH = rows;
+
+    if (HiresOverride_RegisterRGBAKeyed("1ST/FONT16 (follow)", work, w, h,
+                                        vx, vy, units, rows,
+                                        g_Font16AtlasImg.clutX,
+                                        g_Font16AtlasImg.clutY,
+                                        s_HiresBpp ? s_HiresBpp : 4, 0) == 0)
+    {
+        SH_LOG("[FONT] hi-res pack now covers (%d,%d %dx%d units)", vx, vy, units, rows);
+    }
+    free(work);
 }
 
 void Font_PatchPackGlyphs(void* pixels, int widthWords, int height)

@@ -1622,6 +1622,12 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
                                                            &rgba, &rw, &rh) == 0)
                             {
+                                /* Keep the decode: the atlas changes VRAM home
+                                 * when a pack language imports the PAL one, and
+                                 * the override has to be re-registered there
+                                 * without reading or uploading anything again. */
+                                Font_HiresCacheSet(rgba, rw, rh, discBitDepth);
+
                                 unsigned char* fit = NULL;
                                 unsigned char* use = rgba;
                                 int            fw = rw, fh = rh;
