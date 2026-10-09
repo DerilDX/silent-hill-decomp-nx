@@ -1194,8 +1194,19 @@ void Pc_LangInit(void)
  * rebinds the file table and reloads item text. */
 void Pc_LangSetLanguage(int lang)
 {
-    if (lang < 0 || lang >= Pc_LangSlotCount())
+    int packs = Pc_LangPackListCount();
+
+    /* `lang` is a LANGUAGE ID, not a row position. The two stopped being the
+     * same number when the row became a per-disc slot list, and checking an id
+     * against the ROW COUNT quietly turned every language past the fifth pack
+     * into English: with eleven rows, ids 6..10 passed and ja, pl, pt, ru and
+     * zh -- 11 and up -- were rejected. They could be highlighted and never
+     * arrived, with nothing logged, because this returns before the loader. */
+    if (lang < 0 ||
+        (lang >= LANG_PACK_FIRST && (packs <= 0 || lang - LANG_PACK_FIRST >= packs)))
+    {
         lang = 0;
+    }
 
     g_PcConfig.language = lang;
     /* The CODE, not the slot: installing or removing a pack renumbers the
