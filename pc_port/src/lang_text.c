@@ -310,6 +310,47 @@ int Pc_LangSjisActive(void)
     return Pc_LangPackActive() && LangPackFontIsKanji(Pc_LangPackFont());
 }
 
+/* A saved language CODE -> the id that code means ON THIS DISC.
+ *
+ * The config stores the code precisely so installing or removing a pack cannot
+ * move anybody's language, but the code alone does not say which id: "de" is
+ * the disc's own German on a PAL disc and the de PACK anywhere else. Resolving
+ * it in the config parser, which runs before the region is known, picked the
+ * PAL id every time -- so on a US disc the saved language resolved to an id
+ * that disc has no slot for and every boot came up English. */
+int Pc_LangIdFromCode(const char* code)
+{
+    int n;
+    int i;
+
+    if (code == NULL || code[0] == '\0' || strcmp(code, "en") == 0)
+        return 0;
+    if (strcmp(code, "en_us") == 0)
+    {
+        /* Off a PAL disc, slot 0 already IS the compiled US script, and the
+         * separate id has no row of its own there. */
+        return (g_GameRegion == Region_EUR) ? LANG_EN_US : 0;
+    }
+
+    /* The disc's own four, only where the disc actually carries them. */
+    if (g_GameRegion == Region_EUR)
+    {
+        for (i = 1; i < LANG_PACK_FIRST; i++)
+        {
+            if (i != LANG_EN_US && strcmp(code, s_LangIds[i]) == 0)
+                return i;
+        }
+    }
+
+    n = Pc_LangPackListCount();
+    for (i = 0; i < n; i++)
+    {
+        if (strcmp(code, Pc_LangPackListCode(i)) == 0)
+            return LANG_PACK_FIRST + i;
+    }
+    return 0;
+}
+
 const char* Pc_LangIdForSlot(int lang)
 {
     if (lang >= LANG_PACK_FIRST)
@@ -962,6 +1003,21 @@ void Pc_LangInit(void)
      * override or Polish layout must not survive into this one (see
      * Font_ResetLayout for the switch-away-and-back fold-up it caused). */
     Font_ResetLayout();
+
+    /* First run: turn the saved code into this disc's id. The parser could not
+     * -- it runs before the region is known and before the pack registry can
+     * be read -- so until now a saved language only survived a reboot on the
+     * disc whose own numbering happened to match. */
+    {
+        static int resolved;
+
+        if (!resolved)
+        {
+            resolved = 1;
+            if (g_PcConfig.languageCode[0] != '\0')
+                g_PcConfig.language = Pc_LangIdFromCode(g_PcConfig.languageCode);
+        }
+    }
 
     /* A PAL fan patch's retuned kerning has to be in before anything measures
      * a string. (The USA equivalent rides along with item text in FanTextInit.) */

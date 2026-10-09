@@ -393,6 +393,12 @@ typedef struct {
      * (config: cross_region_languages) */
     int crossRegionLanguages;
 
+    /* The language as the config spells it. The id it means depends on the
+     * disc -- "de" is the disc's own German on PAL and the de pack anywhere
+     * else -- and the parser runs before the region is known, so the code is
+     * kept and Pc_LangInit resolves it once. (config key: language) */
+    char languageCode[16];
+
     int menuStyle; /* TITLE_STYLE_* in pc_title_style.h; < 0 = follow the disc */
 
     /* Preferred disc region when several discs are in gamedata/: 0=auto

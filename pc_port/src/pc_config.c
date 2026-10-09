@@ -898,6 +898,10 @@ void PcConfig_Load(const char* path)
         }
         else if (strcmp(key, "language") == 0)
         {
+            /* Kept verbatim; Pc_LangInit turns it into an id once the
+             * region and the pack registry are both available. */
+            snprintf(g_PcConfig.languageCode,
+                     sizeof(g_PcConfig.languageCode), "%s", value);
             /* Language id string. Index order matches the PAL disc's
              * option-menu / VIN2-5 dir order. Unknown -> English. */
             if (strcmp(value, "en_us") == 0)   g_PcConfig.language = LANG_EN_US;
