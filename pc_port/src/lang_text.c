@@ -1192,6 +1192,8 @@ void Pc_LangInit(void)
  * nothing already-extracted goes stale; the next New Game/Load/demo picks
  * everything up through the normal per-map path). Persists the config key,
  * rebinds the file table and reloads item text. */
+static int s_Font16HomeMoved;
+
 void Pc_LangSetLanguage(int lang)
 {
     int packs = Pc_LangPackListCount();
@@ -1216,7 +1218,17 @@ void Pc_LangSetLanguage(int lang)
      * only knows the five disc languages), which is what they want: the pack
      * supplies the text, the disc supplies everything else. */
     Fs_ApplyLanguageRedirects();
-    Pc_LangInit();
+
+    /* Where FONT16 lives right now. Importing the PAL atlas moves it, and a
+     * hi-res font pack's override is registered against the rect it had when
+     * it was read -- so if this moves, that override has to be re-made. */
+    {
+        s_FsImageDesc before = g_Font16AtlasImg;
+
+        Pc_LangInit();
+        s_Font16HomeMoved = (memcmp(&before, &g_Font16AtlasImg,
+                                    sizeof(before)) != 0);
+    }
 
     /* A pack's built letters (ą ę ł ż + caps) live in atlas cells patched onto
      * the FONT16 pixels at upload time (font_region.c). FONT16 was uploaded at
@@ -1231,6 +1243,19 @@ void Pc_LangSetLanguage(int lang)
     if (g_GameRegion == Region_EUR || Font_EurAtlasImported())
     {
         Font_AtlasReloadNow();
+    }
+
+    /* A hi-res font pack is not in that upload: it is a separate override,
+     * registered against the VRAM rect FONT16 occupied when it was read. The
+     * import moves that rect, so the override stops matching and the HD font
+     * silently drops back to the disc's own -- which is what "the HD font only
+     * works in English" was. Re-reading through the QUEUE is what re-registers
+     * it, because the loose-file path lives there; the inline reload above has
+     * already put the right pixels in VRAM, so the queue arriving a frame later
+     * costs nothing visible. Both directions: into a pack and back out of it. */
+    if (g_GameRegion != Region_EUR && s_Font16HomeMoved)
+    {
+        Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
     }
 
     SH_LOG("[LANG] language switched to '%s'", Pc_LangIdForSlot(lang));

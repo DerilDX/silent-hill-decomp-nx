@@ -93,6 +93,13 @@ static int s_RussianLayoutActive;
  * so the pre-title reload PAL already does is needed here too. */
 static int s_EurAtlasImported;
 
+/* The FONT16 descriptor as this disc shipped it, saved the first time the
+ * import moves it. Clearing the import has to put it back: the descriptor is
+ * where the NEXT upload goes, so leaving it at the PAL home would send a US
+ * atlas there and read the old one from an address nothing writes any more. */
+static s_FsImageDesc s_Font16Home;
+static int           s_Font16HomeSaved;
+
 #define EUR_ATLAS_PATH "gamedata/font/eur16.tim"
 
 /* == FONT_12X16_LINE_COUNT_MAX (see font_region.h). Region-independent default
@@ -737,6 +744,12 @@ void Font_UseEurAtlas(void)
     g_Font16AtlasImg.clutX    = 816;
     g_Font16AtlasImg.clutY    = 255;
 
+    if (!s_Font16HomeSaved)
+    {
+        s_Font16Home      = g_Font16AtlasImg;
+        s_Font16HomeSaved = 1;
+    }
+
     s_EurAtlasImported = 1;
     if (g_FontLayout == &s_FontLayout_USA)
         g_FontLayout = &s_FontLayout_EUR;
@@ -1064,6 +1077,12 @@ void Font_ResetLayout(void)
     s_PolishLayoutActive = 0;
     s_RussianLayoutActive = 0;
     s_PtLayoutActive = 0;
+
+    /* Put the descriptor back where this disc keeps its own atlas, or the next
+     * upload lands at the imported home and the layout reads somewhere else. */
+    if (s_EurAtlasImported && s_Font16HomeSaved)
+        g_Font16AtlasImg = s_Font16Home;
+
     s_EurAtlasImported = 0;
     g_FontLayout = (g_GameRegion == Region_EUR) ? &s_FontLayout_EUR : &s_FontLayout_USA;
 }
