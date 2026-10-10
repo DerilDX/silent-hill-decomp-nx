@@ -3534,8 +3534,21 @@ void MainLoop(void) // 0x80032EE0
             g_PsyX_FogColor[1] = PC_WorldEnvWork.fog.color.g / 255.0f;
             g_PsyX_FogColor[2] = PC_WorldEnvWork.fog.color.b / 255.0f;
         }
-        else if (g_GameWork.gameState == 11 && g_SysWork.sysState == SysState_GameOver) {
-            /* GAME OVER renders its own death scene; the sky is meant to be black there.
+        else if (g_GameWork.gameState == 11 && g_SysWork.sysState == SysState_GameOver &&
+                 !g_PcWorldDrawnThisFrame) {
+            /* GAME OVER renders its own death scene; the sky is meant to be black there --
+             * but only once the world has stopped being drawn.
+             *
+             * The !g_PcWorldDrawnThisFrame test is the last instance of the black-sky
+             * flash described further down, and the reported one: dying snapped the sky BLACK for about a
+             * second while the death played out. SysState_GameOver_Update does not set
+             * BgmStatusFlag_Pause until its step 2, so steps 0 and 1 -- the setup frame
+             * and the half-second fade-out over the body -- still run the gameplay world
+             * update and draw (the gate is on the pause flag, not on sysState). Forcing
+             * the clear black there painted the uncovered fog/sky region black under a
+             * lit world, exactly as MenuActive used to. From step 2 the world is gone,
+             * the flag is clear, and this branch blacks the GAME OVER text and death-tip
+             * screens as it always did.
              *
              * This branch used to ALSO force black on any gameState==11 frame with
              * SysFlag_MenuActive — that was the one-frame BLACK-SKY FLASH on opening the

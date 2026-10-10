@@ -314,6 +314,12 @@ static void DarkHarry_Take(void)
      * here would pick the wrong death. */
     pl->attackReceived = NO_VALUE;
     pl->health         = Q12(0.0f);
+
+    /* The scream. The normal death has no voice of its own -- the cry a dying
+     * player hears belongs to the hit that killed them, and nothing hit them
+     * here -- so he died silently. This is the clip the Split Head death plays
+     * (player_control.c, PlayerState_InstantDeath). */
+    SD_Call(Sfx_XaAudio635);
 }
 
 /* 0 at the distance he appeared from, Q12(1.0) at arm's length. */
