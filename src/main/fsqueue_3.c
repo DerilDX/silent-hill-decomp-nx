@@ -1626,6 +1626,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                          * shape it is, because only one atlas divides it
                          * evenly. A pack already matching is untouched. */
                         int relaid = 0;
+                        int skipHires = 0;
 
                         if (FSQ_INFO_VALID(entry->info) &&
                             (int)(entry->info - &g_FileTable[0]) == FILE_1ST_FONT16_TIM)
@@ -1641,6 +1642,18 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                  * the override has to be re-registered there
                                  * without reading or uploading anything again. */
                                 Font_HiresCacheSet(rgba, rw, rh, discBitDepth);
+
+                                /* Russian replaces all 126 cells with the
+                                 * embedded Cyrillic atlas, and a hi-res pack is
+                                 * Latin art -- covering those cells draws Latin
+                                 * letterforms at Cyrillic byte values. Keep the
+                                 * decode so switching away restores HD, but
+                                 * register nothing while that layout is up. */
+                                if (Font_RussianLayoutActive())
+                                {
+                                    skipHires = 1;
+                                    relaid    = 1;
+                                }
 
                                 unsigned char* fit = NULL;
                                 unsigned char* use = rgba;
@@ -1664,7 +1677,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                 built = Font_PatchPackGlyphsHires(
                                     use, fw, fh, Font_HiresAtlasScale(fw, fh));
 
-                                if (use != rgba || built)
+                                if ((use != rgba || built) && !skipHires)
                                 {
                                     looseHires = HiresOverride_RegisterRGBAKeyed(
                                         whole, use, fw, fh,

@@ -761,6 +761,11 @@ int Font_EurAtlasImported(void)
     return s_EurAtlasImported;
 }
 
+int Font_RussianLayoutActive(void)
+{
+    return s_RussianLayoutActive;
+}
+
 void Font_UseRussianLayout(void)
 {
     if (g_FontLayout == &s_FontLayout_EUR || g_FontLayout == &s_FontLayout_USA)
@@ -1394,7 +1399,7 @@ void Font_AtlasReloadNow(void)
 #define FONT_EUR_UNITS  64
 #define FONT_COLS       21
 
-static unsigned char s_AtlasFit[FONT_EUR_UNITS * 2 * 64];
+static unsigned char s_AtlasFit[FONT_EUR_UNITS * 2 * 96];
 
 int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
 {
@@ -1408,6 +1413,17 @@ int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
         return 0; /* not a shape this knows; leave it be */
     if (isUs == !wantEur)
         return 0; /* already what the layout wants -- the common case */
+
+    /* Full height, not just the four rows the 84 US cells fill. Russian and
+     * Polish BUILD into cells 84-125, and a 64-row image has nowhere to put
+     * them -- Font_PatchRussianGlyphs refused outright ("FONT16 is 256x64,
+     * need 252x96") and left VRAM rows 64-95 holding whatever was there, which
+     * is the corruption seen on a US disc and a JP one alike, with or without
+     * a font pack installed. Rows 4-5 start blank because a US-shaped atlas
+     * has no accents to carry over; the builders fill what they need. */
+    memset(s_AtlasFit, 0,
+           wantEur ? (size_t)FONT_EUR_UNITS * 2 * 96
+                   : (size_t)FONT_US_UNITS * 2 * 16);
 
     for (c = 0; c < FONT_COLS * 4; c++)
     {
@@ -1440,7 +1456,7 @@ int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
 
     *pixels = s_AtlasFit;
     *w      = wantEur ? FONT_EUR_UNITS : FONT_US_UNITS;
-    *h      = wantEur ? 64 : 16;
+    *h      = wantEur ? 96 : 16;
     SH_LOG("[FONT] font pack re-laid from the %s atlas shape to the %s one",
            isUs ? "US" : "PAL", wantEur ? "PAL" : "US");
     return 1;

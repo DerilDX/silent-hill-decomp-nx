@@ -118,6 +118,10 @@ int  Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
                                 int* outUnits, int* outRows);
 int  Font_EurAtlasImported(void);
 
+/* The Cyrillic atlas is in force. It replaces every cell, so no Latin hi-res
+ * pack can stand in for any of them. */
+int  Font_RussianLayoutActive(void);
+
 /* Return g_FontLayout to the region base (drops any fan-patch override or the
  * Polish layout). Pc_LangInit calls it first so every language switch derives
  * its layout from a clean slate. */
