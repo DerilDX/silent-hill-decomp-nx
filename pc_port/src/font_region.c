@@ -1086,6 +1086,19 @@ void Font_HiresFollowAtlas(void)
     if (s_HiresCache == NULL)
         return;
 
+    /* Not for Russian. That pack does not ADD cells, it replaces all 126 with
+     * the embedded Cyrillic atlas -- and a hi-res pack is Latin art, so letting
+     * it cover those cells draws Latin accents where Cyrillic belongs, which is
+     * exactly what Russian looked like with an HD font on every disc. Leaving
+     * the override off means Russian draws from its own atlas, correctly, at
+     * the native resolution. */
+    if (s_RussianLayoutActive)
+    {
+        s_HiresAtX = -1;
+        s_HiresAtY = -1;
+        return;
+    }
+
     /* Always on a copy: the glyph builder writes into the image, and the cache
      * has to stay as the file decoded so the next layout starts from it. */
     if (Font_FitHiresAtlasToLayout(s_HiresCache, s_HiresCacheW, s_HiresCacheH,
