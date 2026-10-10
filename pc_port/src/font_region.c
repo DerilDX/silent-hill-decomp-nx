@@ -746,7 +746,9 @@ void Font_UseEurAtlas(void)
     if (!Font_EurGridBacked())
     {
         SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid at (768,128) "
-               "is other art on this disc, so a pack language draws base letters");
+               "is other art on this disc, so a pack language draws base letters. "
+               "The EU enhanced font pack carries the accented letters: "
+               "https://drive.google.com/drive/folders/1mmCRmH3mzuHbUKveDbwHcznsVAybRJcY");
         return;
     }
 
