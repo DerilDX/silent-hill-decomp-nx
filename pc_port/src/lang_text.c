@@ -168,7 +168,14 @@ static int PackOfferedHere(int packIdx)
         return font == LANG_PACK_FONT_SJIS || font == LANG_PACK_FONT_CHINESE;
     }
 
-    (void)font; /* the PAL atlas is imported where it is missing, so all fit */
+    /* The Latin packs draw base letters where the PAL cell grid is not
+     * readable and stay legible. A Cyrillic one has no base letters to fall
+     * back to, and Pc_LangInit refuses it -- so offering it here would only
+     * let the row select something that silently turns back into English.
+     * Hidden instead, so what is on the row is what you can actually get. */
+    if (font == LANG_PACK_FONT_CYRILLIC && !Font_EurGridBacked())
+        return 0;
+
     return 1;
 }
 

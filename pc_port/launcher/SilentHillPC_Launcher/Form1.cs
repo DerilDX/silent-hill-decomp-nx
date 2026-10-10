@@ -205,9 +205,12 @@ public partial class Form1 : Form
             _gameLangCodes.Add(code);
         }
 
+        // "en" is NOT PAL English: it is the disc's own, so on a USA disc it is
+        // US English and on every disc it is what Automatic already gives. The
+        // PAL script travels as the en_pal pack, and that is its code anywhere.
         Add("Automatic",   "auto");
         Add("US English",  "en_us");
-        Add("PAL English", "en");
+        Add("PAL English", "en_pal");
         Add("German",      "de");
         Add("French",      "fr");
         Add("Spanish",     "es");

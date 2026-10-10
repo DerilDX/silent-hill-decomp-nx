@@ -957,7 +957,7 @@ partial class Form1
             // lblGameLang
             // 
             this.lblGameLang.AutoSize = true;
-            this.lblGameLang.Location = new System.Drawing.Point(236, 525);
+            this.lblGameLang.Location = new System.Drawing.Point(232, 525);
             this.lblGameLang.Name = "lblGameLang";
             this.lblGameLang.Size = new System.Drawing.Size(84, 13);
             this.lblGameLang.TabIndex = 95;
@@ -966,9 +966,9 @@ partial class Form1
             // comboGameLang
             // 
             this.comboGameLang.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboGameLang.Location = new System.Drawing.Point(324, 521);
+            this.comboGameLang.Location = new System.Drawing.Point(330, 521);
             this.comboGameLang.Name = "comboGameLang";
-            this.comboGameLang.Size = new System.Drawing.Size(122, 21);
+            this.comboGameLang.Size = new System.Drawing.Size(118, 21);
             this.comboGameLang.TabIndex = 96;
             // 
             // lblMenu
