@@ -1414,15 +1414,17 @@ int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
     if (isUs == !wantEur)
         return 0; /* already what the layout wants -- the common case */
 
-    /* Full height, not just the four rows the 84 US cells fill. Russian and
-     * Polish BUILD into cells 84-125, and a 64-row image has nowhere to put
-     * them -- Font_PatchRussianGlyphs refused outright ("FONT16 is 256x64,
-     * need 252x96") and left VRAM rows 64-95 holding whatever was there, which
-     * is the corruption seen on a US disc and a JP one alike, with or without
-     * a font pack installed. Rows 4-5 start blank because a US-shaped atlas
-     * has no accents to carry over; the builders fill what they need. */
+    /* Four rows, NOT six, and this is load-bearing. The borrowed PAL home
+     * (768,128) is only free VRAM on a PAL disc; on a US or JP one it sits
+     * inside texture page 12, and rows 4-5 land at y192-223 on top of live map
+     * textures. Writing them destroyed the trees and the snow in map0_s00.
+     * Reading them is the other half of the same collision: cells 84-125 come
+     * back as texture data, which is the pink and garbled text in every
+     * language whose atlas is built rather than shipped. Both symptoms are one
+     * bug -- the atlas needs a home that is actually free, not a taller write
+     * into one that is not. */
     memset(s_AtlasFit, 0,
-           wantEur ? (size_t)FONT_EUR_UNITS * 2 * 96
+           wantEur ? (size_t)FONT_EUR_UNITS * 2 * 64
                    : (size_t)FONT_US_UNITS * 2 * 16);
 
     for (c = 0; c < FONT_COLS * 4; c++)
@@ -1456,7 +1458,7 @@ int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
 
     *pixels = s_AtlasFit;
     *w      = wantEur ? FONT_EUR_UNITS : FONT_US_UNITS;
-    *h      = wantEur ? 96 : 16;
+    *h      = wantEur ? 64 : 16;
     SH_LOG("[FONT] font pack re-laid from the %s atlas shape to the %s one",
            isUs ? "US" : "PAL", wantEur ? "PAL" : "US");
     return 1;
