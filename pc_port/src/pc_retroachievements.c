@@ -300,7 +300,7 @@ static void Pc_RaLoadSymbolFile(const char* path, int* found, int* missing)
         while (n > 0 && (line[n-1] == ' ' || line[n-1] == '	')) n--;
         if (n == 0 || n >= sizeof(name)) continue;
         memcpy(name, line, n);
-        name[n] = ' ';
+        name[n] = '\0';
         if (sscanf(eq + 1, " %x", &addr) != 1) continue;
         /* Only main RAM; ignore scratchpad/IO/BIOS entries. */
         if ((addr & 0xFF000000u) != 0x80000000u) continue;
@@ -516,7 +516,7 @@ static void Pc_RaNoteMiss(uint32_t address)
  */
 #define RA_BOOTID_BASE 0x024C10u
 static const unsigned char s_bootId[] = {
-    'S','L','U','S','_','0','0','7','0','7',' ',' ',' ',' ',' ',' '
+    'S','L','U','S','_','0','0','7','0','7','\0','\0','\0','\0','\0','\0'
 };
 
 static uint32_t Pc_RaReadMemory(uint32_t address, uint8_t* buffer,

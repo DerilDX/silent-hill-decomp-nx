@@ -536,7 +536,7 @@ static GLuint rab_bake_wrapped(int fontIdx, const char* text, float px, int maxW
     scale = stbtt_ScaleForPixelHeight(&s_font[fontIdx], px);
     stbtt_GetFontVMetrics(&s_font[fontIdx], &asc, &desc, &gap);
 
-    cur[0] = ' ';
+    cur[0] = '\0';
     while (*p && lineCount < maxLines)
     {
         const char* wordStart = p;
@@ -558,7 +558,7 @@ static GLuint rab_bake_wrapped(int fontIdx, const char* text, float px, int maxW
         memcpy(trial, cur, (size_t)curLen);
         if (curLen) trial[curLen] = ' ';
         memcpy(trial + curLen + (curLen ? 1 : 0), wordStart, (size_t)wordLen);
-        trial[curLen + (curLen ? 1 : 0) + wordLen] = ' ';
+        trial[curLen + (curLen ? 1 : 0) + wordLen] = '\0';
 
         for (q = trial; (cp = rab_utf8_next(&q)) != 0; )
         {
@@ -574,7 +574,7 @@ static GLuint rab_bake_wrapped(int fontIdx, const char* text, float px, int maxW
             memcpy(lines[lineCount++], cur, (size_t)curLen + 1);
             curLen = wordLen;
             memcpy(cur, wordStart, (size_t)wordLen);
-            cur[curLen] = ' ';
+            cur[curLen] = '\0';
         }
         else
         {
