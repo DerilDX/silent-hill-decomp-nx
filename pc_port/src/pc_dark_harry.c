@@ -5,14 +5,19 @@
 
 #include "game.h"
 
+#include <psyq/libgte.h>
+
 #include "bodyprog/anim.h"
 #include "bodyprog/bodyprog.h"
 #include "bodyprog/chara/chara.h"
 #include "bodyprog/collision/collision.h"
+#include "bodyprog/items.h"
 #include "bodyprog/map/map.h"
 #include "bodyprog/math/math.h"
 #include "bodyprog/player.h"
 #include "bodyprog/screen/screen_data.h" /* g_DeltaTime */
+#include "bodyprog/sound/sound_system.h"
+#include "bodyprog/view/vc_util.h"
 #include "maps/characters/harry.h"
 #include "pc_config.h"
 #include "sh_log.h"
@@ -21,9 +26,10 @@ extern void func_8003DA9C(e_CharaId charaId, GsCOORDINATE2* boneCoords, s32 arg2
 extern int  g_PcCharaGhostDraw;
 
 /* Where he is allowed to appear. The fog exteriors are the point of the thing;
- * indoors there is no "edge of visibility" to fade out of. One map for now. */
+ * indoors there is no "edge of visibility" to fade out of. Old Silent Hill,
+ * the first streets after the cafe, so the player has the radio by then. */
 static const s8 DARK_HARRY_MAPS[] = {
-    MapIdx_MAP0_S00,
+    MapIdx_MAP1_S00,
 };
 
 /* Walk speed in world units per second. Far below Harry's walk: the effect is
@@ -36,6 +42,28 @@ static const s8 DARK_HARRY_MAPS[] = {
 /* Give up if he cannot reach the player (geometry between them, player on a
  * ledge) rather than trailing around for the rest of the session. */
 #define DARK_HARRY_MAX_STALK_SEC 120
+
+/* Radio attenuation the moment he appears. The scale is backwards: 0 is full
+ * volume and 255 is silence, so this is "barely there", and it walks down to 0
+ * as he closes. */
+#define DARK_HARRY_RADIO_FAINT 232
+
+/* Brightness multiplier when he is on top of the player. Not zero -- the fade
+ * is meant to read as the light going out of the scene, not as a black screen
+ * that looks like the game died. */
+#define DARK_HARRY_DARKEN_MIN 0.12f
+
+/* Dismissal thresholds, each measured against a baseline taken when the clock
+ * last reset rather than against the previous frame. Exact-equality tests on
+ * these dropped him while the player sat perfectly still: an optical mouse
+ * reports a pixel of travel from a knock on the desk, a resting analog stick
+ * wanders a unit or two, and the player's own position creeps as the ground
+ * settles under him. Measuring from a fixed baseline also means slow drift is
+ * bounded by the threshold instead of accumulating into a dismissal. */
+#define DARK_HARRY_MOVE_TOL  Q12(0.5f) /* world units */
+#define DARK_HARRY_TURN_TOL  0x20      /* ~2.8 deg of body rotation */
+#define DARK_HARRY_LOOK_TOL  0x30      /* ~4.2 deg of camera yaw, about 8 mouse pixels */
+#define DARK_HARRY_STICK_TOL 10        /* of 128 full deflection */
 
 /* He is NOT an NPC.
  *
@@ -59,23 +87,49 @@ static SVECTOR       s_rot;
 static int           s_present; /* 0 = not here */
 static int           s_posed;   /* bones initialised for this appearance */
 
-static q19_12 s_afk;   /* seconds of no input */
-static q19_12 s_stalk; /* seconds since he appeared */
-static int    s_armed; /* 0 until the player has had control for a frame */
+static q19_12 s_afk;       /* seconds of no input */
+static q19_12 s_stalk;     /* seconds since he appeared */
+static int    s_armed;     /* 0 until the player has had control for a frame */
+static q19_12 s_spawnDist; /* how far out he started, for the approach curve */
+static q19_12 s_dist;      /* current distance to the player */
 
-/* Last-seen input state, for edge detection. */
-static s32 s_prevPosX, s_prevPosZ;
-static s16 s_prevRotY;
-static s32 s_prevCamYaw;
-static s32 s_prevStick;
+/* Effects he owns while present, each restored on the way out. */
+static int   s_radioVoice;  /* 1 = we started the static loop */
+static int   s_brightHeld;  /* 1 = s_brightBase holds the player's own setting */
+static float s_brightBase;
+
+/* Input baseline. */
+static s32 s_baseX, s_baseZ;
+static s32 s_baseRotY, s_baseCamYaw;
+static s32 s_baseLX, s_baseLY, s_baseRX, s_baseRY;
 
 int Pc_DarkHarry_Active(void)
 {
     return s_present;
 }
 
+/* Hand back the radio and the brightness. Called from every exit so he cannot
+ * leave the screen dark or the static running. */
+static void DarkHarry_EffectsClear(void)
+{
+    extern float g_cfg_brightness;
+
+    if (s_radioVoice)
+    {
+        Sd_SfxStop(Sfx_RadioStaticLoop);
+        s_radioVoice = 0;
+    }
+
+    if (s_brightHeld)
+    {
+        g_cfg_brightness = s_brightBase;
+        s_brightHeld     = 0;
+    }
+}
+
 static void DarkHarry_Despawn(void)
 {
+    DarkHarry_EffectsClear();
     s_present = 0;
     s_posed   = 0;
     s_stalk   = Q12(0.0f);
@@ -121,35 +175,54 @@ static int DarkHarry_Eligible(void)
     return 1;
 }
 
-/* Any control touched at all, including looking around. Deliberately broad --
- * the brief is that ANY input dismisses him. */
-static int DarkHarry_InputSeen(void)
+static void DarkHarry_BaselineSet(void)
 {
     extern s32 g_TpsCamYaw;
 
     const s_SubCharacter* pl = &g_SysWork.playerWork.player;
-    u32 held   = (u32)g_Controller0->heldBtnFlags | (u32)g_Controller0->clickedBtnFlags;
-    /* Both sticks in one word: look input is analog and never reaches the
-     * button flags, so without this a player nudging the camera reads as idle. */
-    s32 stick  = ((s32)g_Controller0->analogController.leftX  << 24) |
-                 ((s32)g_Controller0->analogController.leftY  << 16) |
-                 ((s32)g_Controller0->analogController.rightX <<  8) |
-                 ((s32)g_Controller0->analogController.rightY);
-    /* Mouse look moves no stick; it lands here. */
-    s32 camYaw = g_TpsCamYaw;
 
-    int moved   = (pl->position.vx != s_prevPosX) || (pl->position.vz != s_prevPosZ);
-    int turned  = (pl->rotation.vy != s_prevRotY) || (camYaw != s_prevCamYaw);
-    int nudged  = (stick != s_prevStick);
-    int pressed = (held != 0);
+    s_baseX      = pl->position.vx;
+    s_baseZ      = pl->position.vz;
+    s_baseRotY   = pl->rotation.vy;
+    s_baseCamYaw = g_TpsCamYaw;
+    s_baseLX     = g_Controller0->analogController.leftX;
+    s_baseLY     = g_Controller0->analogController.leftY;
+    s_baseRX     = g_Controller0->analogController.rightX;
+    s_baseRY     = g_Controller0->analogController.rightY;
+}
 
-    s_prevPosX   = pl->position.vx;
-    s_prevPosZ   = pl->position.vz;
-    s_prevRotY   = pl->rotation.vy;
-    s_prevCamYaw = camYaw;
-    s_prevStick  = stick;
+/* 0 = the player has not touched anything, otherwise a short name for what
+ * they touched (for the dismissal log line). */
+static const char* DarkHarry_InputSeen(void)
+{
+    extern s32 g_TpsCamYaw;
 
-    return pressed || moved || turned || nudged;
+    const s_SubCharacter* pl = &g_SysWork.playerWork.player;
+    u32 btns = (u32)g_Controller0->heldBtnFlags | (u32)g_Controller0->clickedBtnFlags;
+
+    if (btns != 0)
+        return "button";
+
+    /* Look input is analog and never reaches the button flags, so without the
+     * sticks and the camera a player nudging the view reads as idle. */
+    if (ABS((s32)g_Controller0->analogController.leftX  - s_baseLX) > DARK_HARRY_STICK_TOL ||
+        ABS((s32)g_Controller0->analogController.leftY  - s_baseLY) > DARK_HARRY_STICK_TOL ||
+        ABS((s32)g_Controller0->analogController.rightX - s_baseRX) > DARK_HARRY_STICK_TOL ||
+        ABS((s32)g_Controller0->analogController.rightY - s_baseRY) > DARK_HARRY_STICK_TOL)
+        return "stick";
+
+    /* Mouse look moves no stick; it lands in the camera yaw. */
+    if (ABS(Math_AngleNormalizeSigned(g_TpsCamYaw - s_baseCamYaw)) > DARK_HARRY_LOOK_TOL)
+        return "look";
+
+    if (ABS(Math_AngleNormalizeSigned(pl->rotation.vy - s_baseRotY)) > DARK_HARRY_TURN_TOL)
+        return "turn";
+
+    if (ABS(pl->position.vx - s_baseX) > DARK_HARRY_MOVE_TOL ||
+        ABS(pl->position.vz - s_baseZ) > DARK_HARRY_MOVE_TOL)
+        return "move";
+
+    return NULL;
 }
 
 void Pc_DarkHarry_Spawn(void)
@@ -157,8 +230,13 @@ void Pc_DarkHarry_Spawn(void)
     const s_SubCharacter* pl = &g_SysWork.playerWork.player;
     s_CollisionSurface    surf;
     q19_12                posX, posZ;
+    s32                   dx, dz;
 
     if (s_present)
+        return;
+    /* Also covers AFKEGG, so the command can report honestly instead of
+     * placing him somewhere the next frame would take him away from. */
+    if (!DarkHarry_Eligible())
         return;
 
     if (g_PcConfig.darkHarryX != 0 || g_PcConfig.darkHarryZ != 0)
@@ -196,34 +274,94 @@ void Pc_DarkHarry_Spawn(void)
     s_rot.vz = 0;
     s_rot.vy = (s16)((pl->rotation.vy + 0x800) & 0xFFF); /* facing the player */
 
-    s_present = 1;
-    s_posed   = 0;
-    s_stalk   = Q12(0.0f);
+    dx = pl->position.vx - s_pos.vx;
+    dz = pl->position.vz - s_pos.vz;
+
+    s_present   = 1;
+    s_posed     = 0;
+    s_stalk     = Q12(0.0f);
+    s_dist      = SquareRoot12((s32)((((s64)dx * dx) + ((s64)dz * dz)) >> 12));
+    s_spawnDist = s_dist;
 
     /* A continue, taken the moment he appears, so the death he is walking
      * toward costs the player nothing but the walk back. */
     g_GameWork.autosave = g_GameWork.savegame;
 
-    SH_LOG("[DARKHARRY] appeared at (%d,%d,%d), player at (%d,%d,%d)",
+    SH_LOG("[DARKHARRY] appeared at (%d,%d,%d), player at (%d,%d,%d), %d units out",
            FP_FROM(s_pos.vx, Q12_SHIFT), FP_FROM(s_pos.vy, Q12_SHIFT), FP_FROM(s_pos.vz, Q12_SHIFT),
            FP_FROM(pl->position.vx, Q12_SHIFT), FP_FROM(pl->position.vy, Q12_SHIFT),
-           FP_FROM(pl->position.vz, Q12_SHIFT));
+           FP_FROM(pl->position.vz, Q12_SHIFT), FP_FROM(s_spawnDist, Q12_SHIFT));
 }
 
-/* He has reached the player. Hand over to the game's own instant death -- the
- * one the Split Head bite uses -- so the scream, the fade and the game over
- * are the real ones rather than an imitation. */
+/* He has reached the player.
+ *
+ * NOT the Split Head instant death: that state animates out of the boss map's
+ * own anim table (field_38[D_800AF220]) and ends on one exact keyframe in it,
+ * which a map carrying no row for it can never reach -- and in map0_s00 it
+ * routes to the scripted wake-up in the cafe instead of a game over. He walked
+ * up, the state was set, and nothing happened. Zeroing health hands over to
+ * the death every enemy in the game uses, which works on every map: the scream,
+ * the collapse and the Game Over screen are the real ones. */
 static void DarkHarry_Take(void)
 {
-    s_SubCharacter* pl    = &g_SysWork.playerWork.player;
-    s_PlayerExtra*  extra = &g_SysWork.playerWork.extra;
+    s_SubCharacter* pl = &g_SysWork.playerWork.player;
 
-    SH_LOG("[DARKHARRY] reached the player - instant death");
+    SH_LOG("[DARKHARRY] reached the player - death");
     DarkHarry_Despawn();
     s_afk = Q12(0.0f);
 
+    /* 66 is the attack that routes to the drowning variant; anything stale in
+     * here would pick the wrong death. */
     pl->attackReceived = NO_VALUE;
-    Player_ExtraStateSet(pl, extra, PlayerState_InstantDeath);
+    pl->health         = Q12(0.0f);
+}
+
+/* 0 at the distance he appeared from, Q12(1.0) at arm's length. */
+static q19_12 DarkHarry_Closeness(void)
+{
+    q19_12 span = s_spawnDist - DARK_HARRY_REACH;
+    q19_12 gone;
+
+    if (span <= Q12(0.5f))
+        return Q12(1.0f);
+
+    gone = s_spawnDist - s_dist;
+    if (gone <= Q12(0.0f))
+        return Q12(0.0f);
+
+    return CLAMP((s32)(((s64)gone * Q12(1.0f)) / span), Q12(0.0f), Q12(1.0f));
+}
+
+/* The radio hears him and the light goes out of the scene, both tied to the
+ * same closeness so they arrive together. */
+static void DarkHarry_EffectsUpdate(void)
+{
+    extern float g_cfg_brightness;
+
+    q19_12 closeness = DarkHarry_Closeness();
+
+    /* Nothing to pick him up if the radio is off or not found yet, which is
+     * why he was moved to a map the player reaches it on. */
+    if (g_SavegamePtr->itemToggleFlags & ItemToggleFlag_RadioOn)
+    {
+        s32 att = DARK_HARRY_RADIO_FAINT - (s32)(((s64)DARK_HARRY_RADIO_FAINT * closeness) >> 12);
+
+        /* The static loop rather than the interference loop: npc_main fills its
+         * two radio slots in order, so the second one is free unless two real
+         * enemies are already in range. Sd_SfxAttributesUpdate restarts a
+         * stopped radio voice by itself, so this both starts and drives it. */
+        Sd_SfxAttributesUpdate(Sfx_RadioStaticLoop, Vc_StereoBalanceGet(&s_pos),
+                               (u8)CLAMP(att, 0, 255), 0);
+        s_radioVoice = 1;
+    }
+
+    if (!s_brightHeld)
+    {
+        s_brightBase = g_cfg_brightness;
+        s_brightHeld = 1;
+    }
+    g_cfg_brightness = s_brightBase *
+                       (1.0f - ((float)closeness / 4096.0f) * (1.0f - DARK_HARRY_DARKEN_MIN));
 }
 
 static void DarkHarry_Approach(void)
@@ -234,11 +372,9 @@ static void DarkHarry_Approach(void)
     s32 dz   = pl->position.vz - s_pos.vz;
     s32 yaw  = ratan2(dx, dz);
     s32 step = (s32)(((s64)DARK_HARRY_SPEED * g_DeltaTime) >> 12);
-    s32 distSq;
 
-    /* Squared compare: one multiply pair and no square root. */
-    distSq = (s32)((((s64)dx * dx) + ((s64)dz * dz)) >> 12);
-    if (distSq <= (s32)(((s64)DARK_HARRY_REACH * DARK_HARRY_REACH) >> 12))
+    s_dist = SquareRoot12((s32)((((s64)dx * dx) + ((s64)dz * dz)) >> 12));
+    if (s_dist <= DARK_HARRY_REACH)
     {
         DarkHarry_Take();
         return;
@@ -252,6 +388,8 @@ static void DarkHarry_Approach(void)
      * a floating or sunken figure breaks the effect instantly. */
     Collision_SurfaceGet(&surf, s_pos.vx, s_pos.vz);
     s_pos.vy = surf.groundHeight;
+
+    DarkHarry_EffectsUpdate();
 }
 
 void Pc_DarkHarry_Draw(void)
@@ -303,6 +441,8 @@ void Pc_DarkHarry_Draw(void)
 
 void Pc_DarkHarry_Update(void)
 {
+    const char* why;
+
     if (!DarkHarry_Eligible())
     {
         /* Leaving gameplay at all takes him with it, so he can never be left
@@ -312,7 +452,7 @@ void Pc_DarkHarry_Update(void)
         s_armed = 0;
         /* Keep the input baseline current so re-entering gameplay does not
          * read the position jump as "the player moved". */
-        (void)DarkHarry_InputSeen();
+        DarkHarry_BaselineSet();
         return;
     }
 
@@ -322,18 +462,20 @@ void Pc_DarkHarry_Update(void)
     {
         s_armed = 1;
         s_afk   = Q12(0.0f);
-        (void)DarkHarry_InputSeen();
+        DarkHarry_BaselineSet();
         return;
     }
 
-    if (DarkHarry_InputSeen())
+    why = DarkHarry_InputSeen();
+    if (why != NULL)
     {
         if (s_present)
         {
-            SH_LOG("[DARKHARRY] dismissed by input");
+            SH_LOG("[DARKHARRY] dismissed by input (%s)", why);
             DarkHarry_Despawn();
         }
         s_afk = Q12(0.0f);
+        DarkHarry_BaselineSet();
         return;
     }
 
