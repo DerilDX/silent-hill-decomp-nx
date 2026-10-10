@@ -247,6 +247,7 @@ s_PcConfig g_PcConfig = {
     .keyGfxNext  = "]",
     .keyExitGame = "Escape",
 
+    .languageCode   = "auto", /* resolved per disc in Pc_LangInit */
     .language       = 0, /* 0=en 1=de 2=fr 3=es 4=it — PAL-disc text language; USA: menu translations on fan-patched discs */
     .jpLanguage     = 0, /* 0=ja 1=zh 2=en — NTSC-J text language */
     .crossRegionLanguages = 1, /* see pc_config.h */
@@ -1372,7 +1373,7 @@ else if (strcmp(key, "enable_plugins") == 0)
             {
                 strncpy(g_PcConfig.raHashOverride, value,
                         sizeof(g_PcConfig.raHashOverride) - 1);
-                g_PcConfig.raHashOverride[sizeof(g_PcConfig.raHashOverride) - 1] = ' ';
+                g_PcConfig.raHashOverride[sizeof(g_PcConfig.raHashOverride) - 1] = '\0';
             }
         }
         else if (strcmp(key, "ra_sfx") == 0)

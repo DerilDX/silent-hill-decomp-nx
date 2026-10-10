@@ -323,7 +323,13 @@ int Pc_LangIdFromCode(const char* code)
     int n;
     int i;
 
-    if (code == NULL || code[0] == '\0' || strcmp(code, "en") == 0)
+    /* "auto" is the default and means "whatever this disc is": id 0 is already
+     * region-relative -- US English on a USA disc, PAL English on a PAL one --
+     * and an NTSC-J disc takes its text from jpLanguage, which defaults to
+     * Japanese. So the three automatic outcomes need no special cases, only a
+     * spelling that resolves here instead of being hunted for in the registry. */
+    if (code == NULL || code[0] == '\0' ||
+        strcmp(code, "auto") == 0 || strcmp(code, "en") == 0)
         return 0;
     if (strcmp(code, "en_us") == 0)
     {
@@ -1061,6 +1067,12 @@ void Pc_LangInit(void)
             SH_WARN("[LANG] %s needs the PAL cell grid, which this disc has other "
                     "art at - using this disc's own language instead", code);
             g_PcConfig.language = 0;
+
+            /* Pc_LangSetLanguage saves the key BEFORE this runs, so without
+             * this the refused code stays in config.cfg and is refused again
+             * on every boot. Automatic is where a bad combination lands. */
+            snprintf(g_PcConfig.languageCode, sizeof(g_PcConfig.languageCode), "auto");
+            PcConfig_SaveKeyValue("language", "auto");
         }
     }
 
