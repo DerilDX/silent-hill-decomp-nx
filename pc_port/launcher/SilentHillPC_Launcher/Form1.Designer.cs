@@ -164,6 +164,8 @@ partial class Form1
             this.lblUncensored = new System.Windows.Forms.Label();
             this.lblMenuType = new System.Windows.Forms.Label();
             this.comboMenuType = new System.Windows.Forms.ComboBox();
+            this.lblGameLang = new System.Windows.Forms.Label();
+            this.comboGameLang = new System.Windows.Forms.ComboBox();
             this.lblMenu = new System.Windows.Forms.Label();
             this.btnRA = new System.Windows.Forms.Button();
             this.comboRender = new System.Windows.Forms.ComboBox();
@@ -952,6 +954,23 @@ partial class Form1
             this.comboMenuType.Size = new System.Drawing.Size(72, 21);
             this.comboMenuType.TabIndex = 94;
             // 
+            // lblGameLang
+            // 
+            this.lblGameLang.AutoSize = true;
+            this.lblGameLang.Location = new System.Drawing.Point(236, 525);
+            this.lblGameLang.Name = "lblGameLang";
+            this.lblGameLang.Size = new System.Drawing.Size(84, 13);
+            this.lblGameLang.TabIndex = 95;
+            this.lblGameLang.Text = "Game Language:";
+            // 
+            // comboGameLang
+            // 
+            this.comboGameLang.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.comboGameLang.Location = new System.Drawing.Point(324, 521);
+            this.comboGameLang.Name = "comboGameLang";
+            this.comboGameLang.Size = new System.Drawing.Size(122, 21);
+            this.comboGameLang.TabIndex = 96;
+            // 
             // lblMenu
             // 
             this.lblMenu.AutoSize = true;
@@ -1046,6 +1065,8 @@ partial class Form1
             this.Controls.Add(this.lblUncensored);
             this.Controls.Add(this.lblMenuType);
             this.Controls.Add(this.comboMenuType);
+            this.Controls.Add(this.lblGameLang);
+            this.Controls.Add(this.comboGameLang);
             this.Controls.Add(this.chkUncensored);
             this.Controls.Add(this.checkBox1);
             this.Controls.Add(this.label1);
@@ -1141,6 +1162,8 @@ partial class Form1
     private Label lblUncensored;
     private Label lblMenuType;
     private ComboBox comboMenuType;
+    private Label lblGameLang;
+    private ComboBox comboGameLang;
     private Label lblMenu;
     private Button btnRA;
     private ComboBox comboRender;

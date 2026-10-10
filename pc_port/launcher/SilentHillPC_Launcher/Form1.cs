@@ -182,6 +182,66 @@ public partial class Form1 : Form
     /// translation — resolution, refresh rate, FPS cap, disc image and level are
     /// left alone because their selected text is what gets written to config.cfg.
     /// </summary>
+    /// Codes parallel to comboGameLang's items. Never read the item text: it is
+    /// translated, the codes are not.
+    private readonly List<string> _gameLangCodes = new List<string>();
+
+    /// Build the Game Language row: Automatic, the languages every disc family
+    /// carries, then whatever packs are installed in gamedata/lang.
+    ///
+    /// The launcher does not know which disc will be mounted, so it offers all
+    /// of them and lets the game decide -- it already falls back to Automatic
+    /// for anything this disc cannot render, and says so in its log.
+    private void BuildGameLangList()
+    {
+        comboGameLang.Items.Clear();
+        _gameLangCodes.Clear();
+
+        void Add(string name, string code)
+        {
+            if (_gameLangCodes.Any(c => string.Equals(c, code, StringComparison.OrdinalIgnoreCase)))
+                return;
+            comboGameLang.Items.Add(name);
+            _gameLangCodes.Add(code);
+        }
+
+        Add("Automatic",   "auto");
+        Add("US English",  "en_us");
+        Add("PAL English", "en");
+        Add("German",      "de");
+        Add("French",      "fr");
+        Add("Spanish",     "es");
+        Add("Italian",     "it");
+
+        try
+        {
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gamedata", "lang");
+
+            if (Directory.Exists(dir))
+            {
+                foreach (string f in Directory.GetFiles(dir, "*.lang").OrderBy(x => x))
+                {
+                    string code = null, name = null;
+
+                    // Only the headers, which the format puts first.
+                    foreach (string line in File.ReadLines(f, Encoding.UTF8).Take(16))
+                    {
+                        if (line.StartsWith("!code=")) code = line.Substring(6).Trim();
+                        else if (line.StartsWith("!name=")) name = line.Substring(6).Trim();
+                        if (code != null && name != null) break;
+                    }
+
+                    if (!string.IsNullOrEmpty(code))
+                        Add(string.IsNullOrEmpty(name) ? code : name, code);
+                }
+            }
+        }
+        catch
+        {
+            // An unreadable pack folder costs the extra rows, nothing else.
+        }
+    }
+
     private void LocalizeValueLists()
     {
         // "はい"/"いいえ" and "Nein" are wider than "Yes"/"No", and each of these
@@ -190,6 +250,7 @@ public partial class Form1 : Form
                                   pgxpYes, pgxpNo, loggingYes, loggingNo, consoleYes, consoleNo })
             r.AutoSize = true;
 
+        Loc.LocalizeItems(comboGameLang);
         Loc.LocalizeItems(comboFullscreen);
         Loc.LocalizeItems(comboSkipIntros);
         Loc.LocalizeItems(comboPillarbox);
@@ -730,6 +791,15 @@ public partial class Form1 : Form
         Set(comboMenuType, Loc.T("Which main menu the game shows: the US picture, "
                                 + "PAL's fog-only title, or the Japanese logo. "
                                 + "Auto follows the disc."));
+        const string gameLangTip =
+            "What language the game itself runs in. Automatic follows the disc:\n"
+          + "US English on a USA disc, PAL English on a PAL one, Japanese on NTSC-J.\n\n"
+          + "Languages with accented or non-Latin letters need the EU enhanced font\n"
+          + "to show them on a USA or NTSC-J disc; without it they fall back to plain\n"
+          + "letters. The EU font pack by ivanproff:\n"
+          + "https://drive.google.com/drive/folders/1mmCRmH3mzuHbUKveDbwHcznsVAybRJcY";
+        Set(lblGameLang,   Loc.T(gameLangTip));
+        Set(comboGameLang, Loc.T(gameLangTip));
         Set(lblUncensored,  uncensoredTip);
         Set(chkUncensored,  uncensoredTip);
 
@@ -1044,6 +1114,19 @@ public partial class Form1 : Form
         // still `uncensored`, so the mapping is inverted here. Default 0
         // (censored) → checked, so the box defaults on.
         chkUncensored.Checked = config.Get("uncensored", "0") == "0";
+
+        // Game language. Built once, then selected by code, because the row is
+        // a mix of what every disc carries and whatever packs are installed.
+        BuildGameLangList();
+        {
+            string gl = config.Get("language", "auto").Trim();
+            int    at = _gameLangCodes.FindIndex(
+                            c => string.Equals(c, gl, StringComparison.OrdinalIgnoreCase));
+
+            // An unknown or removed code lands on Automatic rather than on
+            // whatever happens to be first, which is what the game does too.
+            comboGameLang.SelectedIndex = at >= 0 ? at : 0;
+        }
 
         // Main-menu style. "auto" is the disc's own, which is what every
         // existing config says and what the game defaults to, so it stays the
@@ -1370,6 +1453,12 @@ public partial class Form1 : Form
 
         config.Set("randomizer", chkRandomizer.Checked ? "1" : "0");
         config.Set("uncensored", chkUncensored.Checked ? "0" : "1"); // checked = censored
+
+        // By INDEX into the parallel code list, for the same reason as below:
+        // the visible names are translated, the codes are not.
+        if (comboGameLang.SelectedIndex >= 0 &&
+            comboGameLang.SelectedIndex < _gameLangCodes.Count)
+            config.Set("language", _gameLangCodes[comboGameLang.SelectedIndex]);
 
         // Read by INDEX, never by item text: the items are region codes the
         // game parses, and Loc must never be able to change what lands here.

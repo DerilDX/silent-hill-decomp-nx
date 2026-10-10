@@ -39,6 +39,11 @@ namespace SilentHillPC_Launcher
             { "Reset",             new[]{ "Reiniciar", "Repor", "Réinit.", "Zurück", "Reset", "リセット", "重置", "Сброс", "Resetuj" } },
 
             // ---- main window: setting labels ----
+            { "Game Language:",  new[]{ "Idioma del juego:", "Idioma do jogo:", "Langue du jeu :", "Spielsprache:", "Lingua di gioco:", "ゲーム言語:", "游戏语言:", "Язык игры:", "Język gry:" } },
+            { "Menu Type:",      new[]{ "Tipo de menú:", "Tipo de menu:", "Type de menu :", "Menütyp:", "Tipo di menu:", "メニュー種類:", "菜单类型:", "Тип меню:", "Typ menu:" } },
+            { "Automatic",       new[]{ "Automático", "Automático", "Automatique", "Automatisch", "Automatico", "自動", "自动", "Авто", "Automatycznie" } },
+            { "US English",      new[]{ "Inglés (EE.UU.)", "Inglês (EUA)", "Anglais (US)", "Englisch (US)", "Inglese (USA)", "英語(米)", "英语(美)", "Англ. (США)", "Angielski (US)" } },
+            { "PAL English",     new[]{ "Inglés (PAL)", "Inglês (PAL)", "Anglais (PAL)", "Englisch (PAL)", "Inglese (PAL)", "英語(PAL)", "英语(PAL)", "Англ. (PAL)", "Angielski (PAL)" } },
             { "Skip Intros:",      new[]{ "Saltar intros:", "Pular intros:", "Intros :", "Intros:", "Salta intro:", "イントロ:", "跳过开场:", "Заставки:", "Pomiń intra:" } },
             { "Display:",          new[]{ "Pantalla:", "Tela:", "Écran :", "Anzeige:", "Schermo:", "ディスプレイ:", "显示器:", "Дисплей:", "Ekran:" } },
             { "VSync:",            new[]{ "VSync:", "VSync:", "VSync :", "VSync:", "VSync:", "垂直同期:", "垂直同步:", "Вертик. синхр.:", "VSync:" } },
