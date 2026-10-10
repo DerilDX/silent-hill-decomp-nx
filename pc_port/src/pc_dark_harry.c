@@ -26,10 +26,10 @@ extern void func_8003DA9C(e_CharaId charaId, GsCOORDINATE2* boneCoords, s32 arg2
 extern int  g_PcCharaGhostDraw;
 
 /* Where he is allowed to appear. The fog exteriors are the point of the thing;
- * indoors there is no "edge of visibility" to fade out of. Old Silent Hill,
- * the first streets after the cafe, so the player has the radio by then. */
+ * indoors there is no "edge of visibility" to fade out of. The streets, where
+ * the player has had the radio for a long time. */
 static const s8 DARK_HARRY_MAPS[] = {
-    MapIdx_MAP1_S00,
+    MapIdx_MAP2_S00,
 };
 
 /* Walk speed in world units per second. Far below Harry's walk: the effect is

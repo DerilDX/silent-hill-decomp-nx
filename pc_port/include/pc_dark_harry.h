@@ -25,8 +25,7 @@
  * darkens as he closes). Neither is written anywhere else in here.
  *
  * Gated on g_PcConfig.darkHarry, and additionally restricted to the maps listed
- * in DARK_HARRY_MAPS (currently map1_s00, the first Old Silent Hill streets --
- * the player has the radio by then). */
+ * in DARK_HARRY_MAPS (currently map2_s00, the streets). */
 
 /* Once per frame from the main loop. Does nothing at all while the feature is
  * off, out of its map, or the player is not in normal gameplay control. */
