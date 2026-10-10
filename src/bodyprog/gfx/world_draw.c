@@ -1,7 +1,6 @@
 #include "game.h"
 #ifdef SH_PC_PORT
 #include "pc_pick.h"
-#include "pc_dark_harry.h"
 #include <stdio.h>
 #include "sh_log.h"
 #include "pc_config.h"
@@ -1696,20 +1695,9 @@ void func_8003DA9C(e_CharaId charaId, GsCOORDINATE2* boneCoords, s32 arg2, q3_12
     { extern int g_PcCharaPrimProbe, g_PcCharaPrimProbeActive;
       g_PcCharaPrimProbeActive = (g_PcCharaPrimProbe != 0 && charaId == g_PcCharaPrimProbe); }
 #endif
-#ifdef SH_PC_PORT
-    /* Dark Harry easter egg (pc_dark_harry.c): draw that one NPC see-through.
-     * Consume-once around the draw, exactly like g_PcCharaDrawScale above, so
-     * no other character can inherit it. Delete with the feature. */
-    { extern int g_PcCharaGhostDraw;
-      g_PcCharaGhostDraw = (charaId == Chara_Harry &&
-                            boneCoords != g_SysWork.playerBoneCoords &&
-                            Pc_DarkHarry_Active()); }
-#endif
     func_80045534(&g_WorldGfxWork.registeredCharaModels[charaId]->skeleton, &g_OrderingTable0[g_ActiveBufferIdx], arg2,
                   boneCoords, Q8_TO_Q12(CHARA_FILE_INFOS[charaId].field_6), ret, CHARA_FILE_INFOS[charaId].field_8);
-#ifdef SH_PC_PORT
-    { extern int g_PcCharaGhostDraw; g_PcCharaGhostDraw = 0; }
-#endif
+
 #ifdef SH_PC_PORT
     g_PcCharaDrawScale = Q12(1.0f);
 #endif

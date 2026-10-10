@@ -26,6 +26,7 @@ extern s_WorldEnvWork g_WorldEnvWork;
 #include "bodyprog/events/npc_main.h"
 #ifdef SH_PC_PORT
 #include "pc_pick.h"
+#include "pc_dark_harry.h"
 #endif
 #include "bodyprog/events/radio.h"
 #include "bodyprog/demo.h"
@@ -366,6 +367,9 @@ void GameState_InGame_Update(void) // 0x80038BD4
              * in bodyprog_80055028.c), so the full fog+lighting pipeline
              * is safe for characters. */
             Pc_Pick_CharaPreDraw(&g_SysWork.playerWork.player, -1, g_SysWork.playerBoneCoords);
+            /* Dark Harry easter egg (pc_dark_harry.c): drawn here with the
+             * other world characters. No-op unless he is present. */
+            Pc_DarkHarry_Draw();
             func_8003DA9C(Chara_Harry, g_SysWork.playerBoneCoords, 1, g_SysWork.playerWork.player.timer_C6, 0);
 #else
             func_8003DA9C(Chara_Harry, g_SysWork.playerBoneCoords, 1, g_SysWork.playerWork.player.timer_C6, 0);

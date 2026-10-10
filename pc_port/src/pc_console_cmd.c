@@ -25,6 +25,7 @@
  *   INFO                 - name, health, position and state of the selection
  *   GOTO / BRING         - Harry to the selection / the selected enemy to Harry
  *   FREEZE [0|1|ALL|NONE] - hold enemies still (UNFREEZE = FREEZE 0)
+ *   AFKEGG                  - trigger the Dark Harry easter egg now (debug)
  *   NOCOL / NOCOLLIDE [0|1] - phase the selection (player if none) out of
  *                             collision except the ground
  *   BIND <key> <cmds>    - run one or more console commands from a key;
@@ -1467,6 +1468,14 @@ void Pc_ConsoleExec(const char* line)
         cmd_select(arg);
     } else if (strcmp(cmd, "SCALE") == 0) {
         cmd_scale(arg);
+    } else if (strcmp(cmd, "AFKEGG") == 0) {
+        /* Debug trigger for the Dark Harry easter egg (pc_dark_harry.c), so it
+         * can be tested without standing still for five minutes. */
+        extern void Pc_DarkHarry_Spawn(void);
+        extern int  Pc_DarkHarry_Active(void);
+        Pc_DarkHarry_Spawn();
+        cprintf(Pc_DarkHarry_Active() ? "afkegg: he is here"
+                                      : "afkegg: refused (wrong map, or not in normal gameplay)");
     } else if (strcmp(cmd, "NOCOL") == 0 || strcmp(cmd, "NOCOLLIDE") == 0) {
         cmd_nocol(arg);
     } else if (strcmp(cmd, "HEALTH") == 0 || strcmp(cmd, "HP") == 0) {

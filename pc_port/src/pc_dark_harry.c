@@ -5,6 +5,7 @@
 
 #include "game.h"
 
+#include "bodyprog/anim.h"
 #include "bodyprog/bodyprog.h"
 #include "bodyprog/chara/chara.h"
 #include "bodyprog/collision/collision.h"
@@ -16,54 +17,68 @@
 #include "pc_config.h"
 #include "sh_log.h"
 
+extern void func_8003DA9C(e_CharaId charaId, GsCOORDINATE2* boneCoords, s32 arg2, q3_12 timer, s32 arg4);
+extern int  g_PcCharaGhostDraw;
+
 /* Where he is allowed to appear. The fog exteriors are the point of the thing;
  * indoors there is no "edge of visibility" to fade out of. One map for now. */
 static const s8 DARK_HARRY_MAPS[] = {
     MapIdx_MAP0_S00,
 };
 
-/* Walk speed, in world units per second. Deliberately far below Harry's walk:
- * the whole effect is noticing that the shape is nearer than it was. */
+/* Walk speed in world units per second. Far below Harry's walk: the effect is
+ * noticing the shape is nearer than it was, not watching something approach. */
 #define DARK_HARRY_SPEED Q12(0.35f)
 
-/* How close he has to get to take you. Harry's own collision radius is 0.3, so
- * this is "close enough to touch" without needing the collision system. */
+/* Close enough to touch. Harry's own collision radius is 0.3. */
 #define DARK_HARRY_REACH Q12(0.9f)
 
-/* Give up and reset if he somehow cannot reach the player (geometry in the way,
- * player on a ledge). Without this he would trail around forever. */
+/* Give up if he cannot reach the player (geometry between them, player on a
+ * ledge) rather than trailing around for the rest of the session. */
 #define DARK_HARRY_MAX_STALK_SEC 120
 
-static int    s_slot = -1;      /* NPC slot he occupies, -1 = not present */
-static q19_12 s_afk;            /* seconds of no input */
-static q19_12 s_stalk;          /* seconds since he appeared */
-static int    s_armed;          /* 0 until the player has been in control once */
+/* He is NOT an NPC.
+ *
+ * The obvious route -- take an NPC slot like the console SPAWN command -- does
+ * not work for Harry: g_CharaAnimDataIdxs[Chara_Harry] is never set, because
+ * the player's animation loads through the player's own path (FS_BUFFER_0 and
+ * g_SysWork.playerBoneCoords) rather than into one of the NPC anim slots.
+ * npc_main sees animLoaded == false and skips the slot with `continue`, so the
+ * model is never drawn. The first build did exactly that: he spawned, walked
+ * over and killed the player while being completely invisible.
+ *
+ * So he carries his own model state and bone coords and is drawn directly.
+ * That also keeps him out of npc_main, collision and the spawn bookkeeping
+ * entirely, which suits something that is not part of the game. */
+#define DARK_HARRY_BONE_MAX 32
+
+static s_Model       s_model;
+static GsCOORDINATE2 s_bones[DARK_HARRY_BONE_MAX];
+static VECTOR3       s_pos;
+static SVECTOR       s_rot;
+static int           s_present; /* 0 = not here */
+static int           s_posed;   /* bones initialised for this appearance */
+
+static q19_12 s_afk;   /* seconds of no input */
+static q19_12 s_stalk; /* seconds since he appeared */
+static int    s_armed; /* 0 until the player has had control for a frame */
 
 /* Last-seen input state, for edge detection. */
-static u32    s_prevHeld;
-static s32    s_prevPosX, s_prevPosZ;
-static s16    s_prevRotY;
-static s32    s_prevCamYaw;
-static s32    s_prevStick;
+static s32 s_prevPosX, s_prevPosZ;
+static s16 s_prevRotY;
+static s32 s_prevCamYaw;
+static s32 s_prevStick;
 
 int Pc_DarkHarry_Active(void)
 {
-    return s_slot >= 0;
+    return s_present;
 }
 
 static void DarkHarry_Despawn(void)
 {
-    if (s_slot >= 0)
-    {
-        s_SubCharacter* npc = &g_SysWork.npcs[s_slot];
-
-        CLEAR_FLAG(&g_SysWork.npcFlags, s_slot);
-        CLEAR_FLAG(g_SysWork.field_228C, s_slot);
-        memset(npc, 0, sizeof(*npc));
-        npc->model.charaId = Chara_None;
-        s_slot = -1;
-    }
-    s_stalk = Q12(0.0f);
+    s_present = 0;
+    s_posed   = 0;
+    s_stalk   = Q12(0.0f);
 }
 
 void Pc_DarkHarry_Reset(void)
@@ -75,8 +90,8 @@ void Pc_DarkHarry_Reset(void)
 
 /* Normal gameplay, on one of his maps, player alive and actually driving.
  * Anything scripted (cutscene, message box, inventory, a door, a death) fails
- * this, which is what keeps the clock from running when the player is not
- * really standing still of their own accord. */
+ * this, which keeps the clock from running when the player is not standing
+ * still of their own accord. */
 static int DarkHarry_Eligible(void)
 {
     int i;
@@ -100,8 +115,6 @@ static int DarkHarry_Eligible(void)
 
     if (g_SysWork.playerWork.player.health <= Q12(0.0f))
         return 0;
-
-    /* Mid-reaction, mid-cutscene-pose or any non-idle state: not AFK, busy. */
     if (g_SysWork.playerWork.extra.state != PlayerState_None)
         return 0;
 
@@ -115,23 +128,21 @@ static int DarkHarry_InputSeen(void)
     extern s32 g_TpsCamYaw;
 
     const s_SubCharacter* pl = &g_SysWork.playerWork.player;
-    u32  held   = (u32)g_Controller0->heldBtnFlags | (u32)g_Controller0->clickedBtnFlags;
+    u32 held   = (u32)g_Controller0->heldBtnFlags | (u32)g_Controller0->clickedBtnFlags;
     /* Both sticks in one word: look input is analog and never reaches the
-     * button flags, so without this a player nudging the camera would still
-     * count as idle. */
-    s32  stick  = ((s32)g_Controller0->analogController.leftX  << 24) |
-                  ((s32)g_Controller0->analogController.leftY  << 16) |
-                  ((s32)g_Controller0->analogController.rightX <<  8) |
-                  ((s32)g_Controller0->analogController.rightY);
-    /* Mouse look does not move a stick either; it lands here. */
-    s32  camYaw = g_TpsCamYaw;
+     * button flags, so without this a player nudging the camera reads as idle. */
+    s32 stick  = ((s32)g_Controller0->analogController.leftX  << 24) |
+                 ((s32)g_Controller0->analogController.leftY  << 16) |
+                 ((s32)g_Controller0->analogController.rightX <<  8) |
+                 ((s32)g_Controller0->analogController.rightY);
+    /* Mouse look moves no stick; it lands here. */
+    s32 camYaw = g_TpsCamYaw;
 
-    int  moved   = (pl->position.vx != s_prevPosX) || (pl->position.vz != s_prevPosZ);
-    int  turned  = (pl->rotation.vy != s_prevRotY) || (camYaw != s_prevCamYaw);
-    int  nudged  = (stick != s_prevStick);
-    int  pressed = (held != 0);
+    int moved   = (pl->position.vx != s_prevPosX) || (pl->position.vz != s_prevPosZ);
+    int turned  = (pl->rotation.vy != s_prevRotY) || (camYaw != s_prevCamYaw);
+    int nudged  = (stick != s_prevStick);
+    int pressed = (held != 0);
 
-    s_prevHeld   = held;
     s_prevPosX   = pl->position.vx;
     s_prevPosZ   = pl->position.vz;
     s_prevRotY   = pl->rotation.vy;
@@ -141,72 +152,67 @@ static int DarkHarry_InputSeen(void)
     return pressed || moved || turned || nudged;
 }
 
-/* Out at the fog wall, dead ahead, so he is a silhouette resolving out of it
- * rather than something that popped into an empty street. */
-static void DarkHarry_Spawn(void)
+void Pc_DarkHarry_Spawn(void)
 {
     const s_SubCharacter* pl = &g_SysWork.playerWork.player;
     s_CollisionSurface    surf;
-    q19_12                dist, posX, posZ;
-    s32                   sn, cs;
-    int                   i;
+    q19_12                posX, posZ;
 
-    for (i = 0; i < NPC_COUNT_MAX; i++)
+    if (s_present)
+        return;
+
+    if (g_PcConfig.darkHarryX != 0 || g_PcConfig.darkHarryZ != 0)
     {
-        if (g_SysWork.npcs[i].model.charaId == Chara_None)
-            break;
+        /* A fixed landmark, which is the point: he belongs to a place in the
+         * map rather than to wherever the player happens to be facing. Config
+         * is in hundredths of a world unit. */
+        posX = (q19_12)(((s64)g_PcConfig.darkHarryX * Q12(1.0f)) / 100);
+        posZ = (q19_12)(((s64)g_PcConfig.darkHarryZ * Q12(1.0f)) / 100);
     }
-    if (i >= NPC_COUNT_MAX)
-        return; /* room is full of real monsters; he can wait */
+    else
+    {
+        /* No landmark configured yet: straight ahead at the fog wall, so the
+         * feature still does something. */
+        q19_12 dist = Q12(1.0f) * g_PcConfig.darkHarryDistance;
 
-    /* His model is Harry's, which is always resident, so unlike a console
-     * spawn there is nothing to stream and no "not in this map" case. */
-    sn   = Math_Sin(pl->rotation.vy);
-    cs   = Math_Cos(pl->rotation.vy);
-    dist = Q12((float)1.0f) * g_PcConfig.darkHarryDistance;
-    posX = pl->position.vx + (s32)(((s64)dist * sn) >> 12);
-    posZ = pl->position.vz + (s32)(((s64)dist * cs) >> 12);
+        posX = pl->position.vx + (s32)(((s64)dist * Math_Sin(pl->rotation.vy)) >> 12);
+        posZ = pl->position.vz + (s32)(((s64)dist * Math_Cos(pl->rotation.vy)) >> 12);
+    }
 
-    memset(&g_SysWork.npcs[i], 0, sizeof(s_SubCharacter));
-    g_SysWork.npcs[i].model.charaId      = Chara_Harry;
-    g_SysWork.npcs[i].model.controlState = 0;
-    g_SysWork.npcs[i].model.stateStep    = 0;
-    g_SysWork.npcs[i].field_40           = (s8)i;
-    g_SysWork.npcs[i].position.vx        = posX;
-    g_SysWork.npcs[i].position.vz        = posZ;
+    memset(&s_model, 0, sizeof(s_model));
+    s_model.charaId      = Chara_Harry;
+    s_model.controlState = 0;
+    s_model.stateStep    = 0;
+    s_model.anim.status  = ANIM_STATUS(HarryAnim_Still, false);
+    s_model.anim.flags  |= AnimFlag_Visible | AnimFlag_Unlocked;
+    s_model.anim.time    = Q12(0.0f);
+
+    s_pos.vx = posX;
+    s_pos.vz = posZ;
     Collision_SurfaceGet(&surf, posX, posZ);
-    g_SysWork.npcs[i].position.vy        = surf.groundHeight;
-    /* Facing the player from the moment he exists. */
-    g_SysWork.npcs[i].rotation.vy        = (s16)((pl->rotation.vy + 0x800) & 0xFFF);
-    g_SysWork.npcs[i].model.anim.status  = ANIM_STATUS(HarryAnim_Still, false);
-    g_SysWork.npcs[i].model.anim.flags  |= AnimFlag_Visible;
-    /* Nothing may collide with him or hit him: he is not a monster, and a
-     * monster walking into him would shove him off his approach. */
-    g_SysWork.npcs[i].collision.state    = CharaCollisionState_Ignore;
+    s_pos.vy = surf.groundHeight;
 
-    SET_FLAG(&g_SysWork.npcFlags, i);
-    SET_FLAG(g_SysWork.field_228C, i);
-    {
-        /* Same disclaimer as a console spawn: no savegame identity, so killing
-         * or clearing him must not dead-flag a real spawn row. */
-        extern unsigned char g_PcNpcDebugSpawned[];
-        g_PcNpcDebugSpawned[i] = 1;
-    }
+    s_rot.vx = 0;
+    s_rot.vz = 0;
+    s_rot.vy = (s16)((pl->rotation.vy + 0x800) & 0xFFF); /* facing the player */
 
-    s_slot  = i;
-    s_stalk = Q12(0.0f);
+    s_present = 1;
+    s_posed   = 0;
+    s_stalk   = Q12(0.0f);
 
     /* A continue, taken the moment he appears, so the death he is walking
      * toward costs the player nothing but the walk back. */
     g_GameWork.autosave = g_GameWork.savegame;
 
-    SH_LOG("[DARKHARRY] appeared in npc[%d] at %d units, map %d",
-           i, (int)g_PcConfig.darkHarryDistance, (int)g_SavegamePtr->mapIdx);
+    SH_LOG("[DARKHARRY] appeared at (%d,%d,%d), player at (%d,%d,%d)",
+           FP_FROM(s_pos.vx, Q12_SHIFT), FP_FROM(s_pos.vy, Q12_SHIFT), FP_FROM(s_pos.vz, Q12_SHIFT),
+           FP_FROM(pl->position.vx, Q12_SHIFT), FP_FROM(pl->position.vy, Q12_SHIFT),
+           FP_FROM(pl->position.vz, Q12_SHIFT));
 }
 
 /* He has reached the player. Hand over to the game's own instant death -- the
- * same one the Split Head bite uses -- so the scream, the fade and the game
- * over are the real ones rather than an imitation. */
+ * one the Split Head bite uses -- so the scream, the fade and the game over
+ * are the real ones rather than an imitation. */
 static void DarkHarry_Take(void)
 {
     s_SubCharacter* pl    = &g_SysWork.playerWork.player;
@@ -222,16 +228,15 @@ static void DarkHarry_Take(void)
 
 static void DarkHarry_Approach(void)
 {
-    s_SubCharacter*       me = &g_SysWork.npcs[s_slot];
     const s_SubCharacter* pl = &g_SysWork.playerWork.player;
     s_CollisionSurface    surf;
-    s32 dx    = pl->position.vx - me->position.vx;
-    s32 dz    = pl->position.vz - me->position.vz;
-    s32 yaw   = ratan2(dx, dz);
-    s32 step  = (s32)(((s64)DARK_HARRY_SPEED * g_DeltaTime) >> 12);
+    s32 dx   = pl->position.vx - s_pos.vx;
+    s32 dz   = pl->position.vz - s_pos.vz;
+    s32 yaw  = ratan2(dx, dz);
+    s32 step = (s32)(((s64)DARK_HARRY_SPEED * g_DeltaTime) >> 12);
     s32 distSq;
 
-    /* Squared compare keeps this to one multiply pair and no square root. */
+    /* Squared compare: one multiply pair and no square root. */
     distSq = (s32)((((s64)dx * dx) + ((s64)dz * dz)) >> 12);
     if (distSq <= (s32)(((s64)DARK_HARRY_REACH * DARK_HARRY_REACH) >> 12))
     {
@@ -239,17 +244,61 @@ static void DarkHarry_Approach(void)
         return;
     }
 
-    me->rotation.vy = (s16)(yaw & 0xFFF);
-    me->position.vx += (s32)(((s64)step * Math_Sin(yaw)) >> 12);
-    me->position.vz += (s32)(((s64)step * Math_Cos(yaw)) >> 12);
+    s_rot.vy  = (s16)(yaw & 0xFFF);
+    s_pos.vx += (s32)(((s64)step * Math_Sin(yaw)) >> 12);
+    s_pos.vz += (s32)(((s64)step * Math_Cos(yaw)) >> 12);
 
     /* Follow the ground rather than the collision system: he is not solid, and
      * a floating or sunken figure breaks the effect instantly. */
-    Collision_SurfaceGet(&surf, me->position.vx, me->position.vz);
-    me->position.vy = surf.groundHeight;
+    Collision_SurfaceGet(&surf, s_pos.vx, s_pos.vz);
+    s_pos.vy = surf.groundHeight;
+}
 
-    me->model.anim.status = ANIM_STATUS(HarryAnim_Still, false);
-    me->model.anim.flags |= AnimFlag_Visible;
+void Pc_DarkHarry_Draw(void)
+{
+    s_AnmHeader* hdr = (s_AnmHeader*)FS_BUFFER_0;
+    if (!s_present || hdr == NULL)
+        return;
+
+    if (!s_posed)
+    {
+        /* Harry's skeleton laid out in OUR coords, not the player's, so posing
+         * him cannot disturb the player's own pose. */
+        if ((int)hdr->boneCount > DARK_HARRY_BONE_MAX)
+        {
+            SH_LOG("[DARKHARRY] skeleton needs %d bones, room for %d - not drawing",
+                   (int)hdr->boneCount, DARK_HARRY_BONE_MAX);
+            DarkHarry_Despawn();
+            return;
+        }
+        Anim_BoneInit(hdr, s_bones);
+        s_posed = 1;
+    }
+
+    /* Pose him from Harry's OWN anim table, which is exactly what
+     * Player_AnimUpdate does for the player: his idle lives in the player's
+     * bank, not in the NPC "statue" idle list (that one is for the human
+     * cutscene actors and has no Harry entry). Playback writes bones 1+, so
+     * the root placement below is still ours to do. */
+    {
+        s_AnimInfo* info = &HARRY_BASE_ANIM_INFOS[s_model.anim.status];
+
+        if (info->playbackFunc != NULL)
+            info->playbackFunc(&s_model, hdr, s_bones, info);
+        else
+            Anim_BoneUpdate(hdr, s_bones, 0, 0, Q12(0.0f));
+    }
+
+    Math_RotMatrixZxyNegGte(&s_rot, &s_bones->coord);
+    s_bones->coord.t[0] = Q12_TO_Q8(s_pos.vx);
+    s_bones->coord.t[1] = Q12_TO_Q8(s_pos.vy);
+    s_bones->coord.t[2] = Q12_TO_Q8(s_pos.vz);
+    s_bones->flg        = 0;
+
+    /* See-through, for this draw only. */
+    g_PcCharaGhostDraw = 1;
+    func_8003DA9C(Chara_Harry, s_bones, 1, 0, 0);
+    g_PcCharaGhostDraw = 0;
 }
 
 void Pc_DarkHarry_Update(void)
@@ -258,8 +307,7 @@ void Pc_DarkHarry_Update(void)
     {
         /* Leaving gameplay at all takes him with it, so he can never be left
          * standing in a cutscene or survive a map change. */
-        if (s_slot >= 0)
-            DarkHarry_Despawn();
+        DarkHarry_Despawn();
         s_afk   = Q12(0.0f);
         s_armed = 0;
         /* Keep the input baseline current so re-entering gameplay does not
@@ -280,9 +328,7 @@ void Pc_DarkHarry_Update(void)
 
     if (DarkHarry_InputSeen())
     {
-        /* The brief: he vanishes the instant the player does anything, and the
-         * wait starts over from zero before he can return. */
-        if (s_slot >= 0)
+        if (s_present)
         {
             SH_LOG("[DARKHARRY] dismissed by input");
             DarkHarry_Despawn();
@@ -291,11 +337,11 @@ void Pc_DarkHarry_Update(void)
         return;
     }
 
-    if (s_slot < 0)
+    if (!s_present)
     {
         s_afk += g_DeltaTime;
-        if (s_afk >= Q12((float)1.0f) * g_PcConfig.darkHarryAfkSec)
-            DarkHarry_Spawn();
+        if (s_afk >= Q12(1.0f) * g_PcConfig.darkHarryAfkSec)
+            Pc_DarkHarry_Spawn();
         return;
     }
 

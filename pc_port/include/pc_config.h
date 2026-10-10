@@ -72,6 +72,11 @@ typedef struct {
     int darkHarry;
     int darkHarryAfkSec;
     int darkHarryDistance;
+    /* Fixed spot he appears at, in HUNDREDTHS of a world unit (1250 = 12.5).
+     * Both zero = no landmark set, fall back to "ahead of the player at
+     * darkHarryDistance". (config keys: dark_harry_x, dark_harry_z) */
+    int darkHarryX;
+    int darkHarryZ;
 
     int msgVoiceTailMs;  /* how long an added text-box voice (load/XA/msg_<KEY>.wav) keeps its
                           * page on screen after the clip ends, in ms. The authored ~J timer was
