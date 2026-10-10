@@ -209,19 +209,19 @@ int Font_MapChar(unsigned int charCode, s_GlyphEmit emits[2])
          * path can't affect it. */
         switch (charCode)
         {
-            case 0xE0: case 0xE1: case 0xE2: case 0xE4: cell = 'a'; break;
+            case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: cell = 'a'; break;
             case 0xE7:                                  cell = 'c'; break;
             case 0xE8: case 0xE9: case 0xEA: case 0xEB: cell = 'e'; break;
             case 0xEC: case 0xED: case 0xEE: case 0xEF: cell = 'i'; break;
             case 0xF1:                                  cell = 'n'; break;
-            case 0xF2: case 0xF3: case 0xF4: case 0xF6: cell = 'o'; break;
+            case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6: cell = 'o'; break;
             case 0xF9: case 0xFA: case 0xFB: case 0xFC: cell = 'u'; break;
-            case 0xC0: case 0xC1: case 0xC2: case 0xC4: cell = 'A'; break;
+            case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: cell = 'A'; break;
             case 0xC7:                                  cell = 'C'; break;
             case 0xC8: case 0xC9: case 0xCA: case 0xCB: cell = 'E'; break;
             case 0xCC: case 0xCD:                       cell = 'I'; break;
             case 0xD1:                                  cell = 'N'; break;
-            case 0xD2: case 0xD3: case 0xD6:            cell = 'O'; break;
+            case 0xD2: case 0xD3: case 0xD5: case 0xD6: cell = 'O'; break;
             case 0xD9: case 0xDA: case 0xDC:            cell = 'U'; break;
             case 0x9C:                                  cell = 'o'; break;
             case 0x96:                                  cell = '-'; break;
@@ -746,9 +746,7 @@ void Font_UseEurAtlas(void)
     if (!Font_EurGridBacked())
     {
         SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid at (768,128) "
-               "is other art on this disc, so a pack language draws base letters. "
-               "The EU enhanced font pack carries the accented letters: "
-               "https://drive.google.com/drive/folders/1mmCRmH3mzuHbUKveDbwHcznsVAybRJcY");
+               "is other art on this disc, so a pack language draws base letters");
         return;
     }
 
@@ -762,7 +760,13 @@ void Font_UseEurAtlas(void)
      * An install missing this file would otherwise point FONT16 at a VRAM home
      * nothing ever fills, and every glyph would draw from blank memory -- the
      * language would be unreadable rather than merely unaccented. Falling back
-     * leaves the disc's own atlas in place, which is where this started. */
+     * leaves the disc's own atlas in place, which is where this started.
+     *
+     * Everything from here down is unreachable while Font_EurGridBacked is
+     * tied to the disc region, and is kept on purpose: it is the descriptor
+     * move and home save/restore a hi-res override would need to back the
+     * grid on a US disc without a VRAM upload, which is the planned way to
+     * give those discs real accents. Deleting it would just be re-typed. */
     {
         FILE* probe = fopen(EUR_ATLAS_PATH, "rb");
 
@@ -799,6 +803,11 @@ void Font_UseEurAtlas(void)
 int Font_EurAtlasImported(void)
 {
     return s_EurAtlasImported;
+}
+
+int Font_RussianLayoutActive(void)
+{
+    return s_RussianLayoutActive;
 }
 
 void Font_UseRussianLayout(void)
@@ -1402,13 +1411,10 @@ static int AtlasScale(int w, int h, int baseW, int baseH)
  * would need w/1024 == h/16 and w/256 == h/96 at once, i.e. 6w == w. So the
  * known EU pack 2560x960 is PAL (scale 10; 2560/1024 is not even an integer)
  * and nothing can be mistaken for both. */
-int Font_HiresPackShape(int w, int h, int* outScale)
+int Font_HiresPackShape(int w, int h)
 {
     int us  = AtlasScale(w, h, FONT_US_PX_W, FONT_US_PX_H);
     int eur = AtlasScale(w, h, FONT_EUR_PX_W, FONT_EUR_PX_H);
-
-    if (outScale != NULL)
-        *outScale = us ? us : eur;
 
     if ((us != 0) == (eur != 0))
         return FONT_PACK_SHAPE_UNKNOWN;

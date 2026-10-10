@@ -344,6 +344,13 @@ int Pc_LangIdFromCode(const char* code)
          * separate id has no row of its own there. */
         return (g_GameRegion == Region_EUR) ? LANG_EN_US : 0;
     }
+    /* Slot 0 on a PAL disc already IS the PAL script, and on a Japanese disc
+     * it is Japanese and Chinese by way of jpLanguage; loading the pack of
+     * the same name over the disc's own text is never what was meant. */
+    if (g_GameRegion == Region_EUR && strcmp(code, "en_pal") == 0)
+        return 0;
+    if (g_GameRegion == Region_JPN && (strcmp(code, "ja") == 0 || strcmp(code, "zh") == 0))
+        return 0;
 
     /* The disc's own four, only where the disc actually carries them. */
     if (g_GameRegion == Region_EUR)
@@ -361,6 +368,7 @@ int Pc_LangIdFromCode(const char* code)
         if (strcmp(code, Pc_LangPackListCode(i)) == 0)
             return LANG_PACK_FIRST + i;
     }
+    SH_WARN("[LANG] no language '%s' on this disc or in gamedata/lang - using the disc's own", code);
     return 0;
 }
 
@@ -1029,6 +1037,38 @@ void Pc_LangInit(void)
             resolved = 1;
             if (g_PcConfig.languageCode[0] != '\0')
                 g_PcConfig.language = Pc_LangIdFromCode(g_PcConfig.languageCode);
+
+            /* An NTSC-J disc picks its three own languages by jpLanguage, not
+             * by this id -- id 0 is Japanese, Chinese and English alike. The
+             * launcher writes only `language`, so a code naming one of them
+             * has to reach jpLanguage or "US English" boots into Japanese; a
+             * Latin pack needs English there too, or the Shift-JIS decoder
+             * stays on and eats its accented bytes as lead bytes. "auto"
+             * leaves the in-game row's own choice alone, whose default is
+             * Japanese. Saved as well, so the two keys agree next boot. */
+            if (g_GameRegion == Region_JPN)
+            {
+                const char* c  = g_PcConfig.languageCode;
+                int         jp = -1;
+
+                if (strcmp(c, "en") == 0 || strcmp(c, "en_us") == 0 || strcmp(c, "en_pal") == 0)
+                    jp = JP_LANG_ENGLISH;
+                else if (strcmp(c, "zh") == 0)
+                    jp = JP_LANG_CHINESE;
+                else if (strcmp(c, "ja") == 0)
+                    jp = JP_LANG_JAPANESE;
+                else if (g_PcConfig.language >= LANG_PACK_FIRST &&
+                         !LangPackFontIsKanji(Pc_LangPackListFont(g_PcConfig.language - LANG_PACK_FIRST)))
+                    jp = JP_LANG_ENGLISH;
+
+                if (jp >= 0 && jp != g_PcConfig.jpLanguage)
+                {
+                    static const char* const s_JpCodes[JP_LANG_COUNT] = { "ja", "zh", "en" };
+
+                    g_PcConfig.jpLanguage = jp;
+                    PcConfig_SaveKeyValue("jp_language", s_JpCodes[jp]);
+                }
+            }
         }
     }
 
@@ -1073,13 +1113,10 @@ void Pc_LangInit(void)
         {
             SH_WARN("[LANG] %s needs the PAL cell grid, which this disc has other "
                     "art at - using this disc's own language instead", code);
+            /* For this session only. The saved key is left alone on purpose: a
+             * PAL player who boots a USA disc once must find Russian still set
+             * when they go back, and the one log line a boot costs is nothing. */
             g_PcConfig.language = 0;
-
-            /* Pc_LangSetLanguage saves the key BEFORE this runs, so without
-             * this the refused code stays in config.cfg and is refused again
-             * on every boot. Automatic is where a bad combination lands. */
-            snprintf(g_PcConfig.languageCode, sizeof(g_PcConfig.languageCode), "auto");
-            PcConfig_SaveKeyValue("language", "auto");
         }
     }
 
@@ -1089,9 +1126,11 @@ void Pc_LangInit(void)
         {
             /* Whatever letterforms this pack needs; the atlas itself is built
              * at FONT16 upload (Font_PatchPackGlyphs). */
-            /* Every pack draws through the PAL atlas: the Latin ones for
-             * their accents, Polish and Russian for the cells they build
-             * into. A Shift-JIS pack rasterizes its own and needs none. */
+            /* On a PAL disc every non-kanji pack draws through the PAL atlas:
+             * the Latin ones for their accents, Polish and Russian for the
+             * cells they build into. Anywhere else Font_UseEurAtlas declines
+             * (Font_EurGridBacked) and the pack draws base letters. A
+             * Shift-JIS pack rasterizes its own and needs none either way. */
             if (!LangPackFontIsKanji(Pc_LangPackFont()))
             {
                 Font_UseEurAtlas();
@@ -1325,6 +1364,18 @@ void Pc_LangSetLanguage(int lang)
     {
         Font_AtlasReloadNow();
     }
+
+    /* A hi-res font pack is a separate override, registered when FONT16 is
+     * post-loaded and left exactly as it was by the inline reload above. So
+     * after a switch it still held the OLD language's letters: Latin art on
+     * top of a freshly built Cyrillic atlas, which drew Latin letterforms at
+     * Cyrillic byte values. Queue the read the game's own EUR paths queue
+     * (game_boot, b_konami, fs_screens): its post-load drops the stale
+     * override with the upload and registers the right one, or none for
+     * Russian. PAL only -- on any other disc this read is the one that
+     * wrote the atlas over the trees (see Font_EurGridBacked). */
+    if (g_GameRegion == Region_EUR)
+        Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
 
 
     SH_LOG("[LANG] language switched to '%s'", Pc_LangIdForSlot(lang));

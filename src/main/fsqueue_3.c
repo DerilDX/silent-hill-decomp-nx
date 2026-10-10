@@ -1611,7 +1611,8 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                          * Re-lay its cells first; its pixel size says which
                          * shape it is, because only one atlas divides it
                          * evenly. A pack already matching is untouched. */
-                        int relaid = 0;
+                        int relaid   = 0;
+                        int declined = 0; /* a pack this language must not use */
 
                         if (FSQ_INFO_VALID(entry->info) &&
                             (int)(entry->info - &g_FileTable[0]) == FILE_1ST_FONT16_TIM)
@@ -1623,18 +1624,28 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                                            &rgba, &rw, &rh) == 0)
                             {
                                 /* A US-cut pack is for US English on a USA disc
-                                 * only; under anything else the disc's own font
-                                 * is the consistent choice. The PAL pack has all
-                                 * 126 cells and travels. */
-                                int shape = Font_HiresPackShape(rw, rh, NULL);
+                                 * only; the PAL pack has all 126 cells and
+                                 * travels. And no Latin pack at all can stand in
+                                 * for Russian, which replaces every cell with
+                                 * Cyrillic: covering them drew Latin letterforms
+                                 * at Cyrillic byte values. The upload above has
+                                 * already dropped the previous override for this
+                                 * rect, so declining here leaves the native
+                                 * atlas showing, which is the right font. */
+                                const char* why =
+                                    !Font_HiresPackUsable(Font_HiresPackShape(rw, rh))
+                                        ? "it is cut for the US atlas"
+                                  : Font_RussianLayoutActive()
+                                        ? "Cyrillic is in force and the pack is Latin art"
+                                        : NULL;
 
-                                if (!Font_HiresPackUsable(shape))
+                                if (why != NULL)
                                 {
-                                    SH_LOG("[FONT] hi-res pack is cut for the US "
-                                           "atlas; this language uses the disc font");
+                                    SH_LOG("[FONT] hi-res font pack declined: %s; "
+                                           "this language uses the disc font", why);
                                     free(rgba);
-                                    rgba   = NULL;
-                                    relaid = 1; /* and do not register it raw below */
+                                    rgba     = NULL;
+                                    declined = 1;
                                 }
                             }
                             if (rgba != NULL)
@@ -1674,7 +1685,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             }
                         }
 
-                        if (!relaid)
+                        if (!relaid && !declined)
                         {
                             looseHires = HiresOverride_RegisterLoosePngAllRows(
                                 whole, buf, (unsigned int)sz,

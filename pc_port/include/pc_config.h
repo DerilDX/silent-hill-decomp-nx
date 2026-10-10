@@ -397,13 +397,13 @@ typedef struct {
     int jpLanguage;
     /* Which of the three main menus to show, independent of the disc:
      * auto / us / pal / japanese. See pc_title_style.h. */
-    /* Cross-region languages: offer every installed pack on every disc, import
-     * the PAL glyph atlas where it is missing, and show the Language row off a
-     * PAL disc. ON by default -- most Brazilian players own the USA disc, and a
-     * US disc with no Language row is the reason a translator had to ship their
-     * own font patch to test. Turn it OFF to keep a hi-res FONT16 pack working
-     * on a US disc, which importing the atlas currently costs (the override
-     * stays registered against the old VRAM home).
+    /* Cross-region languages: offer every installed pack on every disc and
+     * show the Language row off a PAL disc. ON by default -- most Brazilian
+     * players own the USA disc, and a US disc with no Language row is the
+     * reason a translator had to ship their own font patch to test. Off, a
+     * US or JP disc offers only its own languages and the Shift-JIS packs.
+     * (It no longer imports the PAL glyph atlas anywhere: that home is other
+     * art on those discs -- see Font_EurGridBacked.)
      * (config: cross_region_languages) */
     int crossRegionLanguages;
 

@@ -12,6 +12,11 @@
 #include "sh_log.h"
 
 #define PACK_DIR      "gamedata/lang"
+/* Where the Mod Manager deploys a Library mod's files. A language shipped as
+ * a mod lands here, not in PACK_DIR, so this is scanned too -- and first, so
+ * a mod's file wins a code by the first-wins rule below, the same way every
+ * other loose override in the port beats the shipped file. */
+#define PACK_OVERLAY_DIR "gamedata/load/lang"
 #define PACK_PATH_FMT PACK_DIR "/%s.lang"
 #define PACK_MAX_SIZE (4 * 1024 * 1024)
 #define COMMON_MSG_COUNT 15 /* map message indices 0-14 come from the shared header */
@@ -69,14 +74,14 @@ static unsigned int FallbackAscii(unsigned int cp)
         case 0x2018: case 0x2019: return '\''; /* curly quotes */
         case 0x201C: case 0x201D: return '"';
         case 0x2026: return '.';               /* ellipsis */
-        case 0x0104: case 0x0105: return 'a';
-        case 0x0106: case 0x0107: return 'c';
-        case 0x0118: case 0x0119: return 'e';
-        case 0x0141: case 0x0142: return 'l';
-        case 0x0143: case 0x0144: return 'n';
-        case 0x015A: case 0x015B: return 's';
-        case 0x0179: case 0x017A:
-        case 0x017B: case 0x017C: return 'z';
+        case 0x0104: return 'A'; case 0x0105: return 'a';
+        case 0x0106: return 'C'; case 0x0107: return 'c';
+        case 0x0118: return 'E'; case 0x0119: return 'e';
+        case 0x0141: return 'L'; case 0x0142: return 'l';
+        case 0x0143: return 'N'; case 0x0144: return 'n';
+        case 0x015A: return 'S'; case 0x015B: return 's';
+        case 0x0179: case 0x017B: return 'Z';
+        case 0x017A: case 0x017C: return 'z';
         default: return 0;
     }
 }
@@ -326,6 +331,7 @@ typedef struct {
     char code[16];
     char menu[32];
     int  font;
+    char dir[24];  /* which directory it was found in */
 } s_PackInfo;
 
 static s_PackInfo s_Packs[PACK_LIST_MAX];
@@ -387,15 +393,64 @@ static int PackReadHeader(const char* path, s_PackInfo* out)
     return out->code[0] != '\0';
 }
 
-static void PackListScan(void)
+/* One directory's worth of packs into the registry. Returns 0 only when the
+ * directory could not be opened at all. */
+static int PackListScanDir(const char* dir)
 {
     DIR*           d;
     struct dirent* e;
     int            i;
-    int            j;
 
-    d = opendir(PACK_DIR);
+    d = opendir(dir);
     if (d == NULL)
+        return 0;
+
+    while ((e = readdir(d)) != NULL && s_PackListCount < PACK_LIST_MAX)
+    {
+        size_t     len = strlen(e->d_name);
+        char       path[256];
+        s_PackInfo info;
+
+        if (len < 6 || strcmp(e->d_name + len - 5, ".lang") != 0)
+            continue;
+
+        memset(&info, 0, sizeof(info));
+        /* The file name is the fallback code, so a pack with no !code line
+         * still works and its file name is what config stores. */
+        snprintf(info.code, sizeof(info.code), "%.*s", (int)(len - 5), e->d_name);
+        snprintf(info.dir, sizeof(info.dir), "%s", dir);
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        if (!PackReadHeader(path, &info))
+            continue;
+        if (info.menu[0] == '\0')
+            snprintf(info.menu, sizeof(info.menu), "%s", info.code);
+        /* The Language row draws this with the GAME font, so it has to be in
+         * that pack's own byte encoding rather than the UTF-8 the file holds. */
+        TranscodeValueFont(info.menu, info.font);
+
+        for (i = 0; i < s_PackListCount; i++)
+            if (strcmp(s_Packs[i].code, info.code) == 0)
+                break;
+        if (i < s_PackListCount)
+            continue; /* two files claiming one code: first wins */
+
+        s_Packs[s_PackListCount++] = info;
+    }
+    closedir(d);
+    return 1;
+}
+
+static void PackListScan(void)
+{
+    int i;
+    int j;
+
+    s_PackListCount = 0;
+
+    /* The overlay may simply not exist; only the shipped directory is required. */
+    PackListScanDir(PACK_OVERLAY_DIR);
+
+    if (!PackListScanDir(PACK_DIR))
     {
         /* NOT "no packs installed": the directory is not reachable yet. Config
          * parsing resolves `language` to a pack id (pc_config.c) before the
@@ -418,40 +473,6 @@ static void PackListScan(void)
         s_PackListCount = -1;
         return;
     }
-
-    s_PackListCount = 0;
-
-    while ((e = readdir(d)) != NULL && s_PackListCount < PACK_LIST_MAX)
-    {
-        size_t     len = strlen(e->d_name);
-        char       path[256];
-        s_PackInfo info;
-
-        if (len < 6 || strcmp(e->d_name + len - 5, ".lang") != 0)
-            continue;
-
-        memset(&info, 0, sizeof(info));
-        /* The file name is the fallback code, so a pack with no !code line
-         * still works and its file name is what config stores. */
-        snprintf(info.code, sizeof(info.code), "%.*s", (int)(len - 5), e->d_name);
-        snprintf(path, sizeof(path), PACK_DIR "/%s", e->d_name);
-        if (!PackReadHeader(path, &info))
-            continue;
-        if (info.menu[0] == '\0')
-            snprintf(info.menu, sizeof(info.menu), "%s", info.code);
-        /* The Language row draws this with the GAME font, so it has to be in
-         * that pack's own byte encoding rather than the UTF-8 the file holds. */
-        TranscodeValueFont(info.menu, info.font);
-
-        for (i = 0; i < s_PackListCount; i++)
-            if (strcmp(s_Packs[i].code, info.code) == 0)
-                break;
-        if (i < s_PackListCount)
-            continue; /* two files claiming one code: first wins */
-
-        s_Packs[s_PackListCount++] = info;
-    }
-    closedir(d);
 
     /* Alphabetical, so the Language row is in the same order every run
      * whatever order the directory happens to hand back. */
@@ -527,7 +548,16 @@ int Pc_LangPackLoad(const char* code)
     if (code == NULL || code[0] == '\0')
         return 0;
 
-    snprintf(path, sizeof(path), PACK_PATH_FMT, code);
+    /* From the directory the registry found it in; a code the registry does
+     * not know (asked for before any scan) still tries the shipped place. */
+    {
+        int idx = Pc_LangPackListFind(code);
+
+        if (idx >= 0)
+            snprintf(path, sizeof(path), "%s/%s.lang", s_Packs[idx].dir, code);
+        else
+            snprintf(path, sizeof(path), PACK_PATH_FMT, code);
+    }
     f = fopen(path, "rb");
     if (f == NULL)
     {

@@ -934,22 +934,10 @@ void PcConfig_Load(const char* path)
              * region and the pack registry are both available. */
             snprintf(g_PcConfig.languageCode,
                      sizeof(g_PcConfig.languageCode), "%s", value);
-            /* Language id string. Index order matches the PAL disc's
-             * option-menu / VIN2-5 dir order. Unknown -> English. */
-            if (strcmp(value, "en_us") == 0)   g_PcConfig.language = LANG_EN_US;
-            else if (strcmp(value, "de") == 0) g_PcConfig.language = 1;
-            else if (strcmp(value, "fr") == 0) g_PcConfig.language = 2;
-            else if (strcmp(value, "es") == 0) g_PcConfig.language = 3;
-            else if (strcmp(value, "it") == 0) g_PcConfig.language = 4;
-            else
-            {
-                /* Anything else is a pack code: whatever .lang files are
-                 * installed in gamedata/lang, including ones a mod dropped
-                 * there. Unknown (pack removed) falls back to English. */
-                int slot = Pc_LangPackListFind(value);
-
-                g_PcConfig.language = (slot >= 0) ? (LANG_PACK_FIRST + slot) : 0;
-            }
+            /* Not resolved here. The id a code means depends on the disc, and
+             * the disc is not known yet; a region-blind guess made here used
+             * to disagree with the real resolution until Pc_LangInit ran. */
+            g_PcConfig.language = 0;
         }
         else if (strcmp(key, "menu_style") == 0)
         {
