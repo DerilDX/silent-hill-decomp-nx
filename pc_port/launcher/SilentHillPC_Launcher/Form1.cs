@@ -192,6 +192,13 @@ public partial class Form1 : Form
     /// The launcher does not know which disc will be mounted, so it offers all
     /// of them and lets the game decide -- it already falls back to Automatic
     /// for anything this disc cannot render, and says so in its log.
+    /// The dropdown's current code -- the user's intent, saved or not.
+    private string CurrentGameLanguageCode()
+    {
+        int i = comboGameLang.SelectedIndex;
+        return (i >= 0 && i < _gameLangCodes.Count) ? _gameLangCodes[i] : config.Get("language", "auto");
+    }
+
     private void BuildGameLangList()
     {
         comboGameLang.Items.Clear();
@@ -795,12 +802,8 @@ public partial class Form1 : Form
                                 + "PAL's fog-only title, or the Japanese logo. "
                                 + "Auto follows the disc."));
         const string gameLangTip =
-            "What language the game itself runs in. Automatic follows the disc:\n"
-          + "US English on a USA disc, PAL English on a PAL one, Japanese on NTSC-J.\n\n"
-          + "Languages with accented or non-Latin letters need the EU enhanced font\n"
-          + "to show them on a USA or NTSC-J disc; without it they fall back to plain\n"
-          + "letters. The EU font pack by ivanproff:\n"
-          + "https://drive.google.com/drive/folders/1mmCRmH3mzuHbUKveDbwHcznsVAybRJcY";
+            "Which language the game runs in. Automatic follows the disc: US English" +
+            " on a USA disc, PAL English on a PAL one, Japanese on NTSC-J.";
         Set(lblGameLang,   Loc.T(gameLangTip));
         Set(comboGameLang, Loc.T(gameLangTip));
         Set(lblUncensored,  uncensoredTip);
@@ -2035,7 +2038,7 @@ public partial class Form1 : Form
 
     private void btnManager_Click(object sender, EventArgs e)
     {
-        using (var f = new SilentHillPC_Launcher.ModManagerForm(config, AppDomain.CurrentDomain.BaseDirectory))
+        using (var f = new SilentHillPC_Launcher.ModManagerForm(config, AppDomain.CurrentDomain.BaseDirectory, CurrentGameLanguageCode()))
         {
             f.ShowDialog(this);
         }

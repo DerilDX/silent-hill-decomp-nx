@@ -165,6 +165,34 @@ namespace SilentHillPC_Launcher
         /// reads it as a loose folder mod). <paramref name="archivePath"/> may be the
         /// enabled or *.disabled archive path.</summary>
         private static string ArchiveActiveFolder(string archivePath)   { return StripDisabled(archivePath) + ".extracted"; }
+
+        /// <summary>True if any ENABLED texture mod contains a file whose name satisfies
+        /// <paramref name="namePred"/>. Looks where the game looks: an in-place zip's
+        /// entries, an archive's .extracted folder, or a loose folder. A mod that cannot
+        /// be read cannot be the file either.</summary>
+        public bool EnabledTextureModHasFile(Func<string, bool> namePred)
+        {
+            foreach (var m in Mods)
+            {
+                if (m.Type != ModType.Texturemods || !m.Enabled) continue;
+                try
+                {
+                    if (m.IsInPlaceZip)
+                    {
+                        using (var za = ZipFile.OpenRead(m.LibraryPath))
+                            if (za.Entries.Any(e => namePred(Path.GetFileName(e.FullName)))) return true;
+                        continue;
+                    }
+                    string dir = m.IsExtractedArchive ? ArchiveActiveFolder(m.LibraryPath) : m.LibraryPath;
+                    if (Directory.Exists(dir) &&
+                        Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
+                                 .Any(f => namePred(Path.GetFileName(f))))
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
         private static string ArchiveDisabledFolder(string archivePath) { return ArchiveActiveFolder(archivePath) + ".disabled"; }
 
         /// <summary>True if EVERY file entry in the zip is STORED (uncompressed): its

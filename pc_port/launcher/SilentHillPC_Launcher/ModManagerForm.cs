@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -22,6 +23,20 @@ namespace SilentHillPC_Launcher
         private readonly ConfigManager _config;
         private readonly string _gameRoot;
 
+        /// <summary>The launcher's current Game Language selection, which is the
+        /// user's intent even before it is saved; null falls back to the config.</summary>
+        private readonly string _gameLang;
+
+        /// <summary>Whether the last scan saw the US HD font enabled, so the
+        /// question is asked when it APPEARS, not on every rescan after a No.</summary>
+        private bool _usFontSeen;
+
+        /// <summary>ivanproff's US HD font ships as hash-keyed texupload strips; this
+        /// prefix is the content hash of the US FONT16 atlas and its palette, so any
+        /// file carrying it is that pack, whatever the archive is called.</summary>
+        private const string UsHdFontPrefix = "texupload-P4-26DFE7809B76278B-8B43D0AB5707EDC7-";
+        private const string EuHdFontUrl    = "https://drive.google.com/drive/folders/1mmCRmH3mzuHbUKveDbwHcznsVAybRJcY";
+
         private ListView  _list;
         private CheckBox  _chkLoose;
         private ToolTip   _btnTips;
@@ -39,10 +54,11 @@ namespace SilentHillPC_Launcher
         private int       _toolBaseWidth;
         private Size      _baseClientSize;
 
-        public ModManagerForm(ConfigManager config, string gameRoot)
+        public ModManagerForm(ConfigManager config, string gameRoot, string gameLanguageCode = null)
         {
             _config   = config;
             _gameRoot = gameRoot;
+            _gameLang = gameLanguageCode;
             _mgr      = new ModManager(gameRoot, config);
 
             Text            = "Mod Manager";
@@ -75,6 +91,7 @@ namespace SilentHillPC_Launcher
         {
             Shown -= OnShownInitialLoad;
             ExtractThenScan();
+            WarnIfUsHdFontMismatched();
         }
 
         /// <summary>Ask about any archive lying in the mod folders, unpack what was agreed to
@@ -499,11 +516,72 @@ namespace SilentHillPC_Launcher
         }
 
         /// <summary>Persist the current UI state, then extract/re-index the library from disk.</summary>
+        /// <summary>The US HD font only fits US English on a USA disc: it carries the
+        /// 84 US cells and no accents, so under anything else the game falls back
+        /// to the original font for the letters it lacks. Offer the EU pack, which
+        /// has them all, once each time the US pack shows up enabled.
+        /// `launcher_warn_us_hd_font = 0` suppresses it permanently.</summary>
+        private void WarnIfUsHdFontMismatched()
+        {
+            bool installed = _mgr.EnabledTextureModHasFile(
+                n => n.StartsWith(UsHdFontPrefix, StringComparison.OrdinalIgnoreCase));
+            bool appeared = installed && !_usFontSeen;
+            _usFontSeen = installed;
+            if (!appeared) return;
+            if (_config.Get("launcher_warn_us_hd_font", "1").Trim() == "0") return;
+
+            string lang = (_gameLang ?? _config.Get("language", "auto")).Trim().ToLowerInvariant();
+            bool usEnglish = lang == "" || lang == "auto" || lang == "en" || lang == "en_us";
+
+            // The one combination it is made for. A disc the launcher cannot
+            // identify gets the benefit of the doubt rather than a nag.
+            string region = usEnglish ? SelectedDiscRegion() : null;
+            if (usEnglish && (region == "USA" || region == null)) return;
+
+            using (var dlg = new UsHdFontDialog())
+            {
+                dlg.ShowDialog(this);
+                switch (dlg.Result)
+                {
+                    case UsHdFontDialog.Choice.OpenPage:
+                        try { Process.Start(EuHdFontUrl); } catch { }
+                        break;
+                    case UsHdFontDialog.Choice.NeverAsk:
+                        _config.EnsureLauncherSection();
+                        _config.Set("launcher_warn_us_hd_font", "0");
+                        _config.Save();
+                        break;
+                    default:
+                        break; /* not now: asked again next time it appears */
+                }
+            }
+        }
+
+        /// <summary>"USA" / "PAL" / "JAP" for the disc the game will mount, or null
+        /// when that cannot be told: the configured image, else the only supported
+        /// one in gamedata.</summary>
+        private string SelectedDiscRegion()
+        {
+            try
+            {
+                var discs = DiscProbe.Scan(Path.Combine(_gameRoot, "gamedata"));
+                string want = _config.Get("disc_image", "").Trim();
+                DiscProbe.Disc d = null;
+                if (want.Length > 0)
+                    d = discs.FirstOrDefault(x => string.Equals(x.FileName, want, StringComparison.OrdinalIgnoreCase));
+                if (d == null && discs.Count(x => x.Supported) == 1)
+                    d = discs.First(x => x.Supported);
+                return d == null ? null : d.Region;
+            }
+            catch { return null; }
+        }
+
         private void Rescan()
         {
             CommitOrderAndState();
             _mgr.SaveState();
             ExtractThenScan();
+            WarnIfUsHdFontMismatched();
         }
 
         private void EditSelected()

@@ -86,6 +86,9 @@
     <Compile Include="TmdPageDialog.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UsHdFontDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ResidentTexturesDialog.cs">
       <SubType>Form</SubType>
     </Compile>
