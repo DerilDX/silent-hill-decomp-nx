@@ -1289,10 +1289,6 @@ void Pc_LangSetLanguage(int lang)
         Font_AtlasReloadNow();
     }
 
-    /* And point a hi-res font pack at wherever the atlas ended up, so the HD
-     * font survives the move instead of only ever applying in English. */
-    Font_HiresFollowAtlas();
-
 
     SH_LOG("[LANG] language switched to '%s'", Pc_LangIdForSlot(lang));
 }

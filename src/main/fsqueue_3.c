@@ -1193,7 +1193,6 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                   ? s_composeResumeRow : 0;
 
     s_composeResumeEntry = NULL;
-    int font16Imported = 0;
 #endif
 
     OpenTIM((u64*)entry->externalData);
@@ -1240,23 +1239,10 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
         {
             Font_PatchPackGlyphs(tim.paddr, fw, fh);
         }
-
-        /* An IMPORTED atlas is authoritative and this disc's is not. The
-         * descriptor has been moved to the PAL home, so uploading the disc's
-         * own FONT16 through it writes an 84-cell strip and the wrong palette
-         * over the 126-cell atlas -- which is the corruption seen when the
-         * game BOOTS with a pack language already selected, and why changing
-         * language afterwards cleared it. Put the shipped atlas there instead
-         * and let the rest of this run, so the hi-res pack still registers. */
-        if (Font_EurAtlasImported())
-        {
-            Font_AtlasReloadNow();
-            font16Imported = 1;
-        }
     }
 
     /* A resumed post-load already uploaded this TIM to VRAM on its first pass. */
-    if (!pcVirtualSlot && !composeResume && !font16Imported)
+    if (!pcVirtualSlot && !composeResume)
 #endif
     {
         LoadImage(&tempRect, tim.paddr);
@@ -1281,7 +1267,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
         }
 
 #ifdef SH_PC_PORT
-        if (!pcVirtualSlot && !composeResume && !font16Imported)
+        if (!pcVirtualSlot && !composeResume)
 #endif
         {
             LoadImage(&tempRect, tim.caddr);
@@ -1626,7 +1612,6 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                          * shape it is, because only one atlas divides it
                          * evenly. A pack already matching is untouched. */
                         int relaid = 0;
-                        int skipHires = 0;
 
                         if (FSQ_INFO_VALID(entry->info) &&
                             (int)(entry->info - &g_FileTable[0]) == FILE_1ST_FONT16_TIM)
@@ -1637,24 +1622,6 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
                                                            &rgba, &rw, &rh) == 0)
                             {
-                                /* Keep the decode: the atlas changes VRAM home
-                                 * when a pack language imports the PAL one, and
-                                 * the override has to be re-registered there
-                                 * without reading or uploading anything again. */
-                                Font_HiresCacheSet(rgba, rw, rh, discBitDepth);
-
-                                /* Russian replaces all 126 cells with the
-                                 * embedded Cyrillic atlas, and a hi-res pack is
-                                 * Latin art -- covering those cells draws Latin
-                                 * letterforms at Cyrillic byte values. Keep the
-                                 * decode so switching away restores HD, but
-                                 * register nothing while that layout is up. */
-                                if (Font_RussianLayoutActive())
-                                {
-                                    skipHires = 1;
-                                    relaid    = 1;
-                                }
-
                                 unsigned char* fit = NULL;
                                 unsigned char* use = rgba;
                                 int            fw = rw, fh = rh;
@@ -1677,7 +1644,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                 built = Font_PatchPackGlyphsHires(
                                     use, fw, fh, Font_HiresAtlasScale(fw, fh));
 
-                                if ((use != rgba || built) && !skipHires)
+                                if (use != rgba || built)
                                 {
                                     looseHires = HiresOverride_RegisterRGBAKeyed(
                                         whole, use, fw, fh,
