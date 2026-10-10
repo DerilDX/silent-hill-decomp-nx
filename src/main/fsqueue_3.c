@@ -1622,6 +1622,23 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
                                                            &rgba, &rw, &rh) == 0)
                             {
+                                /* A US-cut pack is for US English on a USA disc
+                                 * only; under anything else the disc's own font
+                                 * is the consistent choice. The PAL pack has all
+                                 * 126 cells and travels. */
+                                int shape = Font_HiresPackShape(rw, rh, NULL);
+
+                                if (!Font_HiresPackUsable(shape))
+                                {
+                                    SH_LOG("[FONT] hi-res pack is cut for the US "
+                                           "atlas; this language uses the disc font");
+                                    free(rgba);
+                                    rgba   = NULL;
+                                    relaid = 1; /* and do not register it raw below */
+                                }
+                            }
+                            if (rgba != NULL)
+                            {
                                 unsigned char* fit = NULL;
                                 unsigned char* use = rgba;
                                 int            fw = rw, fh = rh;

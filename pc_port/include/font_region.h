@@ -117,6 +117,15 @@ int  Font_EurAtlasImported(void);
  * single owner of that rule; nothing may draw from that grid while it is 0. */
 int  Font_EurGridBacked(void);
 
+/* What a hi-res font pack was cut for, from its pixel size alone. */
+#define FONT_PACK_SHAPE_UNKNOWN 0
+#define FONT_PACK_SHAPE_US      1
+#define FONT_PACK_SHAPE_PAL     2
+int  Font_HiresPackShape(int w, int h, int* outScale);
+
+/* Whether a pack of that shape may be used for the language now active. */
+int  Font_HiresPackUsable(int shape);
+
 /* Return g_FontLayout to the region base (drops any fan-patch override or the
  * Polish layout). Pc_LangInit calls it first so every language switch derives
  * its layout from a clean slate. */

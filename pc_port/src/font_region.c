@@ -1391,6 +1391,45 @@ static int AtlasScale(int w, int h, int baseW, int baseH)
     return s;
 }
 
+/* Which disc's atlas a hi-res pack was cut for, from its pixel size alone.
+ * Deliberately independent of g_FontLayout, unlike Font_HiresAtlasScale: this
+ * answers "what IS this pack", not "does it fit what is loaded".
+ *
+ * The two shapes cannot both match. A pack satisfies one only if its width and
+ * height are the same whole multiple of that atlas, and 1024x16 against 256x96
+ * would need w/1024 == h/16 and w/256 == h/96 at once, i.e. 6w == w. So the
+ * known EU pack 2560x960 is PAL (scale 10; 2560/1024 is not even an integer)
+ * and nothing can be mistaken for both. */
+int Font_HiresPackShape(int w, int h, int* outScale)
+{
+    int us  = AtlasScale(w, h, FONT_US_PX_W, FONT_US_PX_H);
+    int eur = AtlasScale(w, h, FONT_EUR_PX_W, FONT_EUR_PX_H);
+
+    if (outScale != NULL)
+        *outScale = us ? us : eur;
+
+    if ((us != 0) == (eur != 0))
+        return FONT_PACK_SHAPE_UNKNOWN;
+    return us ? FONT_PACK_SHAPE_US : FONT_PACK_SHAPE_PAL;
+}
+
+/* The US hi-res pack is for US English on a USA disc and nothing else.
+ *
+ * It carries 84 cells and no accents, so under any other language it would
+ * supply the unaccented letters while the disc's own font supplied the rest --
+ * two different fonts inside one sentence. The PAL pack has all 126 and is
+ * re-laid to whichever shape the disc wants, so it is the one that travels.
+ *
+ * A pack of neither shape is left alone, exactly as before: that path already
+ * registers it unchanged and nothing here should start second-guessing it. */
+int Font_HiresPackUsable(int shape)
+{
+    if (shape != FONT_PACK_SHAPE_US)
+        return 1;
+
+    return g_GameRegion == Region_USA && g_PcConfig.language == 0;
+}
+
 int Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
                                unsigned char** out, int* outW, int* outH,
                                int* outUnits, int* outRows)
