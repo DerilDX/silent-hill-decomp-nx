@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "font_region.h"
 #include "lang_pack.h"
 
 #include <dirent.h>
@@ -162,7 +163,11 @@ static size_t TranscodeValueFont(char* s, int font)
          * for every pack therefore sent those four languages' o-acute to a
          * byte nothing would draw. Unmapped, it falls through to the Latin-1
          * passthrough below, where the EUR atlas has the real glyph. */
-        if (font == LANG_PACK_FONT_POLISH)
+        /* Only where the PAL cell grid is readable. These bytes address cells
+         * 120-125 of that grid, so on a disc without it they draw nothing and
+         * Polish loses eight letters mid-word. FallbackAscii below turns them
+         * into their base letters instead, which reads correctly. */
+        if (font == LANG_PACK_FONT_POLISH && Font_EurGridBacked())
         {
             for (i = 0; i < (int)(sizeof(s_PolishCodepoints) / sizeof(s_PolishCodepoints[0])); i++)
             {

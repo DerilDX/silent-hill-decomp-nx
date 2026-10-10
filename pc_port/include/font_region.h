@@ -113,6 +113,10 @@ int  Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
                                 int* outUnits, int* outRows);
 int  Font_EurAtlasImported(void);
 
+/* Whether the PAL cell grid at VRAM (768,128) is readable on this disc. The
+ * single owner of that rule; nothing may draw from that grid while it is 0. */
+int  Font_EurGridBacked(void);
+
 /* Return g_FontLayout to the region base (drops any fan-patch override or the
  * Polish layout). Pc_LangInit calls it first so every language switch derives
  * its layout from a clean slate. */

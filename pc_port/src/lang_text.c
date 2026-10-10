@@ -1046,6 +1046,24 @@ void Pc_LangInit(void)
         g_PcConfig.language = 0;
     }
 
+    /* Cyrillic needs the PAL cell grid and there is no Latin that stands in for
+     * it: the pack replaces all 126 cells, so on a disc without that grid every
+     * Russian glyph draws from art that is not a font. The Latin packs degrade
+     * to base letters and stay legible; this one cannot, so it is refused here
+     * rather than shown as a screen of rubble. */
+    if (g_PcConfig.language >= LANG_PACK_FIRST && !Font_EurGridBacked())
+    {
+        const char* code = Pc_LangIdForSlot(g_PcConfig.language);
+        int         idx  = (code != NULL) ? Pc_LangPackListFind(code) : -1;
+
+        if (idx >= 0 && Pc_LangPackListFont(idx) == LANG_PACK_FONT_CYRILLIC)
+        {
+            SH_WARN("[LANG] %s needs the PAL cell grid, which this disc has other "
+                    "art at - using this disc's own language instead", code);
+            g_PcConfig.language = 0;
+        }
+    }
+
     if (g_PcConfig.language >= LANG_PACK_FIRST)
     {
         if (Pc_LangPackLoad(Pc_LangIdForSlot(g_PcConfig.language)))

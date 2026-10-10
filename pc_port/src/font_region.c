@@ -634,7 +634,11 @@ void Font_PatchPortugueseGlyphs(void* pixels, int widthWords, int height)
 
 void Font_UsePortugueseLayout(void)
 {
-    if (g_FontLayout == &s_FontLayout_EUR || g_FontLayout == &s_FontLayout_USA)
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
+    if (g_FontLayout == &s_FontLayout_EUR)
     {
         /* The 126-cell layout, same as Polish: the capital marks live in cells
          * 120..123, past the 120 the plain PAL layout counts. */
@@ -699,11 +703,31 @@ void Font_PatchPolishGlyphs(void* pixels, int widthWords, int height)
 
 void Font_UsePolishLayout(void)
 {
-    if (g_FontLayout == &s_FontLayout_EUR || g_FontLayout == &s_FontLayout_USA)
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
+    if (g_FontLayout == &s_FontLayout_EUR)
     {
         g_FontLayout         = &s_FontLayout_EUR_PL;
         s_PolishLayoutActive = 1;
     }
+}
+
+/* Is the PAL cell grid at VRAM (768,128) actually readable on this disc?
+ *
+ * Only on a PAL disc. On a US or JP one that address belongs to other art and
+ * always will: KONAMI.TIM (768,0 96x384) and BG_ETC.TIM (768,0) cover it at
+ * boot, and from the mall onward map4_s03 re-uploads TV2.TIM to (800,0 64x256)
+ * on every visit -- its relocation away from the font is `if (g_GameRegion ==
+ * Region_EUR)` only (map4_s03.c:3891-3931). So whoever writes last wins, and
+ * the font cannot win a fight it has to keep winning all session.
+ *
+ * This is the one predicate that decides it, so the rule has a single owner.
+ * Nothing may point the draw at that grid while this returns 0. */
+int Font_EurGridBacked(void)
+{
+    return g_GameRegion == Region_EUR;
 }
 
 /* Point FONT16's descriptor at the PAL home and remember to feed it the PAL
@@ -712,6 +736,19 @@ void Font_UseEurAtlas(void)
 {
     if (g_GameRegion == Region_EUR)
         return;
+
+    /* And a no-op everywhere else, for now, because the grid is not readable
+     * there -- see Font_EurGridBacked. Importing it anyway is what destroyed
+     * the trees in one direction and produced the pink glyph blocks in the
+     * other; both were this one collision. A pack language keeps the disc's
+     * own atlas and draws base letters instead of accents, which is legible
+     * and cannot corrupt anything. */
+    if (!Font_EurGridBacked())
+    {
+        SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid at (768,128) "
+               "is other art on this disc, so a pack language draws base letters");
+        return;
+    }
 
     /* Moving FONT16 to the PAL home leaves a hi-res font pack's override
      * registered against the old rect, so the pack silently stops applying.
@@ -737,18 +774,20 @@ void Font_UseEurAtlas(void)
         fclose(probe);
     }
 
+    /* BEFORE the writes below, or the "home" saved is the PAL one and
+     * Font_ResetLayout's restore puts back what it was meant to undo. */
+    if (!s_Font16HomeSaved)
+    {
+        s_Font16Home      = g_Font16AtlasImg;
+        s_Font16HomeSaved = 1;
+    }
+
     g_Font16AtlasImg.tPage[0] = 0;
     g_Font16AtlasImg.tPage[1] = 12;
     g_Font16AtlasImg.u        = 0;
     g_Font16AtlasImg.v        = 128;
     g_Font16AtlasImg.clutX    = 816;
     g_Font16AtlasImg.clutY    = 255;
-
-    if (!s_Font16HomeSaved)
-    {
-        s_Font16Home      = g_Font16AtlasImg;
-        s_Font16HomeSaved = 1;
-    }
 
     s_EurAtlasImported = 1;
     if (g_FontLayout == &s_FontLayout_USA)
@@ -762,7 +801,11 @@ int Font_EurAtlasImported(void)
 
 void Font_UseRussianLayout(void)
 {
-    if (g_FontLayout == &s_FontLayout_EUR || g_FontLayout == &s_FontLayout_USA)
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
+    if (g_FontLayout == &s_FontLayout_EUR)
     {
         g_FontLayout          = &s_FontLayout_EUR_RU;
         s_RussianLayoutActive = 1;
