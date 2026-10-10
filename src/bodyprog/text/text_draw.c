@@ -80,17 +80,21 @@ static void Pc_MsgGlyphQuad(GsOT* ot, PACKET** lowResPacket, s32 x, s32 y,
         *lowResPacket = (PACKET*)poly + sizeof(POLY_FT4);
 }
 
-/* A scaled glyph is a POLY_FT4 because a SPRT draws texels 1:1 and cannot be
- * resized -- but the renderer's rule is that a POLY on a world frame IS world
- * geometry, so enlarged text was filtered like a wall: soft and swollen in the
- * 3D world, while the same text stayed crisp on a menu frame (which point-
- * samples). Naming the strings bucket exempts it. Only while scaled, so the
- * unscaled SPRT path keeps its existing behaviour exactly. */
+/* DISABLED, and it must stay disabled until the exemption can name primitives
+ * rather than a bucket. A scaled glyph is a POLY_FT4 (a SPRT draws texels 1:1
+ * and cannot be resized) and the renderer's rule is that a POLY on a world
+ * frame IS world geometry, so enlarged text was filtered like a wall. Naming
+ * the strings bucket fixed that -- but g_Strings2dLayerIdx is bucket 6 of
+ * g_OtTags0, the SAME ordering table the world draws into, so every tree and
+ * snow billboard that sorted into bucket 6 was exempted along with the text
+ * and drawn as screen-space 2D. Stretched diamond billboards in map0_s00.
+ * Worse, the value persists once set, so one scaled message poisoned every
+ * later frame. Blurry large text is the lesser fault by far. */
 static void Pc_MsgMarkUiBucket(void)
 {
     extern int g_PsxUi2dBucket;
 
-    g_PsxUi2dBucket = (s_MsgScale > Q12(1.0f)) ? g_Strings2dLayerIdx : -1;
+    g_PsxUi2dBucket = -1;
 }
 
 /* Pick the scale for a message block and where it grows from: boxes at the
