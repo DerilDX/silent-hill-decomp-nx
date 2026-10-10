@@ -31,6 +31,9 @@ s_PcConfig g_PcConfig = {
     .fpsCap         = 30,
     .weatherSimHz      = 60,   /* per-frame weather sim; 30 = the console's cadence */
     .cutsceneLineGapMs = 300,
+    .darkHarry         = 1,   /* on by default for now */
+    .darkHarryAfkSec   = 60,  /* TESTING value; 300 is the intended five minutes */
+    .darkHarryDistance = 14,
     .msgVoiceTailMs    = 1000, /* added text-box voices hold 1s past the clip */
     .skipIntros     = 0,
     .showConsole    = 0,
@@ -581,6 +584,24 @@ void PcConfig_Load(const char* path)
         else if (strcmp(key, "fps_cap") == 0)
         {
             g_PcConfig.fpsCap = atoi(value);
+        }
+        else if (strcmp(key, "dark_harry") == 0)
+        {
+            g_PcConfig.darkHarry = (atoi(value) != 0);
+        }
+        else if (strcmp(key, "dark_harry_afk_sec") == 0)
+        {
+            int v = atoi(value);
+            if (v < 5)    v = 5;
+            if (v > 3600) v = 3600;
+            g_PcConfig.darkHarryAfkSec = v;
+        }
+        else if (strcmp(key, "dark_harry_distance") == 0)
+        {
+            int v = atoi(value);
+            if (v < 2)  v = 2;
+            if (v > 60) v = 60;
+            g_PcConfig.darkHarryDistance = v;
         }
         else if (strcmp(key, "msg_voice_tail_ms") == 0)
         {

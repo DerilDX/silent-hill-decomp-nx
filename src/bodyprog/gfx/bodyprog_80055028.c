@@ -2096,6 +2096,12 @@ static void CharaPrimProbe_Note(const s_ModelInfo* modelInfo, const char* what)
 }
 #endif
 
+#ifdef SH_PC_PORT
+/* Dark Harry easter egg: 1 while the apparition is the character being
+ * drawn. Consume-once, set and cleared around the draw in world_draw.c. */
+int g_PcCharaGhostDraw = 0;
+#endif
+
 void func_80057090(s_ModelInfo* modelInfo, GsOT* arg1, s32 arg2, MATRIX* viewMat, MATRIX* worldMat, u16 arg5) // 0x80057090
 {
     s32            temp_a0;
@@ -4600,6 +4606,14 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             setlen(poly.gt3, 9);
 
             SH_CLAMP_OT_DEPTH(temp_t4, arg3);
+#ifdef SH_PC_PORT
+            /* Dark Harry easter egg (pc_dark_harry.c): the apparition is
+             * drawn see-through. Set by the chara draw for that one NPC
+             * slot and cleared straight after, so nothing else is
+             * affected. Delete with the rest of the feature. */
+            if (g_PcCharaGhostDraw)
+                setSemiTrans(poly.gt3, 1);
+#endif
             addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt3);
             poly.gt3++;
 #ifdef SH_PC_PORT
@@ -4708,6 +4722,14 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             setlen(poly.gt4, 12);
 
             SH_CLAMP_OT_DEPTH(temp_t4, arg3);
+#ifdef SH_PC_PORT
+            /* Dark Harry easter egg (pc_dark_harry.c): the apparition is
+             * drawn see-through. Set by the chara draw for that one NPC
+             * slot and cleared straight after, so nothing else is
+             * affected. Delete with the rest of the feature. */
+            if (g_PcCharaGhostDraw)
+                setSemiTrans(poly.gt4, 1);
+#endif
             addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt4);
             poly.gt4++;
 #ifdef SH_PC_PORT

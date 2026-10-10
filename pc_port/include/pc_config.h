@@ -64,6 +64,15 @@ typedef struct {
     int cutsceneLineGapMs; /* min silence (ms) between cutscene voice lines — simulates PSX CD
                             * seek latency so tightly-timed lines don't run together. Applied as a
                             * MINIMUM (never shortens an authored gap). 0 = off. Default 300. */
+    /* "Dark Harry" easter egg (pc_dark_harry.c), NOT original-game behaviour.
+     * darkHarry 0 = off entirely. afkSec = seconds of no input before he
+     * appears; distance = how far out, in world units, which wants to be the
+     * fog wall for the intended effect. (config keys: dark_harry,
+     * dark_harry_afk_sec, dark_harry_distance) */
+    int darkHarry;
+    int darkHarryAfkSec;
+    int darkHarryDistance;
+
     int msgVoiceTailMs;  /* how long an added text-box voice (load/XA/msg_<KEY>.wav) keeps its
                           * page on screen after the clip ends, in ms. The authored ~J timer was
                           * written for a silent line and is often shorter than a recording of it.
