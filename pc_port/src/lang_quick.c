@@ -2,13 +2,17 @@
 #include "lang_quick.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "stb_truetype.h"
 
 #include "game.h"
 #include "lang_pack.h"
 #include "lang_ru.h"
 #include "lang_text.h"
 #include "pc_config.h"
+#include "sh_log.h"
 
 typedef struct {
     const char* en;
@@ -34,7 +38,8 @@ typedef struct {
 
 enum { QL_ENGLISH = 0, QL_RUSSIAN, QL_PACK, QL_PAL, QL_JA, QL_ZH };
 
-int Pc_LangQuickScript(void)
+/* The script the language is written in, whether or not a face can draw it. */
+static int QuickScriptWanted(void)
 {
     if (Pc_RuActive())
         return LANG_QUICK_SCRIPT_LATIN;
@@ -55,27 +60,114 @@ int Pc_LangQuickScript(void)
     return LANG_QUICK_SCRIPT_LATIN;
 }
 
+/* Oswald carries Latin and Cyrillic, but no font the port ships has a kana or
+ * a hanzi, and a CJK face is far too large to ship for an overlay. So the
+ * overlays borrow the system's: every Windows and macOS install has one, and
+ * most Linux desktops do (Noto CJK or WenQuanYi, at the paths the major
+ * distributions use). gamedata/font/cjk.* comes first, for a player whose
+ * system has none or who prefers another. Chinese tries the Chinese faces
+ * first, since a Japanese one lacks most simplified forms. stb_truetype 1.26
+ * reads the CFF-based OpenType these ship as. */
+#define CJK_USER_FACES \
+    "gamedata/font/cjk.ttc", "gamedata/font/cjk.otf", "gamedata/font/cjk.ttf"
+#define CJK_LINUX_FACES \
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",          /* Debian, Ubuntu */ \
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",               /* Arch */ \
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",        /* Fedora */ \
+    "/usr/share/fonts/opentype/noto-cjk/NotoSansCJK-Regular.ttc", \
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", \
+    "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", \
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", \
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
+
+static const char* const s_FacesJa[] = {
+    CJK_USER_FACES,
+    "C:/Windows/Fonts/YuGothM.ttc",
+    "C:/Windows/Fonts/meiryo.ttc",
+    "C:/Windows/Fonts/msgothic.ttc",
+    "/System/Library/Fonts/\xE3\x83\x92\xE3\x83\xA9\xE3\x82\xAE\xE3\x83\x8E\xE8\xA7\x92\xE3\x82\xB4\xE3\x82\xB7\xE3\x83\x83\xE3\x82\xAF W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    CJK_LINUX_FACES,
+};
+static const char* const s_FacesZh[] = {
+    CJK_USER_FACES,
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    CJK_LINUX_FACES,
+};
+
+/* The first face in the list that really draws the script, by asking it for a
+ * glyph only that script has -- a file that exists but lacks them would turn
+ * every label into empty boxes. Read once per script per run; NULL if none. */
+static const char* CjkFace(int script)
+{
+    static const char* s_Found[3];
+    static int         s_Probed[3];
+    const char* const* list = (script == LANG_QUICK_SCRIPT_CHINESE) ? s_FacesZh : s_FacesJa;
+    int                count = (script == LANG_QUICK_SCRIPT_CHINESE)
+                                   ? (int)(sizeof(s_FacesZh) / sizeof(s_FacesZh[0]))
+                                   : (int)(sizeof(s_FacesJa) / sizeof(s_FacesJa[0]));
+    /* hiragana A; and the simplified form of "set" (U+8BBE), absent from Japanese faces */
+    int                probe = (script == LANG_QUICK_SCRIPT_CHINESE) ? 0x8BBE : 0x3042;
+    int                i;
+
+    if (script != LANG_QUICK_SCRIPT_JAPANESE && script != LANG_QUICK_SCRIPT_CHINESE)
+        return NULL;
+    if (s_Probed[script])
+        return s_Found[script];
+    s_Probed[script] = 1;
+
+    for (i = 0; i < count && s_Found[script] == NULL; i++)
+    {
+        FILE*          f = fopen(list[i], "rb");
+        long           n;
+        unsigned char* data;
+        stbtt_fontinfo info;
+
+        if (f == NULL)
+            continue;
+        fseek(f, 0, SEEK_END);
+        n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        data = (n > 0 && n < (128L << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+        if (data != NULL && fread(data, 1, (size_t)n, f) == (size_t)n &&
+            stbtt_InitFont(&info, data, stbtt_GetFontOffsetForIndex(data, 0)) &&
+            stbtt_FindGlyphIndex(&info, probe) != 0)
+        {
+            s_Found[script] = list[i];
+        }
+        free(data);
+        fclose(f);
+    }
+
+    if (s_Found[script] != NULL)
+        SH_LOG("[LANG] overlay font for %s: %s",
+               script == LANG_QUICK_SCRIPT_CHINESE ? "Chinese" : "Japanese", s_Found[script]);
+    else
+        SH_WARN("[LANG] no %s font found on this system (or gamedata/font/cjk.ttc) - "
+                "the quick menu and its panels stay in English",
+                script == LANG_QUICK_SCRIPT_CHINESE ? "Chinese" : "Japanese");
+    return s_Found[script];
+}
+
+/* The script the overlays will actually draw: a CJK language without a face
+ * that can show it is drawn in English, never as boxes. */
+int Pc_LangQuickScript(void)
+{
+    int script = QuickScriptWanted();
+
+    return (script != LANG_QUICK_SCRIPT_LATIN && CjkFace(script) == NULL)
+               ? LANG_QUICK_SCRIPT_LATIN
+               : script;
+}
+
 int Pc_LangQuickFontPaths(const char** out, int max)
 {
-    /* Oswald carries Latin and Cyrillic, but no font the port ships has a kana
-     * or a hanzi. A CJK face is far too large to ship for an overlay and every
-     * Windows install already has one, so those go FIRST when the script needs
-     * them -- the Chinese faces for Chinese, since a Japanese one lacks most
-     * simplified forms -- with the Latin faces after, so a machine without any
-     * CJK face still draws the English instead of nothing. */
-    static const char* const ja[] = {
-        "C:/Windows/Fonts/YuGothM.ttc",
-        "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/msgothic.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    };
-    static const char* const zh[] = {
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simsun.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    };
     static const char* const latin[] = {
         "gamedata/font/Oswald-Regular.ttf",
         "gamedata/font/BarlowSemiCondensed-Regular.ttf",
@@ -83,16 +175,12 @@ int Pc_LangQuickFontPaths(const char** out, int max)
         "C:/Windows/Fonts/arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     };
-    int script = Pc_LangQuickScript();
-    int n      = 0;
-    int i;
+    const char* cjk = CjkFace(Pc_LangQuickScript());
+    int         n   = 0;
+    int         i;
 
-    if (script == LANG_QUICK_SCRIPT_JAPANESE)
-        for (i = 0; i < (int)(sizeof(ja) / sizeof(ja[0])) && n < max; i++)
-            out[n++] = ja[i];
-    else if (script == LANG_QUICK_SCRIPT_CHINESE)
-        for (i = 0; i < (int)(sizeof(zh) / sizeof(zh[0])) && n < max; i++)
-            out[n++] = zh[i];
+    if (cjk != NULL && n < max)
+        out[n++] = cjk;
     for (i = 0; i < (int)(sizeof(latin) / sizeof(latin[0])) && n < max; i++)
         out[n++] = latin[i];
     return n;
@@ -116,11 +204,16 @@ static int QuickLang(void)
 {
     int lang = g_PcConfig.language;
 
-    switch (Pc_LangQuickScript())
+    switch (QuickScriptWanted())
     {
-        case LANG_QUICK_SCRIPT_JAPANESE: return QL_JA;
-        case LANG_QUICK_SCRIPT_CHINESE:  return QL_ZH;
-        default:                         break;
+        /* No face for it: English, not the pack -- a Japanese or Chinese pack
+         * holds game-font bytes, not text this overlay could fall back to. */
+        case LANG_QUICK_SCRIPT_JAPANESE:
+            return (Pc_LangQuickScript() == LANG_QUICK_SCRIPT_JAPANESE) ? QL_JA : QL_ENGLISH;
+        case LANG_QUICK_SCRIPT_CHINESE:
+            return (Pc_LangQuickScript() == LANG_QUICK_SCRIPT_CHINESE) ? QL_ZH : QL_ENGLISH;
+        default:
+            break;
     }
     if (Pc_RuActive())
         return QL_RUSSIAN;
