@@ -186,6 +186,10 @@ public partial class Form1 : Form
     /// translated, the codes are not.
     private readonly List<string> _gameLangCodes = new List<string>();
 
+    /* The "Native (PSX)" resolution entry: config native_resolution = 1, with
+     * width/height kept as the WINDOW size the game scales its own modes into. */
+    private string _nativeResText;
+
     /// Build the Game Language row: Automatic, the languages every disc family
     /// carries, then whatever packs are installed in gamedata/lang.
     ///
@@ -1047,6 +1051,11 @@ public partial class Form1 : Form
         foreach (var r in resolutions)
             comboResolution.Items.Add($"{r.w}x{r.h}");
 
+        /* Last, under 320x240: every screen at the resolution the game itself
+         * uses (320x224 play, 640x448 Konami, 320x448 menus), not one fixed size. */
+        _nativeResText = Loc.T("Native (PSX)");
+        comboResolution.Items.Add(_nativeResText);
+
         // Unique refresh rates, highest first.
         var refreshRates = new List<int>();
         foreach (var m in modes)
@@ -1281,9 +1290,16 @@ public partial class Form1 : Form
         /* A size set by hand in config.cfg, or one this machine's driver does
          * not enumerate, still has to be selectable: without this the box comes
          * up blank and the next Save writes whatever the user picks instead. */
-        if (!comboResolution.Items.Contains(res))
-            InsertResolutionSorted(res);
-        comboResolution.SelectedItem = res;
+        if (config.Get("native_resolution", "0") == "1" && _nativeResText != null)
+        {
+            comboResolution.SelectedItem = _nativeResText;
+        }
+        else
+        {
+            if (!comboResolution.Items.Contains(res))
+                InsertResolutionSorted(res);
+            comboResolution.SelectedItem = res;
+        }
 
         // refresh rate is config-only now (auto-detected by default); keep the
         // hidden combo populated harmlessly so its references stay valid.
@@ -1360,9 +1376,36 @@ public partial class Form1 : Form
             "0");                                        // Windowed
         config.Set("vsync", radioVsyncYes.Checked ? "1" : "0");
         // resolution
-        if (comboResolution.SelectedItem != null)
+        if (comboResolution.SelectedItem != null &&
+            comboResolution.SelectedItem.ToString() == _nativeResText)
+        {
+            /* The render size follows the game, so width/height only size the
+             * window: the desktop when fullscreen, otherwise the largest whole
+             * multiple of 320x240 that leaves room on the screen. */
+            var scr = Screen.PrimaryScreen;
+            int ww, wh;
+
+            if (comboFullscreen.SelectedIndex != 1)
+            {
+                ww = scr.Bounds.Width;
+                wh = scr.Bounds.Height;
+            }
+            else
+            {
+                int k = Math.Min(scr.WorkingArea.Width * 9 / 10 / 320,
+                                 scr.WorkingArea.Height * 9 / 10 / 240);
+                if (k < 2) k = 2;
+                ww = 320 * k;
+                wh = 240 * k;
+            }
+            config.Set("native_resolution", "1");
+            config.Set("width", ww.ToString());
+            config.Set("height", wh.ToString());
+        }
+        else if (comboResolution.SelectedItem != null)
         {
             var parts = comboResolution.SelectedItem.ToString().Split('x');
+            config.Set("native_resolution", "0");
             config.Set("width", parts[0]);
             config.Set("height", parts[1]);
         }

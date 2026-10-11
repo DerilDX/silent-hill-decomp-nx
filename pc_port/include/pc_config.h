@@ -112,6 +112,11 @@ typedef struct {
      * Default 2, which is what the present always did. Only has an effect when
      * the two sizes differ, so mostly borderless at a low render resolution. */
     int scaling;
+    /* Native (PSX) resolution: render each screen at the mode the game itself
+     * sets (320x224 play, 640x448 Konami, 320x448 menus) and scale it to a 4:3
+     * picture in the window. width/height are then only the window size. Off
+     * by default (config key: native_resolution). */
+    int nativeResolution;
     int widescreenMode;  /* 0 = pillarbox (PSX-faithful, default), 1 = Hor+ (extra side content), 2 = stretch */
     int menuPillarbox;   /* 1 = pillarbox 2D screens (menus/load) with 4:3 black bars instead of stretching to fill (config key: menu_pillarbox) */
     int allowLooseFiles; /* 1 = scan gamedata/load/{folder}/{name}.{ext} before CD read (texture mod support) */

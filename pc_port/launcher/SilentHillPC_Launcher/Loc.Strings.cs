@@ -41,6 +41,7 @@ namespace SilentHillPC_Launcher
             // ---- main window: setting labels ----
             { "Game Language:",  new[]{ "Idioma del juego:", "Idioma do jogo:", "Langue du jeu :", "Spielsprache:", "Lingua di gioco:", "ゲーム言語:", "游戏语言:", "Язык игры:", "Język gry:" } },
             { "Menu Type:",      new[]{ "Tipo de menú:", "Tipo de menu:", "Type de menu :", "Menütyp:", "Tipo di menu:", "メニュー種類:", "菜单类型:", "Тип меню:", "Typ menu:" } },
+            { "Native (PSX)",    new[]{ "Nativa (PSX)", "Nativa (PSX)", "Native (PSX)", "Nativ (PSX)", "Nativa (PSX)", "ネイティブ (PSX)", "原生 (PSX)", "Родное (PSX)", "Natywna (PSX)" } },
             { "Automatic",       new[]{ "Automático", "Automático", "Automatique", "Automatisch", "Automatico", "自動", "自动", "Авто", "Automatycznie" } },
             { "US English",      new[]{ "Inglés (EE.UU.)", "Inglês (EUA)", "Anglais (US)", "Englisch (US)", "Inglese (USA)", "英語(米)", "英语(美)", "Англ. (США)", "Angielski (US)" } },
             { "PAL English",     new[]{ "Inglés (PAL)", "Inglês (PAL)", "Anglais (PAL)", "Englisch (PAL)", "Inglese (PAL)", "英語(PAL)", "英语(PAL)", "Англ. (PAL)", "Angielski (PAL)" } },

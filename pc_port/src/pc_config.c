@@ -670,6 +670,10 @@ void PcConfig_Load(const char* path)
         {
             g_PcConfig.imageAdjustScope = (atoi(value) != 0);
         }
+        else if (strcmp(key, "native_resolution") == 0)
+        {
+            g_PcConfig.nativeResolution = (atoi(value) != 0);
+        }
         else if (strcmp(key, "scaling") == 0)
         {
             int v = atoi(value);
