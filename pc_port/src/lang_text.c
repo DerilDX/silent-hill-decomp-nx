@@ -1384,10 +1384,10 @@ void Pc_LangSetLanguage(int lang)
      * Cyrillic byte values. Queue the read the game's own EUR paths queue
      * (game_boot, b_konami, fs_screens): its post-load drops the stale
      * override with the upload and registers the right one, or none for
-     * Russian. PAL only -- on any other disc this read is the one that
-     * wrote the atlas over the trees (see Font_EurGridBacked). */
-    if (g_GameRegion == Region_EUR)
-        Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
+     * Russian. Every disc: the descriptor never leaves the disc's own home
+     * now (the PAL grid elsewhere is a pinned override, no upload), so the
+     * read lands where the disc's font always lands. */
+    Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
 
 
     SH_LOG("[LANG] language switched to '%s'", Pc_LangIdForSlot(lang));

@@ -1277,7 +1277,12 @@ void Font_AtlasReloadNow(void)
     free(raw);
 }
 
-/* Re-lay a FONT16 atlas into whatever shape the active layout expects.
+/* Re-lay a FONT16 atlas into the shape of the home it is about to be uploaded
+ * to -- the DISC's shape, not the active layout's. On a US or JP disc the
+ * layout can be the PAL grid while the upload still goes to the US strip at
+ * (0,496): the grid there is a pinned override (Font_HiresGridSync), and the
+ * native strip stays a strip, or 64 grid rows written from row 496 run off
+ * the bottom of VRAM and leave the strip holding cells 0..20 only.
  *
  * A font pack replaces 1ST/FONT16.TIM wholesale, but the two regions store the
  * same glyphs in different shapes: the US atlas is one strip 256 VRAM units
@@ -1306,7 +1311,7 @@ static unsigned char s_AtlasFit[FONT_EUR_UNITS * 2 * 64];
 int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
 {
     const unsigned char* src = (const unsigned char*)*pixels;
-    int  wantEur = (g_FontLayout->rowsPerPage != 1);
+    int  wantEur = (g_GameRegion == Region_EUR);
     int  isUs    = (*w == FONT_US_UNITS && *h == 16);
     int  isEur   = (*w == FONT_EUR_UNITS && *h >= 64);
     int  c;
@@ -1314,7 +1319,7 @@ int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
     if (src == NULL || (isUs == isEur))
         return 0; /* not a shape this knows; leave it be */
     if (isUs == !wantEur)
-        return 0; /* already what the layout wants -- the common case */
+        return 0; /* already what this disc's home wants -- the common case */
 
     for (c = 0; c < FONT_COLS * 4; c++)
     {
@@ -1424,7 +1429,9 @@ int Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
                                unsigned char** out, int* outW, int* outH,
                                int* outUnits, int* outRows)
 {
-    int wantEur = (g_FontLayout->rowsPerPage != 1);
+    /* The disc's shape, as for Font_FitAtlasToLayout: this entry is keyed to
+     * the descriptor's rect, which never leaves the disc's own home. */
+    int wantEur = (g_GameRegion == Region_EUR);
     int usScale = AtlasScale(w, h, FONT_US_PX_W, FONT_US_PX_H);
     int eurScale = AtlasScale(w, h, FONT_EUR_PX_W, FONT_EUR_PX_H);
     int scale, dstW, dstH, c;
@@ -1433,7 +1440,7 @@ int Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
     if (rgba == NULL || (usScale != 0) == (eurScale != 0))
         return 0; /* neither shape, or ambiguous: leave it alone */
     if ((usScale != 0) == !wantEur)
-        return 0; /* already the shape the layout wants */
+        return 0; /* already the shape this disc's home wants */
 
     scale = usScale ? usScale : eurScale;
     dstW  = wantEur ? FONT_EUR_PX_W * scale : FONT_US_PX_W * scale;

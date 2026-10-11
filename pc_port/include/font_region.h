@@ -121,8 +121,8 @@ int  Font_EurGridBacked(void);
 /* Bring the pinned grid override in line with the layout in force (register,
  * rebuild for a new pack, or drop); Pc_LangInit calls it last. */
 void Font_HiresGridSync(void);
-/* The pinned grid override is registered: this disc's FONT16 hi-res entry
- * would never be sampled, so the loader skips it. */
+/* The pinned grid override is registered and carries the pack's cells, so
+ * the loader leaves the disc's own strip unpatched. */
 int  Font_HiresGridLive(void);
 
 /* The Cyrillic atlas is in force. It replaces every cell, so no Latin hi-res

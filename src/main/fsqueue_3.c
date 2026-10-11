@@ -1235,8 +1235,11 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
          * reload site (boot, Konami, title, save-select) since they all pass
          * through here, and dispatches on which pack is active -- Polish adds
          * a few cells, Russian replaces the atlas. */
-        if (Pc_LangPackActive() || Pc_RuActive())
+        if ((Pc_LangPackActive() || Pc_RuActive()) && !Font_HiresGridLive())
         {
+            /* Not while the pinned grid carries the pack's cells: this strip
+             * is not what the pack draws, and the patchers would only report
+             * that a strip has no room for them. */
             Font_PatchPackGlyphs(tim.paddr, fw, fh);
         }
     }
@@ -1620,16 +1623,8 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             unsigned char* rgba = NULL;
                             int            rw = 0, rh = 0;
 
-                            if (Font_HiresGridLive())
-                            {
-                                /* This disc draws the font through the pinned
-                                 * PAL-grid override (font_region.c), which is
-                                 * built from this same pack; an entry keyed to
-                                 * the disc's own strip would never be sampled. */
-                                declined = 1;
-                            }
-                            else if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
-                                                                &rgba, &rw, &rh) == 0)
+                            if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
+                                                           &rgba, &rw, &rh) == 0)
                             {
                                 /* A US-cut pack is for US English on a USA disc
                                  * only; the PAL pack has all 126 cells and
@@ -1639,11 +1634,16 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                                  * at Cyrillic byte values. The upload above has
                                  * already dropped the previous override for this
                                  * rect, so declining here leaves the native
-                                 * atlas showing, which is the right font. */
+                                 * atlas showing, which is the right font. Only
+                                 * where Cyrillic is IN this rect, though: on a
+                                 * disc whose grid is the pinned override, the
+                                 * strip under this entry is never drawn by
+                                 * Russian, and the entry has to be ready for the
+                                 * next language that does draw the strip. */
                                 const char* why =
                                     !Font_HiresPackUsable(Font_HiresPackShape(rw, rh))
                                         ? "it is cut for the US atlas"
-                                  : Font_RussianLayoutActive()
+                                  : Font_RussianLayoutActive() && !Font_HiresGridLive()
                                         ? "Cyrillic is in force and the pack is Latin art"
                                         : NULL;
 
