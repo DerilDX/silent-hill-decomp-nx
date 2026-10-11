@@ -3781,24 +3781,36 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 *
 	 * The hi-res override sampler decodes nothing: it reads s_texture through GL
 	 * sampler state, which upload_rgba fixes at LINEAR(+mips) for any replacement
-	 * larger than native and never revisits — so neither toggle could reach it and
-	 * HD menu/map art stayed bilinear with menu_filter off. It gets 1 on 3D frames
-	 * unconditionally so world texture packs keep sampling exactly as before,
-	 * while its 2D prims follow the same v_is3d gate the VRAM path uses. */
-	/* menu_filter smooths HD menu/map art, so it only applies to art that is
-	 * actually hi-res. Forcing it on PALETTISED (4/8-bit) textures smeared the
-	 * PSX-native art it was never meant to touch — including the kanji atlas,
-	 * whose 12px cells are packed edge to edge in the framebuffer margins, so a
-	 * bilinear tap at a cell boundary pulls in the NEXT glyph's first column and
-	 * draws it as a full-height vertical bar between characters. That is the
-	 * stray-lines report from the Chinese text, and it would hit Japanese the
-	 * same way. Native paletted art now stays nearest on menu frames, which is
-	 * also what it looks like on hardware. */
+	 * larger than native and never revisits -- so neither toggle can reach it from
+	 * the bind side, and the snap has to happen in the shader. It takes the same
+	 * gate value as the VRAM samplers, so one setting now covers both classes. */
+	/* menu_filter used to be restricted to TF_32_BIT_RGBA, i.e. to hi-res
+	 * replacements only. Native paletted art is nearly all of the UI, so on a
+	 * stock install the setting did nothing whatsoever -- which is the "UI
+	 * option is broken completely, everything stays pixellated" report.
+	 *
+	 * The restriction was a workaround for glyph bleed: the kanji atlas packs
+	 * 12px cells edge to edge, so a bilinear tap at a cell boundary pulled in
+	 * the next glyph's first column and drew it as a vertical bar. Five days
+	 * later the UV-limits clamp landed (TapWeighted above), which pins every tap
+	 * inside the primitive's own vertex-UV box -- and a glyph IS its own rect
+	 * prim with its own box, so a tap cannot reach the neighbouring cell any
+	 * more. At the box edge both taps read the edge texel, which is the
+	 * PSX-faithful colour. The workaround has been redundant since then, and
+	 * only the breakage was left.
+	 *
+	 * texture_filter now also governs hi-res art on 3D frames instead of being
+	 * ignored for it. It was pinned to 1 there so texture packs "kept sampling
+	 * exactly as before", but that is precisely the complaint that the mode has
+	 * no effect: with Filtering off, pack art stayed smooth while native art
+	 * changed, so the two classes disagreed about what the setting meant. Off
+	 * means off everywhere now. A native-resolution replacement comes out the
+	 * same either way (see the hi-res sampler's u_hiresHalf note). */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
-		                ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
-		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_textureFilter > 0) ? 1 : 0));
+		                ? (g_cfg_menuFilter ? 2 : 0)
+		                : ((g_cfg_textureFilter > 0) ? 1 : 0));
 
 	/* How to filter, once the gate above says whether to. Anisotropic is walked
 	 * by hand for CLUT textures (see AnisoTextureSample); 1.0 means plain
