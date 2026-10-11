@@ -68,7 +68,7 @@ enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
        QO_X_TPSRESTZOOM, QO_X_OTSRESTZOOM,
        QO_X_TPSRESTX, QO_X_TPSRESTY, QO_X_TPSAIMX, QO_X_TPSAIMY,
        QO_X_OTSRESTX, QO_X_OTSRESTY, QO_X_OTSAIMX, QO_X_OTSAIMY,
-       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE };
+       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE };
 extern const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz);
 extern void        PcOpt_QuickExtraAdjust(int which, int dir);
 extern void        PcOpt_QuickViewReset(int mode);
@@ -142,6 +142,9 @@ static const QoRowDef s_pageHud[] = {
     { ROW_OPT,   "minimap_require_map",  0, NULL },
     { ROW_OPT,   "crosshair",            0, NULL },
     { ROW_OPT,   "crosshair_size",       0, NULL },
+    /* Quick menu only: crosshair_style has no row in the PC Options table and
+     * does not get one, that page keeps its slack for the next HUD setting. */
+    { ROW_EXTRA, NULL, QO_X_CROSSHAIRSTYLE,  "Crosshair Style" },
     { ROW_OPT,   "text_size",            0, NULL },
     { ROW_OPT,   "low_health_glow",      0, NULL },
     QO_NAV_ROW,

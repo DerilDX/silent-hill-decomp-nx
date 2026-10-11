@@ -33,6 +33,7 @@
 { "Music Volume",         { "Musiklautstärke",     "Volume musique",        "Volumen de música",     "Volume musica"         } },
 { "Effects Volume",       { "Effektlautstärke",    "Volume effets",         "Volumen de efectos",    "Volume effetti"        } },
 { "Disable D-pad for Movement", { "Steuerkreuz nicht zum Laufen", "Croix dir. sans déplacement", "Cruceta sin movimiento", "Croce direz. senza movimento" } },
+{ "Crosshair Style",      { "Fadenkreuz-Stil",     "Style de réticule",    "Estilo de retícula",   "Stile mirino"          } },
 { "Edit Keybinds",        { "Tastenbelegung",      "Modifier les touches",  "Editar controles",      "Modifica tasti"        } },
 { "Control Type",         { "Steuerungsart",       "Type de réglage",       "Tipo de ajuste",        "Tipo di regolazione"   } },
 { "Aspect Trim",          { "Seitenverhältnis",    "Ajust. du format",      "Ajuste de aspecto",     "Regolaz. formato"      } },
@@ -55,6 +56,12 @@
 { "Melee Swing Pullback", { "Nahkampf-Ausholen",   "Recul en mêlée",        "Retroceso cuerpo a cuerpo", "Arretramento in mischia" } },
 
 /* --- Values --- */
+/* crosshair_style shapes. "Cross (+)" keeps the (+) so it cannot be read as
+ * the Cross BUTTON, which shares the English word. */
+{ "Cross (+)",            { "Kreuz (+)",           "Croix (+)",             "Cruz (+)",              "Croce (+)"             } },
+{ "Dot",                  { "Punkt",               "Point",                 "Punto",                 "Punto"                 } },
+{ "Circle",               { "Kreis",               "Cercle",                "Círculo",               "Cerchio"               } },
+{ "Dashes",               { "Striche",             "Tirets",                "Guiones",               "Trattini"              } },
 { "Auto",                 { NULL,                  NULL,                    "Auto.",                 NULL                    } },
 { "Stereo",               { NULL,                  "Stéréo",                "Estéreo",               NULL                    } },
 { "Quad",                 { NULL,                  NULL,                    NULL,                    NULL                    } },

@@ -561,7 +561,7 @@ enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
        QO_X_TPSRESTZOOM, QO_X_OTSRESTZOOM,
        QO_X_TPSRESTX, QO_X_TPSRESTY, QO_X_TPSAIMX, QO_X_TPSAIMY,
        QO_X_OTSRESTX, QO_X_OTSRESTY, QO_X_OTSAIMX, QO_X_OTSAIMY,
-       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE };
+       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE };
 
 /* display_aspect = crt puts the picture on (4:3 x trim), so one framebuffer
  * pixel lands on screen this many times wider than tall at trim 1.0. It is the
@@ -572,6 +572,9 @@ extern void Pc_QuickOptions_InvalidateRows(void);
 
 static const int         QO_SHADOW_SIZES[] = { 256, 512, 1024, 2048, 4096, 8192 };
 static const char* const QO_SPEAKER_LBL[]  = { "Auto", "Stereo", "Quad", "5.1", "7.1" };
+/* crosshair_style 0..3, the order pc_crosshair.c builds (CH_CROSS..CH_DASHES)
+ * and the Backspace cycle in control_style.c reports. */
+static const char* const QO_CROSSHAIR_LBL[] = { "Cross (+)", "Dot", "Circle", "Dashes" };
 static const char* const QO_SPEAKER_IDS[]  = { "auto", "stereo", "quad", "51", "71" };
 
 const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz)
@@ -589,6 +592,18 @@ const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz)
         return Pc_LangQuickMenu(g_PcConfig.dreamBlur ? "On" : "Off");
     case QO_X_DPADMOVE:
         return Pc_LangQuickMenu(g_PcConfig.disableDpadMovement ? "On" : "Off");
+    /* Marked "(off)" while the crosshair itself is off, the way Dream Blur
+     * Strength does, since the shape has nothing to draw then. */
+    case QO_X_CROSSHAIRSTYLE: {
+        int st = g_PcConfig.crosshairStyle & 3;
+
+        if (!g_PcConfig.crosshair) {
+            snprintf(buf, bufsz, "%s  %s", Pc_LangQuick(QO_CROSSHAIR_LBL[st]),
+                     Pc_LangQuick("(off)"));
+            return buf;
+        }
+        return Pc_LangQuick(QO_CROSSHAIR_LBL[st]);
+    }
     case QO_X_DREAMSTR:
         if (!g_PcConfig.dreamBlur) { snprintf(buf, bufsz, "%d%%  %s", (int)(g_PcConfig.dreamBlurStrength * 100.0f + 0.5f), Pc_LangQuick("(off)")); return buf; }
         snprintf(buf, bufsz, "%d%%", (int)(g_PcConfig.dreamBlurStrength * 100.0f + 0.5f));
@@ -1022,6 +1037,18 @@ void PcOpt_QuickExtraAdjust(int which, int dir)
         PcConfig_SaveKeyValue("disable_dpad_movement", g_PcConfig.disableDpadMovement ? "1" : "0");
         Sd_PlaySfx(Sfx_MenuMove, 0, 64);
         break;
+    /* Wraps both ways through the four shapes. Pc_CrosshairBuild reads the
+     * value when it draws, so it applies live; the row does NOT switch the
+     * crosshair on, because picking a shape is not asking for one. */
+    case QO_X_CROSSHAIRSTYLE: {
+        char buf2[8];
+
+        g_PcConfig.crosshairStyle = ((g_PcConfig.crosshairStyle & 3) + dir + 4) % 4;
+        snprintf(buf2, sizeof(buf2), "%d", g_PcConfig.crosshairStyle);
+        PcConfig_SaveKeyValue("crosshair_style", buf2);
+        Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+        break;
+    }
     /* Position offsets: config-only (live = NULL), 128 = ~0.03 units per press.
      * Y presses are inverted so a "+" press raises the camera (stored PSX-down). */
     case QO_X_TPSRESTX: PcOpt_FpsHeadStep(&g_PcConfig.tpsRestX, NULL, "tps_rest_x",  dir * 128); break;
