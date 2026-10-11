@@ -1066,8 +1066,15 @@ void PsyX_EndScene()
 	/* PC port: draw overlays that must NOT be baked into the freeze-frame (the dev
 	 * console) — AFTER the capture, BEFORE the swap, so the console is a true live
 	 * overlay and never doubles against a frozen copy on pause / "no map" screens. */
-	if (g_PsyX_PostCaptureHook)
-		g_PsyX_PostCaptureHook();
+	/* Native resolution draws these after the present instead, at window size
+	 * (GR_SwapWindow). */
+	{
+		extern int          g_PcNativeRender;
+		extern unsigned int g_internalFBO;
+
+		if (g_PsyX_PostCaptureHook && !(g_PcNativeRender && g_internalFBO != 0))
+			g_PsyX_PostCaptureHook();
+	}
 
 	/* PC port: apply the selected full-screen post-process look (color grade,
 	 * CRT, scanlines, vignette, grain, sharpen, PSX downsample, ...) to the

@@ -880,6 +880,16 @@ int g_presentWidth = 0, g_presentHeight = 0;
  * a deliberately low resolution. */
 int g_PcPresentScale = 2;
 
+/* Native (PSX) resolution: the scene target follows the display mode the game
+ * sets each frame -- 320x224 in play, 640x448 for the Konami screens, 320x448
+ * menus -- and is scaled onto the window at present, always as a 4:3 picture
+ * the way a television showed every one of those modes. Set before
+ * GR_InitialiseRender. The PC overlays draw after that scale, at window
+ * resolution: at 320x224 their text would be a few pixels tall. */
+extern "C" void (*g_PsyX_PostCaptureHook)(void);
+int g_PcNativeRender = 0;
+static int s_overlayToWindow = 0;
+
 /* Sharp bilinear needs somewhere to put the nearest whole-multiple upscale
  * before the smooth pass. That intermediate is what keeps texel edges crisp
  * while still easing the leftover fraction. */
@@ -899,7 +909,7 @@ extern "C" void GR_MarkTextureNearest(TextureID tex);
 
 extern "C" GLuint GR_ScreenFBO(void)
 {
-	return g_internalFBO;
+	return s_overlayToWindow ? 0 : g_internalFBO;
 }
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
@@ -953,9 +963,27 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 {
 	int x = 0, y = 0, w = g_presentWidth, h = g_presentHeight;
+
+	/* Every PSX mode is a 4:3 picture, whatever its pixel count. */
+	if (g_PcNativeRender && w > 0 && h > 0)
+	{
+		if (w * 3 > h * 4)
+		{
+			w = (h * 4 + 1) / 3;
+			x = (g_presentWidth - w) / 2;
+		}
+		else
+		{
+			h = (w * 3 + 2) / 4;
+			y = (g_presentHeight - h) / 2;
+		}
+		*outX = x; *outY = y; *outW = w; *outH = h;
+		return;
+	}
 	const bool wantPillarbox =
-		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+		!g_PcNativeRender &&
+		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 
 	if (wantPillarbox && s_internalW > 0 && s_internalH > 0 && h > 0)
 	{
@@ -1013,6 +1041,30 @@ static void GR_PresentBlit(GLuint src, int dx, int dy, int dw, int dh)
 
 		if (ny < n) n = ny;
 		if (n < 1)  n = 1; /* window smaller than the render: just fit it */
+
+		if (mode == 0 && g_PcNativeRender)
+		{
+			/* A PSX mode's pixels are not square (320x224 fills a 4:3 screen),
+			 * so whole multiples go on the LINES, as a television's scan does,
+			 * and the width follows 4:3. Shimmer-free vertically, which is where
+			 * the eye catches it. */
+			int       k  = dh / s_internalH;
+			const int iw0 = (s_internalH * 4) / 3;
+
+			if (k < 1) k = 1;
+			while (k > 1 && iw0 * k > dw)
+				k--;
+			{
+				const int ih = s_internalH * k;
+				const int iw = (ih * 4) / 3;
+				const int ix = dx + (dw - iw) / 2;
+				const int iy = dy + (dh - ih) / 2;
+
+				glBlitFramebuffer(0, 0, s_internalW, s_internalH, ix, iy, ix + iw, iy + ih,
+				                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			}
+			return;
+		}
 
 		if (mode == 0)
 		{
@@ -1647,6 +1699,25 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 	g_presentWidth  = realW;
 	g_presentHeight = realH;
 
+	/* Native: the target keeps whatever mode the game is in (GR_NativeTrack);
+	 * a window resize only moves where it lands. 320x240 until the first
+	 * PutDispEnv says otherwise. */
+	if (g_PcNativeRender)
+	{
+		const int w = (s_internalW > 0) ? s_internalW : 320;
+		const int h = (s_internalH > 0) ? s_internalH : 240;
+
+		if (GR_SetInternalResolution(w, h))
+		{
+			g_windowWidth  = w;
+			g_windowHeight = h;
+			return;
+		}
+		eprintwarn("Native resolution unavailable: the internal target could not be created; "
+		           "rendering at the window size instead.\n");
+		g_PcNativeRender = 0;
+	}
+
 	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
 	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
 	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
@@ -1691,9 +1762,11 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 
 		s_suppressWindowMsaa = 0;
 
-		if (fullscreen == 2 && width > 0 && height > 0 && g_cfg_msaaSamples > 0 &&
-		    SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
-		    (width != dm.w || height != dm.h))
+		if (g_cfg_msaaSamples > 0 &&
+		    (g_PcNativeRender ||
+		     (fullscreen == 2 && width > 0 && height > 0 &&
+		      SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
+		      (width != dm.w || height != dm.h))))
 		{
 			/* The WINDOW must stay single-sample either way: the present is a
 			 * blit into the default framebuffer, and a single-sample source into
@@ -1830,9 +1903,33 @@ void GR_UpdateSwapIntervalState(int swapInterval)
 #endif
 }
 
+/* Follow the display mode the game set. Done at the top of a frame, so a frame
+ * is never split across two targets; the one frame drawn after a switch is
+ * still mapped correctly (DrawEnvDimensions reads the live mode), just at the
+ * previous size. Sizes outside anything the PSX can display are ignored. */
+static void GR_NativeTrack(void)
+{
+	const int w = activeDispEnv.disp.w;
+	const int h = activeDispEnv.disp.h;
+
+	if (!g_PcNativeRender || g_internalFBO == 0)
+		return;
+	if (w < 256 || w > 640 || h < 192 || h > 512)
+		return;
+	if (w == s_internalW && h == s_internalH)
+		return;
+
+	if (GR_SetInternalResolution(w, h))
+	{
+		g_windowWidth  = w;
+		g_windowHeight = h;
+	}
+}
+
 void GR_BeginScene()
 {
 	g_lastBoundTexture = 0;
+	GR_NativeTrack();
 
 #if USE_OPENGL
 #ifdef RENDERER_OGLES
@@ -4091,8 +4188,9 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	 * then clear only the 4:3 region to the requested color via a scissor.
 	 * Skipped when the clear is already black (menus) — those bars are fine. */
 	const bool wantPillarbox =
-		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+		!g_PcNativeRender &&
+		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	/* Menus are NOT excluded any more. They used to be, on the grounds that a
 	 * black clear leaves black bars anyway -- but the fall-through path at the
 	 * bottom runs with the PSX clip-rect SCISSOR still enabled, so its clear is
@@ -4335,9 +4433,20 @@ void GR_SetScissorState(int enable)
 extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* outH)
 {
 	int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
+
+	if (s_overlayToWindow)
+	{
+		GR_PresentRect(&vpX, &vpY, &vpW, &vpH);
+		if (outX) *outX = vpX;
+		if (outY) *outY = vpY;
+		if (outW) *outW = vpW;
+		if (outH) *outH = vpH;
+		return;
+	}
 	const bool wantPillarbox =
-		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+		!g_PcNativeRender &&
+		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -4374,8 +4483,9 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 		}
 	}
 	const bool wantPillarbox =
-		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+		!g_PcNativeRender &&
+		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -4676,8 +4786,9 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		{
 			int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
 			const bool wantPillarbox =
-				(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-				(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+				!g_PcNativeRender &&
+				((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 			if (wantPillarbox && g_windowHeight > 0) {
 				const float psxAspect = 4.0f / 3.0f;
 				const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -6885,6 +6996,19 @@ void GR_SwapWindow()
 		}
 
 		GR_PresentBlit(src, dx, dy, dw, dh);
+
+		/* Native: the PC overlays draw now, onto the window over the scaled
+		 * picture, in the same 4:3 rect -- so their pointer fractions still
+		 * line up (PsyX_MapWindowToViewport works in fractions of it). */
+		if (g_PcNativeRender && g_PsyX_PostCaptureHook)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glViewport(dx, dy, dw, dh);
+			s_overlayToWindow = 1;
+			g_PsyX_PostCaptureHook();
+			s_overlayToWindow = 0;
+			glViewport(0, 0, g_presentWidth, g_presentHeight);
+		}
 		if (g_PsxVoidProbeArmed)
 		{
 			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
