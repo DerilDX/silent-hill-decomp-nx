@@ -402,8 +402,8 @@ typedef struct {
      * players own the USA disc, and a US disc with no Language row is the
      * reason a translator had to ship their own font patch to test. Off, a
      * US or JP disc offers only its own languages and the Shift-JIS packs.
-     * (It no longer imports the PAL glyph atlas anywhere: that home is other
-     * art on those discs -- see Font_EurGridBacked.)
+     * (On a US or JP disc the PAL glyph grid is a pinned override, never an
+     * upload: that home is other art there -- see Font_EurGridBacked.)
      * (config: cross_region_languages) */
     int crossRegionLanguages;
 

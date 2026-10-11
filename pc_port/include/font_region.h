@@ -96,8 +96,9 @@ void Font_PatchPackGlyphs(void* pixels, int widthWords, int height);
  * advances change on the same frame. */
 void Font_AtlasReloadNow(void);
 
-/* Import the PAL 126-cell atlas onto a disc that does not carry it, so a pack
- * language gets real accents instead of base letters. No-op on a PAL disc. */
+/* Draw from the PAL 126-cell grid on a disc that does not carry it, so a pack
+ * language gets real accents instead of base letters. The grid itself is a
+ * pinned override there (Font_HiresGridSync). No-op on a PAL disc. */
 void Font_UseEurAtlas(void);
 
 /* Re-lay a FONT16 atlas between the US strip and the PAL grid so a font pack
@@ -111,11 +112,18 @@ int  Font_FitAtlasToLayout(void** pixels, int* w, int* h);
 int  Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
                                 unsigned char** out, int* outW, int* outH,
                                 int* outUnits, int* outRows);
-int  Font_EurAtlasImported(void);
 
-/* Whether the PAL cell grid at VRAM (768,128) is readable on this disc. The
+/* Whether a draw pointed at the PAL cell grid (768,128) finds the PAL atlas:
+ * VRAM on a PAL disc, a pinned override built from eur16.tim elsewhere. The
  * single owner of that rule; nothing may draw from that grid while it is 0. */
 int  Font_EurGridBacked(void);
+
+/* Bring the pinned grid override in line with the layout in force (register,
+ * rebuild for a new pack, or drop); Pc_LangInit calls it last. */
+void Font_HiresGridSync(void);
+/* The pinned grid override is registered: this disc's FONT16 hi-res entry
+ * would never be sampled, so the loader skips it. */
+int  Font_HiresGridLive(void);
 
 /* The Cyrillic atlas is in force. It replaces every cell, so no Latin hi-res
  * pack can stand in for any of them. */

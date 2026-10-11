@@ -1620,8 +1620,16 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
                             unsigned char* rgba = NULL;
                             int            rw = 0, rh = 0;
 
-                            if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
-                                                           &rgba, &rw, &rh) == 0)
+                            if (Font_HiresGridLive())
+                            {
+                                /* This disc draws the font through the pinned
+                                 * PAL-grid override (font_region.c), which is
+                                 * built from this same pack; an entry keyed to
+                                 * the disc's own strip would never be sampled. */
+                                declined = 1;
+                            }
+                            else if (HiresOverride_DecodeToRGBA(buf, (unsigned int)sz,
+                                                                &rgba, &rw, &rh) == 0)
                             {
                                 /* A US-cut pack is for US English on a USA disc
                                  * only; the PAL pack has all 126 cells and

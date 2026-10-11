@@ -12,6 +12,8 @@
 #include "bodyprog/bodyprog.h"           /* g_Font16AtlasImg */
 #include "bodyprog/text/text_draw.h"     /* GLYPH_TABLE_ASCII_OFFSET, FONT_12X16_* */
 #include "main/fileinfo.h"               /* g_GameRegion */
+#include "hires_override.h"             /* the pinned grid override */
+#include "pc_big_lm.h"                  /* Pc_LooseFOpen */
 #include "pc_config.h"
 #include "sh_log.h"
 
@@ -84,23 +86,39 @@ static int s_PolishLayoutActive;
 static int s_PtLayoutActive;
 static int s_RussianLayoutActive;
 
-/* The PAL atlas, in use on a disc that does not carry it. Its 126 cells are
- * what every pack language draws through -- the accents the four PAL languages
- * need, and the cells Polish and Russian build their letters into -- so a pack
- * on a US or Japanese disc uploads it from gamedata/font/eur16.tim rather than
- * settling for the 84-cell US strip. It is 64 VRAM units wide at (768,128),
- * which stops short of the fire texture at 832; the Konami logo does cross it,
- * so the pre-title reload PAL already does is needed here too. */
-static int s_EurAtlasImported;
-
-/* The FONT16 descriptor as this disc shipped it, saved the first time the
- * import moves it. Clearing the import has to put it back: the descriptor is
- * where the NEXT upload goes, so leaving it at the PAL home would send a US
- * atlas there and read the old one from an address nothing writes any more. */
-static s_FsImageDesc s_Font16Home;
-static int           s_Font16HomeSaved;
+/* The PAL cell grid on a disc that does not carry it.
+ *
+ * Its 126 cells are what every pack language draws through -- the accents the
+ * four PAL languages need, and the cells Polish and Russian build their
+ * letters into. On a USA or Japanese disc its VRAM home (768,128) belongs to
+ * other art (Font_EurGridBacked), so the atlas is never UPLOADED there: it is
+ * registered as a hi-res override keyed to the grid's tpage and CLUT -- the GL
+ * texture the draw samples instead of VRAM -- and pinned, so the uploads that
+ * own those cells (KONAMI, BG_ETC, TV2) neither stale it nor evict it. VRAM is
+ * untouched, so the trees keep their texels and the font keeps its letters.
+ *
+ * Source: the installed HD font pack when it is PAL-shaped, else
+ * gamedata/font/eur16.tim at native size. Russian always takes the TIM: its
+ * pack replaces every cell with Cyrillic and a hi-res pack is Latin art. */
+static unsigned char*     s_HiresGridHd; /* decoded PAL-shaped pack, pristine */
+static int                s_HiresGridHdW, s_HiresGridHdH;
+static int                s_HiresGridHdProbed;
+static int                s_HiresGridTimSeen;
+static int                s_HiresGridLive;
+static unsigned long long s_HiresGridHash; /* source + pack flags it was built for */
 
 #define EUR_ATLAS_PATH "gamedata/font/eur16.tim"
+#define HD_FONT_PATH   "gamedata/load/1ST/FONT16.png"
+
+/* The grid's retail PAL home and palette: tpage 12 at v 128, 64 units by 96
+ * rows at 4bpp, CLUT (816,255). The override key must be exactly what
+ * s_FontLayout_EUR's prims resolve to (tpageBase 0x0C, packedClut 0x3FF3). */
+#define GRID_VRAM_X 768
+#define GRID_VRAM_Y 128
+#define GRID_VRAM_W 64
+#define GRID_VRAM_H 96
+#define GRID_CLUT_X 816
+#define GRID_CLUT_Y 255
 
 /* == FONT_12X16_LINE_COUNT_MAX (see font_region.h). Region-independent default
  * so USA and NTSC-J evaluate every site exactly as before; Font_ApplyRegionPatches
@@ -714,95 +732,66 @@ void Font_UsePolishLayout(void)
     }
 }
 
-/* Is the PAL cell grid at VRAM (768,128) actually readable on this disc?
+/* Can a draw pointed at the PAL cell grid find the PAL atlas there?
  *
- * Only on a PAL disc. On a US or JP one that address belongs to other art and
- * always will: KONAMI.TIM (768,0 96x384) and BG_ETC.TIM (768,0) cover it at
- * boot, and from the mall onward map4_s03 re-uploads TV2.TIM to (800,0 64x256)
- * on every visit -- its relocation away from the font is `if (g_GameRegion ==
- * Region_EUR)` only (map4_s03.c:3891-3931). So whoever writes last wins, and
- * the font cannot win a fight it has to keep winning all session.
+ * On a PAL disc the grid is real VRAM at (768,128). On a US or JP one that
+ * address belongs to other art and always will: KONAMI.TIM (768,0 96x384) and
+ * BG_ETC.TIM (768,0) cover it at boot, and from the mall onward map4_s03
+ * re-uploads TV2.TIM to (800,0 64x256) on every visit -- its relocation away
+ * from the font is `if (g_GameRegion == Region_EUR)` only (map4_s03.c:3891).
+ * Whoever writes last wins, and the font cannot win a fight it has to keep
+ * winning all session. So there the grid is backed without any upload, by a
+ * pinned override built from eur16.tim (Font_HiresGridSync) -- which makes
+ * that file the whole condition, opt-out through crossRegionLanguages.
  *
  * This is the one predicate that decides it, so the rule has a single owner.
  * Nothing may point the draw at that grid while this returns 0. */
 int Font_EurGridBacked(void)
 {
-    return g_GameRegion == Region_EUR;
-}
-
-/* Point FONT16's descriptor at the PAL home and remember to feed it the PAL
- * atlas. No-op on a PAL disc, which is already there. */
-void Font_UseEurAtlas(void)
-{
     if (g_GameRegion == Region_EUR)
-        return;
-
-    /* And a no-op everywhere else, for now, because the grid is not readable
-     * there -- see Font_EurGridBacked. Importing it anyway is what destroyed
-     * the trees in one direction and produced the pink glyph blocks in the
-     * other; both were this one collision. A pack language keeps the disc's
-     * own atlas and draws base letters instead of accents, which is legible
-     * and cannot corrupt anything. */
-    if (!Font_EurGridBacked())
-    {
-        SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid at (768,128) "
-               "is other art on this disc, so a pack language draws base letters");
-        return;
-    }
-
-    /* Moving FONT16 to the PAL home leaves a hi-res font pack's override
-     * registered against the old rect, so the pack silently stops applying.
-     * Opt-in only, for that reason as much as any. */
+        return 1;
     if (!g_PcConfig.crossRegionLanguages)
-        return;
-
-    /* Only move the descriptor if the atlas is actually there to put in it.
-     * An install missing this file would otherwise point FONT16 at a VRAM home
-     * nothing ever fills, and every glyph would draw from blank memory -- the
-     * language would be unreadable rather than merely unaccented. Falling back
-     * leaves the disc's own atlas in place, which is where this started.
-     *
-     * Everything from here down is unreachable while Font_EurGridBacked is
-     * tied to the disc region, and is kept on purpose: it is the descriptor
-     * move and home save/restore a hi-res override would need to back the
-     * grid on a US disc without a VRAM upload, which is the planned way to
-     * give those discs real accents. Deleting it would just be re-typed. */
+        return 0;
+    if (!s_HiresGridTimSeen)
     {
         FILE* probe = fopen(EUR_ATLAS_PATH, "rb");
 
         if (probe == NULL)
         {
-            SH_WARN("[FONT] %s is missing - keeping this disc's own atlas, so a "
-                    "pack language draws base letters instead of accents",
-                    EUR_ATLAS_PATH);
-            return;
+            static int s_warned;
+
+            if (!s_warned)
+            {
+                s_warned = 1;
+                SH_WARN("[FONT] %s is missing - a pack language draws base "
+                        "letters from this disc's own atlas", EUR_ATLAS_PATH);
+            }
+            return 0;
         }
         fclose(probe);
+        s_HiresGridTimSeen = 1;
     }
-
-    /* BEFORE the writes below, or the "home" saved is the PAL one and
-     * Font_ResetLayout's restore puts back what it was meant to undo. */
-    if (!s_Font16HomeSaved)
-    {
-        s_Font16Home      = g_Font16AtlasImg;
-        s_Font16HomeSaved = 1;
-    }
-
-    g_Font16AtlasImg.tPage[0] = 0;
-    g_Font16AtlasImg.tPage[1] = 12;
-    g_Font16AtlasImg.u        = 0;
-    g_Font16AtlasImg.v        = 128;
-    g_Font16AtlasImg.clutX    = 816;
-    g_Font16AtlasImg.clutY    = 255;
-
-    s_EurAtlasImported = 1;
-    if (g_FontLayout == &s_FontLayout_USA)
-        g_FontLayout = &s_FontLayout_EUR;
+    return 1;
 }
 
-int Font_EurAtlasImported(void)
+/* Draw from the PAL cell grid on a disc that does not carry it. No-op on a
+ * PAL disc, which already does. Only the draw address moves: FONT16's
+ * descriptor stays at this disc's own home, because the grid is fed by
+ * Font_HiresGridSync and never by an upload. */
+void Font_UseEurAtlas(void)
 {
-    return s_EurAtlasImported;
+    if (g_GameRegion == Region_EUR)
+        return;
+
+    if (!Font_EurGridBacked())
+    {
+        SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid is not backed "
+               "on this disc, so a pack language draws base letters");
+        return;
+    }
+
+    if (g_FontLayout == &s_FontLayout_USA)
+        g_FontLayout = &s_FontLayout_EUR;
 }
 
 int Font_RussianLayoutActive(void)
@@ -1132,12 +1121,6 @@ void Font_ResetLayout(void)
     s_RussianLayoutActive = 0;
     s_PtLayoutActive = 0;
 
-    /* Put the descriptor back where this disc keeps its own atlas, or the next
-     * upload lands at the imported home and the layout reads somewhere else. */
-    if (s_EurAtlasImported && s_Font16HomeSaved)
-        g_Font16AtlasImg = s_Font16Home;
-
-    s_EurAtlasImported = 0;
     g_FontLayout = (g_GameRegion == Region_EUR) ? &s_FontLayout_EUR : &s_FontLayout_USA;
 }
 
@@ -1228,7 +1211,7 @@ void Font_ApplyRegionPatches(void)
  * more later -- so for those frames the old pixels are drawn at the new
  * language's advances, which is the "delayed change" a Russian switch showed.
  * Doing the read and the LoadImage inline keeps the two in step. */
-static unsigned char* FontReadFile(const char* path, unsigned int* outSize)
+static unsigned char* FontReadFile(const char* path, unsigned int* outSize, long cap)
 {
     FILE*          f = fopen(path, "rb");
     long           n;
@@ -1236,13 +1219,13 @@ static unsigned char* FontReadFile(const char* path, unsigned int* outSize)
 
     if (f == NULL)
     {
-        SH_WARN("[FONT] %s is missing - the PAL atlas cannot be imported", path);
+        SH_WARN("[FONT] %s is missing", path);
         return NULL;
     }
     fseek(f, 0, SEEK_END);
     n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    buf = (n > 0 && n < (1 << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+    buf = (n > 0 && n < cap) ? (unsigned char*)malloc((size_t)n) : NULL;
     if (buf == NULL || fread(buf, 1, (size_t)n, f) != (size_t)n)
     {
         free(buf);
@@ -1265,8 +1248,7 @@ void Font_AtlasReloadNow(void)
     if (size == 0)
         return;
 
-    raw = s_EurAtlasImported ? FontReadFile(EUR_ATLAS_PATH, &size)
-                             : Pc_LangReadDiscFile(info->startSector, size);
+    raw = Pc_LangReadDiscFile(info->startSector, size);
     if (raw == NULL)
     {
         SH_WARN("[FONT] could not re-read FONT16 - the atlas keeps the old language's glyphs");
@@ -1503,4 +1485,184 @@ int Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
     SH_LOG("[FONT] hi-res font pack re-laid from the %s shape to the %s one (%dx) ",
            usScale ? "US" : "PAL", wantEur ? "PAL" : "US", scale);
     return scale;
+}
+
+/* ---- The PAL grid as a pinned override (see the statics above) ------------ */
+
+int Font_HiresGridLive(void)
+{
+    return s_HiresGridLive;
+}
+
+static void FontHiresGridProbeHd(void)
+{
+    FILE*          f;
+    long           n = 0;
+    unsigned char* buf;
+    unsigned char* rgba = NULL;
+    int            w = 0, h = 0;
+
+    s_HiresGridHdProbed = 1;
+
+    f = Pc_LooseFOpen(HD_FONT_PATH, "rb");
+    if (f == NULL)
+        return;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = (n > 0 && n < (64L << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+    if (buf == NULL || fread(buf, 1, (size_t)n, f) != (size_t)n)
+    {
+        free(buf);
+        fclose(f);
+        return;
+    }
+    fclose(f);
+
+    if (HiresOverride_DecodeToRGBA(buf, (unsigned int)n, &rgba, &w, &h) == 0)
+    {
+        /* A US-cut pack has no accent rows to give; the grid takes the TIM
+         * then, and the pack keeps applying to US English the way it did. */
+        if (Font_HiresPackShape(w, h) == FONT_PACK_SHAPE_PAL)
+        {
+            s_HiresGridHd  = rgba;
+            s_HiresGridHdW = w;
+            s_HiresGridHdH = h;
+        }
+        else
+        {
+            SH_LOG("[FONT] %s is cut for the US atlas; the PAL grid on this disc "
+                   "uses %s at native size", HD_FONT_PATH, EUR_ATLAS_PATH);
+            free(rgba);
+        }
+    }
+    free(buf);
+}
+
+/* eur16.tim with the active pack's letters built in, as RGBA at 1:1. The 4bpp
+ * patchers work on the TIM's pixels in place, so the decode that follows
+ * carries their cells. */
+static unsigned char* FontHiresGridFromTim(int* outW, int* outH)
+{
+    unsigned int   size = 0;
+    unsigned char* raw  = FontReadFile(EUR_ATLAS_PATH, &size, 1L << 20);
+    unsigned char* rgba = NULL;
+    TIM_IMAGE      tim;
+
+    if (raw == NULL)
+        return NULL;
+
+    OpenTIM((u_long*)raw);
+    if (ReadTIM(&tim) != NULL && tim.prect != NULL)
+    {
+        Font_PatchPackGlyphs(tim.paddr, tim.prect->w, tim.prect->h);
+        if (HiresOverride_DecodeToRGBA(raw, size, &rgba, outW, outH) != 0)
+            rgba = NULL;
+    }
+    free(raw);
+
+    if (rgba != NULL && (*outW != FONT_EUR_PX_W || *outH != FONT_EUR_PX_H))
+    {
+        SH_WARN("[FONT] %s decoded to %dx%d, not the %dx%d grid", EUR_ATLAS_PATH,
+                *outW, *outH, FONT_EUR_PX_W, FONT_EUR_PX_H);
+        free(rgba);
+        rgba = NULL;
+    }
+    return rgba;
+}
+
+/* Bring the pinned override in line with the layout now in force. Called once
+ * at the end of every Pc_LangInit, when the layout and the pack flags are
+ * final: the grid is wanted exactly when the draw points at it on a disc that
+ * has nothing there, and then the override must carry THIS language's cells.
+ * Re-registering what is already there is a hash no-op, so a map load costs
+ * nothing; a language step rebuilds it once. */
+void Font_HiresGridSync(void)
+{
+    unsigned char*     rgba = NULL;
+    int                w = 0, h = 0;
+    int                fromHd;
+    int                flags;
+    unsigned long long hash;
+
+    if (g_GameRegion == Region_EUR || g_FontLayout->rowsPerPage == 1)
+    {
+        if (s_HiresGridLive)
+        {
+            HiresOverride_DropVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                       GRID_CLUT_X, GRID_CLUT_Y, 4);
+            s_HiresGridLive = 0;
+            s_HiresGridHash = 0;
+            SH_LOG("[FONT] PAL grid override released: this language draws this disc's own atlas");
+        }
+        return;
+    }
+
+    if (!s_HiresGridHdProbed)
+        FontHiresGridProbeHd();
+
+    fromHd = (s_HiresGridHd != NULL && !s_RussianLayoutActive);
+    flags  = (s_PolishLayoutActive ? 1 : 0) | (s_PtLayoutActive ? 2 : 0) |
+             (s_RussianLayoutActive ? 4 : 0) | (Pc_RuDiscNeedsEFix() ? 8 : 0);
+    hash   = 0x464F4E5447524944ull ^ ((unsigned long long)(fromHd ? 1 : 2) << 8) ^
+             (unsigned long long)flags;
+    if (s_HiresGridLive && hash == s_HiresGridHash)
+        return;
+
+    if (fromHd)
+    {
+        size_t bytes = (size_t)s_HiresGridHdW * (size_t)s_HiresGridHdH * 4;
+
+        rgba = (unsigned char*)malloc(bytes);
+        if (rgba != NULL)
+        {
+            memcpy(rgba, s_HiresGridHd, bytes);
+            w = s_HiresGridHdW;
+            h = s_HiresGridHdH;
+            Font_PatchPackGlyphsHires(rgba, w, h, Font_HiresAtlasScale(w, h));
+        }
+    }
+    else
+    {
+        rgba = FontHiresGridFromTim(&w, &h);
+    }
+
+    if (rgba != NULL)
+    {
+        int ok;
+
+        /* Gutterless glyph cells bleed under bilinear sampling, same as the
+         * font pack path in fsqueue_3.c. */
+        HiresOverride_SetForceNearestUpload(1);
+        ok = HiresOverride_RegisterRGBAKeyed("PAL grid", rgba, w, h,
+                                             GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                             GRID_CLUT_X, GRID_CLUT_Y, 4, hash) == 0 &&
+             HiresOverride_PinVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                       GRID_CLUT_X, GRID_CLUT_Y, 4, 1) == 0;
+        HiresOverride_SetForceNearestUpload(0);
+        free(rgba);
+
+        if (ok)
+        {
+            s_HiresGridLive = 1;
+            s_HiresGridHash = hash;
+            SH_LOG("[FONT] PAL grid backed by a pinned %dx%d override from %s",
+                   w, h, fromHd ? HD_FONT_PATH : EUR_ATLAS_PATH);
+            return;
+        }
+    }
+
+    /* Nothing may read the grid without a backing (Font_EurGridBacked): a draw
+     * there would show tree texels, so the draw goes back to this disc's own
+     * atlas and base letters instead. */
+    SH_WARN("[FONT] could not back the PAL grid - this language draws base letters "
+            "from this disc's own atlas");
+    if (s_HiresGridLive)
+    {
+        HiresOverride_DropVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                   GRID_CLUT_X, GRID_CLUT_Y, 4);
+        s_HiresGridLive = 0;
+        s_HiresGridHash = 0;
+    }
+    g_FontLayout = &s_FontLayout_USA;
 }

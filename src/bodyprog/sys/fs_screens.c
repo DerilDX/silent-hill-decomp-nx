@@ -50,12 +50,6 @@ void GameFs_TitleGfxLoad(void) // 0x80032BF0
     {
         Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
     }
-    else if (Font_EurAtlasImported())
-    {
-        /* Same reason, on a disc whose own FONT16 is elsewhere: the imported
-         * atlas sits in the band the Konami logo just wrote over. */
-        Font_AtlasReloadNow();
-    }
 #else
 #if VERSION_REGION_IS(NTSC)
     Fs_QueueStartReadTim(FILE_TIM_TITLE_E_TIM, FS_BUFFER_3, &g_TitleImg);

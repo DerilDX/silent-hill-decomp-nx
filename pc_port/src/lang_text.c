@@ -1005,7 +1005,17 @@ static int JpnFanTextInit(void)
     return adopted;
 }
 
+static void LangInitBody(void);
+
 void Pc_LangInit(void)
+{
+    LangInitBody();
+    /* Every exit above leaves the layout and the pack flags final; on a disc
+     * without the PAL grid the override that stands in for it follows them. */
+    Font_HiresGridSync();
+}
+
+static void LangInitBody(void)
 {
     unsigned int   sector;
     unsigned int   blocks;
@@ -1126,11 +1136,13 @@ void Pc_LangInit(void)
         {
             /* Whatever letterforms this pack needs; the atlas itself is built
              * at FONT16 upload (Font_PatchPackGlyphs). */
-            /* On a PAL disc every non-kanji pack draws through the PAL atlas:
-             * the Latin ones for their accents, Polish and Russian for the
-             * cells they build into. Anywhere else Font_UseEurAtlas declines
-             * (Font_EurGridBacked) and the pack draws base letters. A
-             * Shift-JIS pack rasterizes its own and needs none either way. */
+            /* Every non-kanji pack draws through the PAL grid: the Latin ones
+             * for their accents, Polish and Russian for the cells they build
+             * into. On a PAL disc that is the atlas in VRAM; elsewhere it is
+             * the pinned override Font_HiresGridSync registers, or, with no
+             * eur16.tim to build it from, Font_UseEurAtlas declines and the
+             * pack draws base letters. A Shift-JIS pack rasterizes its own
+             * and needs none either way. */
             if (!LangPackFontIsKanji(Pc_LangPackFont()))
             {
                 Font_UseEurAtlas();
@@ -1360,7 +1372,7 @@ void Pc_LangSetLanguage(int lang)
      * pixels at the new advances -- visible as a lag when stepping on or off
      * Russian, which replaces the whole atlas. EUR only; pack languages need
      * that atlas. */
-    if (g_GameRegion == Region_EUR || Font_EurAtlasImported())
+    if (g_GameRegion == Region_EUR)
     {
         Font_AtlasReloadNow();
     }
@@ -2689,5 +2701,5 @@ void Pc_LangSelfCheck(void (*out)(const char*, ...))
             (Pc_LangPackActive() && s_StatPackMsgs == 0) ? "  <-- PACK TEXT MISSING" : "");
     out("  item text %s", (s_ItemPool != NULL) ? "installed from disc" : "compiled");
     out("  font      %s%s", Pc_LangSjisActive() ? "Shift-JIS" : "atlas",
-        Font_EurAtlasImported() ? ", PAL atlas imported" : "");
+        Font_HiresGridLive() ? ", PAL grid via pinned override" : "");
 }

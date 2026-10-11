@@ -245,8 +245,18 @@ int  HiresOverride_RegisterDdsKeyed(const char* label,
  * VRAM region that was just rewritten — pool slots and map atlas VRAM
  * recycle the same rect+clut for different TIMs, and a surviving entry
  * would bind the OLD image to the new material's prims. Call for every
- * VRAM upload (pixels and CLUT rects). */
+ * VRAM upload (pixels and CLUT rects). Pinned entries are exempt. */
 void HiresOverride_InvalidateVramRect(int x, int y, int w, int h);
+
+/* Pin (or unpin) the entry registered under exactly this key, so neither
+ * HiresOverride_InvalidateVramRect nor the evictor removes it. For an override
+ * whose VRAM home is on purpose never uploaded (the PAL font grid on a USA or
+ * Japanese disc); the owner drops it with HiresOverride_DropVramRect. Both
+ * return -1 when no entry has that key. */
+int HiresOverride_PinVramRect(int vramX, int vramY, int vramW, int vramH,
+                              int clutX, int clutY, int bitDepth, int pin);
+int HiresOverride_DropVramRect(int vramX, int vramY, int vramW, int vramH,
+                               int clutX, int clutY, int bitDepth);
 
 /* True once live pack-composed GL textures exceed the byte budget. Pack
  * compose loops (fsqueue_3.c) stop making MORE pack textures then — rows
