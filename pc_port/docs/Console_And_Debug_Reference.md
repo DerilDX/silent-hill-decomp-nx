@@ -220,7 +220,7 @@ Require `allow_debug_controls = 1`. (In-game references: `debug` / `debug 2`.)
 | `-` | Give Hunting Rifle + 30 shells. |
 | `=` | Give Shotgun + 30 shells. |
 | `'` | Collision visualizer panel. |
-| `K` / `,` `.` | Keyframe inspector; scrub (hold = faster). |
+| `,` `.` / `N` / `P` | Keyframe viewer (turn it on with `kf`): scrub (hold = faster), change viewed character, play the anim. |
 | `L` | Log the FPS-camera eye offset (for baking `g_PcFpsOffset`). |
 
 **Free camera** (also the quick options menu's Cheats page, no dev controls needed there)

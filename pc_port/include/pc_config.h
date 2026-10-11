@@ -445,7 +445,7 @@ typedef struct {
     /* Play as another character (config key: player_character): harry (default),
      * lisa, cybil, kaufmann, dahlia. Swaps the player's rendered model while
      * keeping Harry's animations/gameplay; also cycled in-game with - / = while
-     * the K keyframe viewer is on, or the console PLAYAS command. */
+     * the keyframe viewer is on, or the console PLAYAS command. */
     char playerCharacter[16];
 
     /* Raise the pitch of Harry's OWN VOICE sound effects — his hurt cries,

@@ -1567,10 +1567,10 @@ NOTE: cheat / debug row. Keep key names in brackets
 EN: Collision visualizer
 RU: Показ коллизий
 
-[QUICK.Keyframe_viewer_(K)]
+[QUICK.Keyframe_viewer_(kf)]
 NOTE: cheat / debug row. Keep key names in brackets
-EN: Keyframe viewer (K)
-RU: Просмотр кадров (K)
+EN: Keyframe viewer (kf)
+RU: Просмотр кадров (kf)
 
 [QUICK.Fast_forward_(Ctrl+F5)]
 NOTE: cheat / debug row. Keep key names in brackets

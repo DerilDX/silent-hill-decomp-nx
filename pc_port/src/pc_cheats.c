@@ -261,7 +261,7 @@ static const CheatRow s_debug[] = {
      * config key and the handful of dev keys behind it. */
     { "Allow console",        CH_DEBUGKEYS, NULL, NULL },
     { "Collision visualizer", CH_TOGGLE,  &g_CollVisEnabled,  NULL },
-    { "Keyframe viewer (K)",  CH_TOGGLE,  &g_DebugAnimKfView, NULL },
+    { "Keyframe viewer (kf)", CH_TOGGLE,  &g_DebugAnimKfView, NULL },
     /* Also on Ctrl+F5 / Ctrl+F1 / Ctrl+F2. The key and the row drive the same
      * state, except fast-forward, where the key is a HOLD and this row is a
      * sticky toggle -- they use separate flags so releasing the key cannot

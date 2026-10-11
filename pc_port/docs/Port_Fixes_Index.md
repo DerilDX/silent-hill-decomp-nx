@@ -1933,12 +1933,12 @@ arena with a canary, and the worst-case document is ~38 KiB of `POLY_FT4`.
 ## Play as another character — Lisa / Cybil / Kaufmann / Dahlia (2026-08-03)
 
 **Feature, PC-only.** `player_character` config key, console `PLAYAS <name>`, and
-in-game cycling: with `allow_debug_controls = 1`, turn on the K keyframe viewer
-and press `-` / `=` to cycle Harry → Lisa → Cybil → Kaufmann → Dahlia (the amber
-panel shows the selection; the rifle/shotgun give cheats on those keys stand
-down while K view is on). Turning K view off leaves you playing as the selected
-character; the choice persists to `config.cfg`. Groundwork for character
-selection (and eventually co-op skins).
+in-game cycling: with `allow_debug_controls = 1`, turn on the keyframe viewer
+(console `kf`) and press `-` / `=` to cycle Harry → Lisa → Cybil → Kaufmann →
+Dahlia (the amber panel shows the selection; the rifle/shotgun give cheats on
+those keys stand down while the viewer is on). Turning the viewer off leaves you
+playing as the selected character; the choice persists to `config.cfg`.
+Groundwork for character selection (and eventually co-op skins).
 
 **Mechanism** (`pc_port/src/pc_playas.c`): retarget
 `CHARA_FILE_INFOS[Chara_Harry].modelFileIdx/textureFileIdx` — the same row

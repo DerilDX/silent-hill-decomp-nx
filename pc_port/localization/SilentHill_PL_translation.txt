@@ -1470,10 +1470,10 @@ NOTE: cheat / debug row. Keep key names in brackets
 EN: Collision visualizer
 PL: Wizualizacja kolizji
 
-[QUICK.Keyframe_viewer_(K)]
+[QUICK.Keyframe_viewer_(kf)]
 NOTE: cheat / debug row. Keep key names in brackets
-EN: Keyframe viewer (K)
-PL: Przegląd. Klatek Animacji (K)
+EN: Keyframe viewer (kf)
+PL: Przegląd. Klatek Animacji (kf)
 
 [QUICK.Fast_forward_(Ctrl+F5)]
 NOTE: cheat / debug row. Keep key names in brackets

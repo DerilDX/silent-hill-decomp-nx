@@ -224,7 +224,7 @@ QUICK = {
     'Free camera': 'Свободная камера',
     'Allow console': 'Разрешить консоль',
     'Collision visualizer': 'Показ коллизий',
-    'Keyframe viewer (K)': 'Просмотр кадров (K)',
+    'Keyframe viewer (kf)': 'Просмотр кадров (kf)',
     'Fast forward (Ctrl+F5)': 'Ускорение (Ctrl+F5)',
     'Wireframe (Ctrl+F1)': 'Каркас (Ctrl+F1)',
     'No textures (Ctrl+F2)': 'Без текстур (Ctrl+F2)',

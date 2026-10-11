@@ -28,10 +28,11 @@ extern int g_windowHeight;
 extern void vcGetNowCamPos(VECTOR3* cam_pos);
 extern void Collision_SurfaceGet(s_CollisionSurface* coll, q19_12 posX, q19_12 posZ);
 
-/* Keyframe inspector state (game_main.c). The K key toggles g_DebugAnimKfView and
- * , / . step g_DebugAnimKf; player_control.c poses Harry on that frame and publishes
- * the active anim header's keyframe count as g_DebugAnimKfMax. The anim info panel
- * below mirrors the collision panel, shown while the inspector is on. */
+/* Keyframe inspector state (game_main.c). The console kf command toggles
+ * g_DebugAnimKfView and , / . step g_DebugAnimKf; player_control.c poses Harry
+ * on that frame and publishes the active anim header's keyframe count as
+ * g_DebugAnimKfMax. The anim info panel below mirrors the collision panel,
+ * shown while the inspector is on. */
 extern int g_DebugAnimKfView;
 extern int g_DebugAnimKf;
 extern int g_DebugAnimKfMax;
@@ -176,7 +177,7 @@ static GLuint s_coll_tex   = 0;
  * collision evaluates while the visualizer is on. Set by the ' toggle. */
 int g_CollVisEnabled = 0;
 
-/* ---- Animation inspector panel (shown while the K keyframe inspector is on) ----
+/* ---- Animation inspector panel (shown while the keyframe inspector is on) ----
  * Mirrors the collision panel: a live text panel surfacing the player's current
  * anim state (the forced keyframe + its max, the active anim index/flags, control
  * state) so the keyframe being scrubbed is readable next to Harry's pose. */
@@ -1772,8 +1773,8 @@ void DbgOverlay_Update(void)
             coll_gather();
     }
 
-    /* Anim inspector panel: gather live data while the K keyframe inspector is on
-     * (the K / , / . keys themselves are handled in game_main.c's DebugCamera_Update
+    /* Anim inspector panel: gather live data while the keyframe inspector is on
+     * (the , / . keys themselves are handled in game_main.c's DebugCamera_Update
      * next to the other debug toggles). */
     if (g_DebugAnimKfView)
         anim_gather();
@@ -2058,7 +2059,7 @@ void DbgOverlay_Render(void)
     /* Console is hidden once fully slid off-screen (toggled by `~`); the ring
      * buffer keeps filling while hidden. The collision panel draws whenever it's
      * toggled on (`'`), independent of the console. The anim panel draws while the
-     * K keyframe inspector is on. */
+     * keyframe inspector is on. */
     drawConsole = (s_console_slide > 0.0f && (s_console_count > 0 || s_console_open));
     drawColl    = (s_coll_on && s_coll_count > 0);
     drawAnim    = (g_DebugAnimKfView && s_anim_count > 0);

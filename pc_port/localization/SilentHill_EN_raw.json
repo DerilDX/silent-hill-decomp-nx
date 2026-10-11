@@ -1510,7 +1510,7 @@
  "QUICK.Free_camera": "Free camera",
  "QUICK.Allow_console": "Allow console",
  "QUICK.Collision_visualizer": "Collision visualizer",
- "QUICK.Keyframe_viewer_(K)": "Keyframe viewer (K)",
+ "QUICK.Keyframe_viewer_(kf)": "Keyframe viewer (kf)",
  "QUICK.Fast_forward_(Ctrl+F5)": "Fast forward (Ctrl+F5)",
  "QUICK.Wireframe_(Ctrl+F1)": "Wireframe (Ctrl+F1)",
  "QUICK.No_textures_(Ctrl+F2)": "No textures (Ctrl+F2)",
