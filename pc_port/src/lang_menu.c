@@ -410,8 +410,10 @@ const char* Pc_LangMenuText(const char* str)
         return str;
 
     /* NTSC-J serves these from the disc's own overlays — Japanese on a retail
-     * disc (which is what retail draws), Chinese on the fan-translated one. */
-    if (g_GameRegion == Region_JPN)
+     * disc (which is what retail draws), Chinese on the fan-translated one.
+     * Not under a pack: the pack is the language then, and this branch
+     * answered first, so every menu stayed English while the story was not. */
+    if (g_GameRegion == Region_JPN && !Pc_LangPackActive())
     {
         const char* jp = Pc_JpnMenuText(str);
         return jp ? jp : str;

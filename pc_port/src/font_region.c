@@ -105,6 +105,11 @@ static int                s_HiresGridHdW, s_HiresGridHdH;
 static int                s_HiresGridHdProbed;
 static int                s_HiresGridTimSeen;
 static int                s_HiresGridLive;
+/* Still registered after the layout leaves the grid. The frames already built
+ * when a language switch lands carry the grid's tpage and CLUT, and two of them
+ * are drawn after the switch; deleting the entry made those sample the art that
+ * really lives at (768,128) -- a two-frame flash of coloured blocks. */
+static int                s_HiresGridRegistered;
 static unsigned long long s_HiresGridHash; /* source + pack flags it was built for */
 
 #define EUR_ATLAS_PATH "gamedata/font/eur16.tim"
@@ -1596,11 +1601,8 @@ void Font_HiresGridSync(void)
     {
         if (s_HiresGridLive)
         {
-            HiresOverride_DropVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
-                                       GRID_CLUT_X, GRID_CLUT_Y, 4);
             s_HiresGridLive = 0;
-            s_HiresGridHash = 0;
-            SH_LOG("[FONT] PAL grid override released: this language draws this disc's own atlas");
+            SH_LOG("[FONT] PAL grid override idle: this language draws this disc's own atlas");
         }
         return;
     }
@@ -1613,8 +1615,11 @@ void Font_HiresGridSync(void)
              (s_RussianLayoutActive ? 4 : 0) | (Pc_RuDiscNeedsEFix() ? 8 : 0);
     hash   = 0x464F4E5447524944ull ^ ((unsigned long long)(fromHd ? 1 : 2) << 8) ^
              (unsigned long long)flags;
-    if (s_HiresGridLive && hash == s_HiresGridHash)
+    if (s_HiresGridRegistered && hash == s_HiresGridHash)
+    {
+        s_HiresGridLive = 1;
         return;
+    }
 
     if (fromHd)
     {
@@ -1651,8 +1656,9 @@ void Font_HiresGridSync(void)
 
         if (ok)
         {
-            s_HiresGridLive = 1;
-            s_HiresGridHash = hash;
+            s_HiresGridLive       = 1;
+            s_HiresGridRegistered = 1;
+            s_HiresGridHash       = hash;
             SH_LOG("[FONT] PAL grid backed by a pinned %dx%d override from %s",
                    w, h, fromHd ? HD_FONT_PATH : EUR_ATLAS_PATH);
             return;
@@ -1664,12 +1670,13 @@ void Font_HiresGridSync(void)
      * atlas and base letters instead. */
     SH_WARN("[FONT] could not back the PAL grid - this language draws base letters "
             "from this disc's own atlas");
-    if (s_HiresGridLive)
+    if (s_HiresGridRegistered)
     {
         HiresOverride_DropVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
                                    GRID_CLUT_X, GRID_CLUT_Y, 4);
-        s_HiresGridLive = 0;
-        s_HiresGridHash = 0;
+        s_HiresGridRegistered = 0;
+        s_HiresGridHash       = 0;
     }
-    g_FontLayout = &s_FontLayout_USA;
+    s_HiresGridLive = 0;
+    g_FontLayout    = &s_FontLayout_USA;
 }

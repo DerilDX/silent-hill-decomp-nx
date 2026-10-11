@@ -136,7 +136,10 @@ static int   s_SlotBuiltAtTitle;
  * the list either way, so the row can still show what is loaded. */
 static int SlotsOfferPacks(void)
 {
-    return g_GameWork.gameStatePrev == GameState_MainMenu;
+    /* Off a PAL disc nothing is rebound: Fs_ApplyLanguageRedirects is PAL only,
+     * item text is looked up per draw, and the loaded map's story text is
+     * re-installed in place (LangRepatchLoadedMap). */
+    return g_GameWork.gameStatePrev == GameState_MainMenu || g_GameRegion != Region_EUR;
 }
 
 static int PackOfferedHere(int packIdx)
@@ -403,6 +406,8 @@ static const char* s_ItemDescs[ITEM_TEXT_COUNT];
 static char*           s_MsgPool;
 static const char*     s_MsgPtrs[MSG_COUNT_MAX];
 static s_MapOverlayHdr s_LangMapHeader;
+static s_MapOverlayHdr s_ModMapHeader;
+static s_MapOverlayHdr* s_PristineMapHeader;
 
 /* PAL split-page exceptions: a few messages one US entry wide are split into
  * several sequential pages in some languages (probe-verified indices; US
@@ -1336,6 +1341,31 @@ static void LangInitBody(void)
  * nothing already-extracted goes stale; the next New Game/Load/demo picks
  * everything up through the normal per-map path). Persists the config key,
  * rebinds the file table and reloads item text. */
+/* Story text is installed per map at load time, so a switch in game would
+ * leave the loaded map in the old language until the next door. g_OvlDynamic
+ * still holds this map's overlay -- the same pointer game_boot.c passes -- so
+ * the installer runs again against it, then the mod text overrides on top, in
+ * the order a map load applies them. Never on a PAL disc: its switch rebinds
+ * the file table, which only the title screen can do. */
+static void LangRepatchLoadedMap(void)
+{
+    extern void Pc_TextOverrideApply(int mapIdx);
+    int         mapIdx;
+
+    if (g_GameRegion == Region_EUR || g_GameWork.gameState != GameState_InGame ||
+        g_OvlDynamic == NULL || g_SavegamePtr == NULL)
+        return;
+
+    mapIdx = (int)g_SavegamePtr->mapIdx;
+    if (mapIdx < 0 || mapIdx >= 45)
+        return;
+
+    Pc_LangPatchMapMessages(
+        mapIdx, g_OvlDynamic,
+        (unsigned int)g_FileTable[FILE_VIN_MAP0_S00_BIN + mapIdx].blockCount << 8);
+    Pc_TextOverrideApply(mapIdx);
+}
+
 void Pc_LangSetLanguage(int lang)
 {
     int packs = Pc_LangPackListCount();
@@ -1389,6 +1419,7 @@ void Pc_LangSetLanguage(int lang)
      * read lands where the disc's font always lands. */
     Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
 
+    LangRepatchLoadedMap();
 
     SH_LOG("[LANG] language switched to '%s'", Pc_LangIdForSlot(lang));
 }
@@ -1414,24 +1445,7 @@ void Pc_LangSetJpLanguage(int lang)
     PcConfig_SaveKeyValue("jp_language", s_JpIds[lang]);
     Pc_LangInit();
 
-    /* Inventory text is reinstalled above, but story text is installed per map
-     * at load time, so the map already loaded would keep the old language until
-     * the next door. g_OvlDynamic still holds this map's overlay, which is the
-     * same pointer game_boot.c passes, so re-running the installer against it
-     * refreshes the current map in place. Only in game: at the title there is
-     * no map loaded and nothing to re-patch. */
-    if (g_GameRegion == Region_JPN && g_GameWork.gameState == GameState_InGame &&
-        g_OvlDynamic != NULL && g_SavegamePtr != NULL)
-    {
-        int mapIdx = (int)g_SavegamePtr->mapIdx;
-
-        if (mapIdx >= 0 && mapIdx < 45)
-        {
-            Pc_LangPatchMapMessages(
-                mapIdx, g_OvlDynamic,
-                (unsigned int)g_FileTable[FILE_VIN_MAP0_S00_BIN + mapIdx].blockCount << 8);
-        }
-    }
+    LangRepatchLoadedMap();
 
     SH_LOG("[LANG] NTSC-J language switched to '%s'", lang ? "zh" : "ja");
 }
@@ -1577,11 +1591,7 @@ int Pc_LangMenuRowActive(void)
      * (b_konami.c), so its row does nothing in-game anyway and is still
      * reachable from the title screen where it takes effect. */
     if (g_GameRegion == Region_JPN)
-    {
-        /* In-game the row offers only the disc's own three, so the restriction
-         * below still holds for the packs that now share this row. */
         return 1;
-    }
 
     /* Anywhere there is more than one language to pick. A US disc used to have
      * none; with packs installing on every region it can have several, and the
@@ -1591,7 +1601,10 @@ int Pc_LangMenuRowActive(void)
     if (!g_PcConfig.crossRegionLanguages && g_GameRegion != Region_EUR)
         return 0; /* retail behaviour: this row is Auto Load off a PAL disc */
 
-    return SlotsCount() > 1 && g_GameWork.gameStatePrev == GameState_MainMenu;
+    /* In-game too off a PAL disc (see SlotsOfferPacks). Auto Load, which the
+     * row replaces, is read once at the Konami logo and does nothing here. */
+    return SlotsCount() > 1 &&
+           (g_GameWork.gameStatePrev == GameState_MainMenu || g_GameRegion != Region_EUR);
 }
 
 const char* Pc_LangItemName(int itemIdx)
@@ -2082,6 +2095,15 @@ void Pc_LangPatchMapMessages(int mapIdx, void* ovl, unsigned int ovlSize)
     char*                out;
     extern s_MapOverlayHdr* g_pMapOverlayHeader;
 
+    /* The header this map loaded with. A second install against the same map
+     * (an in-game language switch) has to start from it: the one in force is
+     * our own copy, whose messages point into the pool freed below, and the
+     * English fallbacks are read from it. */
+    if (g_pMapOverlayHeader != &s_LangMapHeader && g_pMapOverlayHeader != &s_ModMapHeader)
+        s_PristineMapHeader = g_pMapOverlayHeader;
+    else if (s_PristineMapHeader != NULL)
+        g_pMapOverlayHeader = s_PristineMapHeader;
+
     if (g_GameRegion == Region_USA && !Pc_LangPackActive())
     {
         UsaPatchMapMessages(mapIdx);
@@ -2382,7 +2404,6 @@ typedef struct {
 static s_TextOverride  s_TextOvr[TEXT_OVR_MAX];
 static int             s_TextOvrCount = -1; /* -1 = not loaded yet */
 static const char*     s_ModMsgs[MSG_COUNT_MAX];
-static s_MapOverlayHdr s_ModMapHeader;
 
 extern int MapRegistry_FindByName(const char* name);
 extern int Pc_MapMsgCount(int mapIdx);

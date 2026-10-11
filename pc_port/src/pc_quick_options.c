@@ -411,6 +411,7 @@ static stbtt_fontinfo s_font;
 static unsigned char* s_fontData;
 static int            s_fontOk;
 static int            s_fontsTried;
+static int            s_fontsScript = -1; /* Pc_LangQuickScript the face was picked for */
 
 /* Baked text, re-baked when the pixel size or the page changes; values are
  * re-baked whenever their text changes. */
@@ -913,49 +914,13 @@ static int qo_font_check(void)
 
 static void qo_fonts_init(void)
 {
-    /* Oswald carries Latin and Cyrillic, which is why Russian draws here, but
-     * no font the port ships has a single kana or kanji -- Japanese and Chinese
-     * would be rows of empty boxes. A CJK face is far too large to ship for an
-     * overlay, and every Windows install already has one, so those are tried
-     * FIRST when the language needs them and ignored otherwise. */
-    static const char* const cjk[] = {
-        "C:/Windows/Fonts/YuGothM.ttc",
-        "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/msgothic.ttc",
-        "C:/Windows/Fonts/simsun.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    };
-    static const char* paths[12] = {
-        "gamedata/font/Oswald-Regular.ttf",
-        "gamedata/font/BarlowSemiCondensed-Regular.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    };
-    int count = 5;
+    static const char* paths[16];
+    int count = Pc_LangQuickFontPaths(paths, 16);
     int i;
-    if (s_fontsTried)
-        return;
-    s_fontsTried = 1;
 
-    if (Pc_LangSjisActive())
-    {
-        /* Shift it along rather than replacing: if no CJK face is installed the
-         * Latin ones still answer, and the overlay stays readable in English
-         * instead of disappearing. */
-        int n = (int)(sizeof(cjk) / sizeof(cjk[0]));
-        int k;
-
-        if (n > (int)(sizeof(paths) / sizeof(paths[0])) - count)
-            n = (int)(sizeof(paths) / sizeof(paths[0])) - count;
-        for (k = count - 1; k >= 0; k--)
-            paths[k + n] = paths[k];
-        for (k = 0; k < n; k++)
-            paths[k] = cjk[k];
-        count += n;
-    }
+    s_fontsTried  = 1;
+    s_fontsScript = Pc_LangQuickScript();
+    s_fontOk      = 0;
 
     for (i = 0; i < count; i++)
     {
@@ -1947,7 +1912,18 @@ void Pc_QuickOptions_Draw(void)
         qo_atlas_ensure();
         qo_build_white();
     }
-    if (!s_fontsTried) qo_fonts_init();
+    /* Also when the language changes script: a Latin face has no kana, so the
+     * text baked from it is dropped with it. The old face's memory is
+     * abandoned rather than freed, as on any reload (stbtt points into it). */
+    if (!s_fontsTried || s_fontsScript != Pc_LangQuickScript())
+    {
+        if (s_fontsTried)
+        {
+            qo_free_text();
+            s_viewRowsDirty = 1;
+        }
+        qo_fonts_init();
+    }
 
     if (s_sel >= nRows) s_sel = nRows - 1;
     if (s_sel < 0)      s_sel = 0;

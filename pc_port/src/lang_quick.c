@@ -21,7 +21,94 @@ static const s_QuickTranslation s_QuickTr[] = {
 #include "lang_quick_pal.inc"
 };
 
-enum { QL_ENGLISH = 0, QL_RUSSIAN, QL_PACK, QL_PAL };
+typedef struct {
+    const char* en;
+    const char* ja;
+    const char* zh;
+} s_QuickCjk;
+
+/* The Japanese and Chinese packs store the game font's own bytes (Shift-JIS,
+ * kuten), which these UTF-8 overlays cannot draw, and a Japanese disc's own two
+ * languages have no pack at all -- so their overlay text is compiled in. */
+#include "lang_quick_cjk.inc"
+
+enum { QL_ENGLISH = 0, QL_RUSSIAN, QL_PACK, QL_PAL, QL_JA, QL_ZH };
+
+int Pc_LangQuickScript(void)
+{
+    if (Pc_RuActive())
+        return LANG_QUICK_SCRIPT_LATIN;
+    if (Pc_LangPackActive())
+    {
+        int font = Pc_LangPackFont();
+
+        return (font == LANG_PACK_FONT_SJIS)    ? LANG_QUICK_SCRIPT_JAPANESE
+             : (font == LANG_PACK_FONT_CHINESE) ? LANG_QUICK_SCRIPT_CHINESE
+                                                : LANG_QUICK_SCRIPT_LATIN;
+    }
+    if (g_GameRegion == Region_JPN)
+    {
+        return (g_PcConfig.jpLanguage == JP_LANG_JAPANESE) ? LANG_QUICK_SCRIPT_JAPANESE
+             : (g_PcConfig.jpLanguage == JP_LANG_CHINESE)  ? LANG_QUICK_SCRIPT_CHINESE
+                                                           : LANG_QUICK_SCRIPT_LATIN;
+    }
+    return LANG_QUICK_SCRIPT_LATIN;
+}
+
+int Pc_LangQuickFontPaths(const char** out, int max)
+{
+    /* Oswald carries Latin and Cyrillic, but no font the port ships has a kana
+     * or a hanzi. A CJK face is far too large to ship for an overlay and every
+     * Windows install already has one, so those go FIRST when the script needs
+     * them -- the Chinese faces for Chinese, since a Japanese one lacks most
+     * simplified forms -- with the Latin faces after, so a machine without any
+     * CJK face still draws the English instead of nothing. */
+    static const char* const ja[] = {
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    };
+    static const char* const zh[] = {
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    };
+    static const char* const latin[] = {
+        "gamedata/font/Oswald-Regular.ttf",
+        "gamedata/font/BarlowSemiCondensed-Regular.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    };
+    int script = Pc_LangQuickScript();
+    int n      = 0;
+    int i;
+
+    if (script == LANG_QUICK_SCRIPT_JAPANESE)
+        for (i = 0; i < (int)(sizeof(ja) / sizeof(ja[0])) && n < max; i++)
+            out[n++] = ja[i];
+    else if (script == LANG_QUICK_SCRIPT_CHINESE)
+        for (i = 0; i < (int)(sizeof(zh) / sizeof(zh[0])) && n < max; i++)
+            out[n++] = zh[i];
+    for (i = 0; i < (int)(sizeof(latin) / sizeof(latin[0])) && n < max; i++)
+        out[n++] = latin[i];
+    return n;
+}
+
+static const char* CjkLookup(const s_QuickCjk* tbl, int count, const char* key, int zh)
+{
+    int i;
+
+    for (i = 0; i < count; i++)
+    {
+        if (tbl[i].en[0] == key[0] && strcmp(tbl[i].en, key) == 0)
+            return zh ? tbl[i].zh : tbl[i].ja;
+    }
+    return NULL;
+}
 
 /* Mirrors Pc_LangMenuText's order, so an overlay never disagrees with the
  * menu drawn behind it. */
@@ -29,12 +116,18 @@ static int QuickLang(void)
 {
     int lang = g_PcConfig.language;
 
-    if (g_GameRegion == Region_JPN)
-        return QL_ENGLISH;
+    switch (Pc_LangQuickScript())
+    {
+        case LANG_QUICK_SCRIPT_JAPANESE: return QL_JA;
+        case LANG_QUICK_SCRIPT_CHINESE:  return QL_ZH;
+        default:                         break;
+    }
     if (Pc_RuActive())
         return QL_RUSSIAN;
     if (Pc_LangPackActive())
         return QL_PACK;
+    if (g_GameRegion == Region_JPN)
+        return QL_ENGLISH;
     if ((g_GameRegion == Region_EUR || (g_GameRegion == Region_USA && Pc_FanTextActive())) &&
         lang >= 1 && lang <= 4)
     {
@@ -155,6 +248,15 @@ const char* Pc_LangQuickMenu(const char* us)
             }
             break;
         case QL_PAL:     tr = Pc_LangMenuPal(us, -1); latin1 = 1; break;
+        case QL_JA:
+        case QL_ZH:
+        {
+            const char* cjk = CjkLookup(s_MenuCjkTr, (int)(sizeof(s_MenuCjkTr) / sizeof(s_MenuCjkTr[0])),
+                                        us, QuickLang() == QL_ZH);
+            if (cjk != NULL)
+                return cjk;
+            break;
+        }
         default:         break;
     }
     return FromMenu(tr ? tr : us, tr ? latin1 : 0);
@@ -208,6 +310,14 @@ const char* Pc_LangQuick(const char* en)
         case QL_PAL:
         {
             const char* tr = QuickPal(en);
+
+            return (tr != NULL) ? tr : en;
+        }
+        case QL_JA:
+        case QL_ZH:
+        {
+            const char* tr = CjkLookup(s_QuickCjkTr, (int)(sizeof(s_QuickCjkTr) / sizeof(s_QuickCjkTr[0])),
+                                       en, QuickLang() == QL_ZH);
 
             return (tr != NULL) ? tr : en;
         }

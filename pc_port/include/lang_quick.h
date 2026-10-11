@@ -31,4 +31,14 @@ void Pc_LangUtf8Upper(const char* in, char* out, int outSize);
  * itself, so Latin-1 text still draws. */
 unsigned int Pc_LangUtf8Next(const char** pp);
 
+/* Which script the overlays' text is in: 0 Latin/Cyrillic, 1 Japanese,
+ * 2 Chinese. An overlay re-picks its font when this changes. */
+#define LANG_QUICK_SCRIPT_LATIN    0
+#define LANG_QUICK_SCRIPT_JAPANESE 1
+#define LANG_QUICK_SCRIPT_CHINESE  2
+int Pc_LangQuickScript(void);
+
+/* The TrueType faces to try, best first, for that script. Returns the count. */
+int Pc_LangQuickFontPaths(const char** out, int max);
+
 #endif

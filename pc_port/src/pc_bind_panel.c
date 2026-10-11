@@ -140,6 +140,7 @@ static stbtt_fontinfo s_font;
 static unsigned char* s_fontData;
 static int            s_fontOk;
 static int            s_fontsTried;
+static int            s_fontsScript = -1;
 
 /* Baked strings, cached by text + pixel size. Cleared on resize or when full. */
 #define BP_TEXT_MAX 192
@@ -930,18 +931,14 @@ static unsigned char* bp_read_file(const char* path)
 
 static void bp_fonts_init(void)
 {
-    static const char* paths[] = {
-        "gamedata/font/Oswald-Regular.ttf",
-        "gamedata/font/BarlowSemiCondensed-Regular.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    };
+    static const char* paths[16];
+    int count = Pc_LangQuickFontPaths(paths, 16);
     int i;
-    if (s_fontsTried)
-        return;
-    s_fontsTried = 1;
-    for (i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++)
+
+    s_fontsTried  = 1;
+    s_fontsScript = Pc_LangQuickScript();
+    s_fontOk      = 0;
+    for (i = 0; i < count; i++)
     {
         unsigned char* data = bp_read_file(paths[i]);
         if (!data)
@@ -1101,7 +1098,11 @@ void Pc_BindPanel_Draw(void)
 
     if (!s_glReady) bp_gl_init();
     if (s_glReady != 1) return;
-    if (!s_fontsTried) bp_fonts_init();
+    if (!s_fontsTried || s_fontsScript != Pc_LangQuickScript())
+    {
+        bp_text_flush(); /* baked from the old face */
+        bp_fonts_init();
+    }
 
     glGetIntegerv(GL_VIEWPORT, prevVp);
     glViewport(vp[0], vp[1], vp[2], vp[3]);
