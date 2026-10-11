@@ -155,6 +155,9 @@ typedef struct {
     float              fstep;
 } s_PcOpt;
 
+/* Defined with the other quick-row helpers below, used by the adjust above. */
+static void PcOpt_FilterApply(int combined);
+
 static const int VAL_WIN[]   = { 0, 1, 2 };
 static const int VAL_VSYNC[] = { 0, 1 };
 static const int VAL_FILT[]  = { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -197,7 +200,7 @@ static const s_PcOpt PCOPT_G[] = {
     { "Resolution",     NULL,                           NULL,                   NULL,      0, NULL,      NULL,                          0, PCK_RES    },
     { "Window_Mode",    &g_PcConfig.fullscreen,         "fullscreen",           VAL_WIN,   3, LBL_WIN,   NULL,                          1, PCK_WINMODE },
     { "VSync",          &g_PcConfig.vsync,              "vsync",                VAL_VSYNC, 2, LBL_VSYNC, NULL,                          1, PCK_VSYNC   },
-    { "Texture_Filter", &g_PcConfig.psxDither,          "psx_dither",           VAL_FILT,  8, LBL_FILT,  NULL,                          1, PCK_FILTER },
+    { "Texture_Filter", &g_PcConfig.psxDither,          "texture_filter",       VAL_FILT,  8, LBL_FILT,  NULL,                          1, PCK_FILTER },
     { "PGXP",           &g_PcConfig.usePgxp,            "use_pgxp",             VAL_ONOFF, 2, LBL_ONOFF, &g_PsxUsePgxp,                 1, PCK_INT    },
     { "Antialiasing",   &g_PcConfig.msaaSamples,        "msaa",                 VAL_AA,    4, LBL_AA,    NULL,                          0, PCK_INT    },
     { "Post_Process",   &g_PcConfig.postProcess,        "post_process",         VAL_POST,  9, LBL_POST,  &g_cfg_postProcess,            1, PCK_INT    },
@@ -475,27 +478,12 @@ static void PcOpt_Adjust(const s_PcOpt* e, int dir)
         int idx = (PcOpt_ValIndex(e) + dir + e->nVals) % e->nVals;
         *e->field = e->vals[idx];
         snprintf(buf, sizeof(buf), "%d", *e->field);
-        if (e->key) PcConfig_SaveKeyValue(e->key, buf);
+        /* PCK_FILTER writes two keys of its own, on a different scale from the
+         * combined value this row cycles. */
+        if (e->key && e->kind != PCK_FILTER) PcConfig_SaveKeyValue(e->key, buf);
 
         if (e->kind == PCK_FILTER) {
-            switch (*e->field) {
-            /* 0 off, 1 dither, 2 bilinear, 3 trilinear, 4 anisotropic.
-             * g_cfg_textureFilter is the mode the renderer acts on;
-             * g_cfg_bilinearFiltering is kept as the derived "any filtering"
-             * flag its remaining callers expect. */
-            case 1:  g_cfg_psxDither = 1; g_cfg_textureFilter = 0; break;
-            case 2:  g_cfg_psxDither = 0; g_cfg_textureFilter = 1; break;
-            case 3:  g_cfg_psxDither = 0; g_cfg_textureFilter = 2; break;
-            /* 4..7 are anisotropic at 2x/4x/8x/16x. One value carries both the
-             * mode and the strength so the row, the launcher and config.cfg
-             * cannot disagree about what is selected. */
-            case 4:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 2;  break;
-            case 5:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 4;  break;
-            case 6:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 8;  break;
-            case 7:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 16; break;
-            default: g_cfg_psxDither = 0; g_cfg_textureFilter = 0; break;
-            }
-            g_cfg_bilinearFiltering = (g_cfg_textureFilter > 0);
+            PcOpt_FilterApply(*e->field);
         } else if (e->kind == PCK_WINMODE) {
             PsyX_ApplyWindowState(g_PcConfig.windowWidth, g_PcConfig.windowHeight, g_PcConfig.fullscreen);
         } else if (e->kind == PCK_VSYNC) {
@@ -569,6 +557,51 @@ enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
 #define PCOPT_CRT_SHAPE ((4.0f / 3.0f) / (320.0f / 224.0f))
 
 extern void Pc_QuickOptions_InvalidateRows(void);
+
+/* Texture_Filter is one 8-way row -- off, dither, bilinear, trilinear, aniso
+ * 2x/4x/8x/16x -- over what config.cfg stores as the two INDEPENDENT keys
+ * `dithering` and `texture_filter`. It used to persist its combined value under
+ * psx_dither, the single key those two replaced, which the loader discards
+ * whenever either new key is present: i.e. always, since the shipped config.cfg
+ * carries both. So the row applied live and then lost the change on the next
+ * launch, and it disagreed with the launcher, which writes the pair. psxDither
+ * is composed back from the pair at load (pc_config.c) so the row still opens
+ * on whatever is actually in effect.
+ *
+ * Both callers route through here: the adjust and the reset-to-default. */
+static void PcOpt_FilterApply(int combined)
+{
+    char buf[16];
+    int  dither = (combined == 1) ? 1 : 0;
+    int  filter;
+
+    switch (combined) {
+        case 2:  filter = 1; break;   /* bilinear  */
+        case 3:  filter = 2; break;   /* trilinear */
+        case 4:  filter = 3; break;   /* aniso 2x  */
+        case 5:  filter = 4; break;   /* aniso 4x  */
+        case 6:  filter = 5; break;   /* aniso 8x  */
+        case 7:  filter = 6; break;   /* aniso 16x */
+        default: filter = 0; break;   /* off, or dither-only */
+    }
+
+    g_PcConfig.dithering     = dither;
+    g_PcConfig.textureFilter = filter;
+
+    /* The renderer takes the mode and the tap count separately: modes 3..6 are
+     * all g_cfg_textureFilter 3 with 2/4/8/16 taps. Same split main_pc.c makes
+     * at boot. */
+    g_cfg_psxDither     = dither;
+    g_cfg_textureFilter = (filter >= 3) ? 3 : filter;
+    if (filter >= 3)
+        g_cfg_anisoLevel = 2 << (filter - 3);
+    g_cfg_bilinearFiltering = (g_cfg_textureFilter > 0);
+
+    snprintf(buf, sizeof(buf), "%d", dither);
+    PcConfig_SaveKeyValue("dithering", buf);
+    snprintf(buf, sizeof(buf), "%d", filter);
+    PcConfig_SaveKeyValue("texture_filter", buf);
+}
 
 static const int         QO_SHADOW_SIZES[] = { 256, 512, 1024, 2048, 4096, 8192 };
 static const char* const QO_SPEAKER_LBL[]  = { "Auto", "Stereo", "Quad", "5.1", "7.1" };
@@ -1094,20 +1127,10 @@ static void PcOpt_ResetEntry(const s_PcOpt* e)
         int dv = *(const int*)((const char*)d + ((const char*)e->field - (const char*)&g_PcConfig));
         *e->field = dv;
         snprintf(buf, sizeof(buf), "%d", dv);
-        PcConfig_SaveKeyValue(e->key, buf);
+        if (e->key && e->kind != PCK_FILTER) PcConfig_SaveKeyValue(e->key, buf);
 
         if (e->kind == PCK_FILTER) {
-            switch (dv) {
-            case 1:  g_cfg_psxDither = 1; g_cfg_textureFilter = 0; break;
-            case 2:  g_cfg_psxDither = 0; g_cfg_textureFilter = 1; break;
-            case 3:  g_cfg_psxDither = 0; g_cfg_textureFilter = 2; break;
-            case 4:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 2;  break;
-            case 5:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 4;  break;
-            case 6:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 8;  break;
-            case 7:  g_cfg_psxDither = 0; g_cfg_textureFilter = 3; g_cfg_anisoLevel = 16; break;
-            default: g_cfg_psxDither = 0; g_cfg_textureFilter = 0; break;
-            }
-            g_cfg_bilinearFiltering = (g_cfg_textureFilter > 0);
+            PcOpt_FilterApply(dv);
         } else if (e->kind == PCK_VSYNC) {
             PsyX_ApplyVsync(g_PcConfig.vsync);
         } else if (e->kind == PCK_FLMODE) {

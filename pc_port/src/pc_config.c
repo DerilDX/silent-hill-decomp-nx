@@ -1484,6 +1484,17 @@ else if (strcmp(key, "enable_plugins") == 0)
         SH_LOG("[CFG] psx_dither = %d migrated to dithering = %d, texture_filter = %d",
                g_PcConfig.psxDither, g_PcConfig.dithering, g_PcConfig.textureFilter);
     }
+    else
+    {
+        /* The reverse: psxDither is what the in-game Texture_Filter row cycles,
+         * one 8-way value over the pair. Composed here so the row opens on
+         * what is in effect instead of on a stale legacy key -- without this it
+         * showed whatever psx_dither happened to say, which for everyone whose
+         * config has the new keys is the default, not their setting. */
+        g_PcConfig.psxDither = g_PcConfig.dithering ? 1
+                             : (g_PcConfig.textureFilter == 0 ? 0
+                                                              : g_PcConfig.textureFilter + 1);
+    }
 
     /* Default migration: reapply a changed persisted DEFAULT to users still sitting
      * on the previous default, so an improved default reaches everyone on update

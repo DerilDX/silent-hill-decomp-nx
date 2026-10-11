@@ -112,7 +112,7 @@ typedef struct
 #define QO_CLOSE_ROW { ROW_CLOSE, NULL, 0, "Close" }
 
 static const QoRowDef s_pageGfx1[] = {
-    { ROW_OPT,   "psx_dither",           0, NULL },  /* Texture_Filter */
+    { ROW_OPT,   "texture_filter",       0, NULL },  /* Texture_Filter */
     { ROW_OPT,   "msaa",                 0, NULL },  /* Antialiasing (restart) */
     { ROW_OPT,   "post_process",         0, NULL },
     { ROW_OPT,   "tonemap",              0, NULL },
