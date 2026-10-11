@@ -89,6 +89,45 @@ static void PsyX_Pad_SteamControllerOwnershipHint(void)
 		        "Add the game to Steam and launch it from there, or exit Steam first.\n");
 }
 
+/* A joystick SDL has no mapping for is not a game controller at all:
+ * SDL_IsGameController says no, PsyX_Pad_OpenController never sees it, and the
+ * pad does nothing. It used to be invisible in the log as well, so the only
+ * report that ever arrived was "my controller doesn't work".
+ *
+ * Name it instead, with the GUID and the raw shape a mapping line is written
+ * from, so an unknown pad is one log line to diagnose. */
+static void PsyX_Pad_ReportUnmappedJoysticks()
+{
+	for (int i = 0; i < SDL_NumJoysticks(); i++)
+	{
+		const char*   name;
+		SDL_Joystick* js;
+		char          guid[64];
+
+		if (SDL_IsGameController(i))
+			continue;
+
+		name = SDL_JoystickNameForIndex(i);
+		SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
+
+		/* Nothing else will ever open this device, so borrowing it for its
+		 * button/axis counts cannot take it from anyone. */
+		js = SDL_JoystickOpen(i);
+		eprintwarn("[PAD] '%s' (vid=%04x pid=%04x guid=%s) has no SDL mapping, so the game "
+		           "cannot use it. Raw shape: buttons=%d axes=%d hats=%d. Add a line for that "
+		           "guid to gamecontrollerdb.txt next to the exe; SDL's controllermap tool "
+		           "writes one.\n",
+		           name ? name : "?",
+		           (unsigned)SDL_JoystickGetDeviceVendor(i),
+		           (unsigned)SDL_JoystickGetDeviceProduct(i), guid,
+		           js ? SDL_JoystickNumButtons(js) : -1,
+		           js ? SDL_JoystickNumAxes(js) : -1,
+		           js ? SDL_JoystickNumHats(js) : -1);
+		if (js)
+			SDL_JoystickClose(js);
+	}
+}
+
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
 {
@@ -142,10 +181,28 @@ int PsyX_Pad_InitSystem()
 		return 0;
 	}
 
-	// Add more controllers from custom file
-	SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+	/* The community controller database, shipped beside the exe from
+	 * pc_port/assets/gamecontrollerdb.txt. SDL's built-in list covers the big
+	 * brands and little else, and a pad it has no mapping for is invisible to
+	 * the game (see PsyX_Pad_ReportUnmappedJoysticks above) -- a PlayStation
+	 * Classic controller, 054c:0cda, is exactly that: ten buttons and a d-pad
+	 * on two axes, which SDL does not recognise on its own.
+	 *
+	 * Reported rather than ignored, because this call silently did nothing for
+	 * as long as the file was simply missing from the build. */
+	{
+		const int added = SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+
+		if (added < 0)
+			eprintwarn("[PAD] gamecontrollerdb.txt not loaded (%s). Only SDL's built-in "
+			           "mappings are available, so an uncommon pad may not work.\n",
+			           SDL_GetError());
+		else
+			eprintf("[PAD] gamecontrollerdb.txt: %d mappings added\n", added);
+	}
 
 	PsyX_Pad_SteamControllerOwnershipHint();
+	PsyX_Pad_ReportUnmappedJoysticks();
 
 	return 1;
 }
@@ -158,7 +215,17 @@ void PsyX_Pad_Debug_ListControllers()
 	int numJoysticks = SDL_NumJoysticks();
 	int numHaptics = SDL_NumHaptics();
 
-	if (numJoysticks)
+	int numMapped = 0;
+
+	for (int i = 0; i < numJoysticks; i++)
+	{
+		if (SDL_IsGameController(i))
+			numMapped++;
+	}
+
+	/* Counted first: joysticks SDL cannot map print nothing here, so the old
+	 * test on numJoysticks announced a list and then showed an empty one. */
+	if (numMapped)
 	{
 		eprintf("SDL GameController list:\n");
 
@@ -172,6 +239,8 @@ void PsyX_Pad_Debug_ListControllers()
 	}
 	else
 		eprintwarn("No SDL GameControllers found!\n");
+
+	PsyX_Pad_ReportUnmappedJoysticks();
 
 	if (numHaptics)
 	{
