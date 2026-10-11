@@ -49,6 +49,7 @@ void    PsyX_Pad_CloseController(int slot);
 u_short PsyX_Pad_UpdateKeyboardInput();
 void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
 static int PsyX_Pad_MergeAllControllers(LPPADRAW pad);
+static void PsyX_Pad_AdoptDevice(Sint32 deviceId);
 
 /* The controller rumble follows: slot 0 by default, then whichever pad was last
  * actually used (button or stick). Rumble goes ONLY to this one, so a second
@@ -203,6 +204,28 @@ int PsyX_Pad_InitSystem()
 
 	PsyX_Pad_SteamControllerOwnershipHint();
 	PsyX_Pad_ReportUnmappedJoysticks();
+
+	/* Open what is ALREADY plugged in.
+	 *
+	 * SDL enumerates devices inside the SDL_InitSubSystem above and posts
+	 * CONTROLLERDEVICEADDED only for the ones it can map AT THAT MOMENT --
+	 * which is before the database above has been read. It never re-announces
+	 * a device that becomes mappable later. So a pad whose mapping comes from
+	 * the file got no event at all, and since that event is the only thing
+	 * that opens a controller, the pad stayed dead until the player unplugged
+	 * and replugged it, which produced a fresh ADDED. Measured with SDL 2.28.0
+	 * and a PlayStation Classic controller: JOYDEVICEADDED at init, and zero
+	 * CONTROLLERDEVICEADDED either at init or after the mappings load.
+	 *
+	 * Reading the database before SDL_InitSubSystem would be the other fix,
+	 * but the mapping calls are only documented as usable after init, and this
+	 * needs no assumption about that. It also covers an ADDED event that goes
+	 * missing before the event loop starts. */
+	for (int i = 0; i < SDL_NumJoysticks(); i++)
+	{
+		if (SDL_IsGameController(i))
+			PsyX_Pad_AdoptDevice(i);
+	}
 
 	return 1;
 }
@@ -399,25 +422,20 @@ void PsyX_Pad_InitPad(int slot, u_char* padData)
 	}
 }
 
-// called from Psy-X SDL events
-void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
+/* Give a device index to the first slot that will take it. Shared by the ADDED
+ * event and the startup scan in PsyX_Pad_InitSystem. */
+static void PsyX_Pad_AdoptDevice(Sint32 deviceId)
 {
-	/* `which` on an ADDED event is a DEVICE INDEX; see Removed for the id
-	 * mismatch that used to strand pads. The old haptic subsystem reinit is
-	 * gone: rumble runs through SDL_GameControllerRumble, no SDL_Haptic
-	 * handles exist, and quitting the subsystem mid-event was the crash its
-	 * own FIXME warned about. */
+	const SDL_JoystickID instance = SDL_JoystickGetDeviceInstanceID(deviceId);
 	int i;
-	PsyXController* controller;
 
-	PsyX_Pad_Debug_ListControllers();
-
-	/* Free any slot whose handle went stale (missed REMOVED, USB re-enumeration). */
+	/* Already ours. An ADDED event can arrive for a device the startup scan
+	 * has just taken, and without this the same physical pad would be opened a
+	 * second time into the next free slot and sit there as player 2. */
 	for (i = 0; i < MAX_CONTROLLERS; i++)
 	{
-		controller = &g_controllers[i];
-		if (controller->gc && !SDL_GameControllerGetAttached(controller->gc))
-			PsyX_Pad_CloseController(i);
+		if (g_controllers[i].gc && g_controllers[i].instanceId == instance)
+			return;
 	}
 
 	/* Config-pinned slots accept exactly their device index; unpinned slots
@@ -426,7 +444,7 @@ void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 	 * different port (new index) could never rejoin its slot. */
 	for (i = 0; i < MAX_CONTROLLERS; i++)
 	{
-		controller = &g_controllers[i];
+		PsyXController* controller = &g_controllers[i];
 
 		if (controller->gc)
 			continue;
@@ -437,6 +455,28 @@ void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 		PsyX_Pad_OpenController(deviceId, i);
 		break;
 	}
+}
+
+// called from Psy-X SDL events
+void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
+{
+	/* `which` on an ADDED event is a DEVICE INDEX; see Removed for the id
+	 * mismatch that used to strand pads. The old haptic subsystem reinit is
+	 * gone: rumble runs through SDL_GameControllerRumble, no SDL_Haptic
+	 * handles exist, and quitting the subsystem mid-event was the crash its
+	 * own FIXME warned about. */
+	int i;
+
+	PsyX_Pad_Debug_ListControllers();
+
+	/* Free any slot whose handle went stale (missed REMOVED, USB re-enumeration). */
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		if (g_controllers[i].gc && !SDL_GameControllerGetAttached(g_controllers[i].gc))
+			PsyX_Pad_CloseController(i);
+	}
+
+	PsyX_Pad_AdoptDevice(deviceId);
 }
 
 // called from Psy-X SDL events
