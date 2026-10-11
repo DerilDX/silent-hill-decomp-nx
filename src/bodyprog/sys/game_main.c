@@ -193,6 +193,14 @@ s32 g_DebugAnimRate    = Q12(15.0f); /* loop playback rate (q19_12 kf/sec @30fps
 int g_DebugViewNpcSlot = -1;     /* keyframe viewer target: -1 = Harry, else g_SysWork.npcs[] slot */
 int g_DebugAnimPlayGen = 0;      /* bumped on each play (re)start so the loop cursor re-seeds */
 s32 g_TpsCamYaw = 0;             /* TPS orbit yaw (Q12), independent from Harry's body */
+/* Pixels of mouse travel the look code has seen, accumulated for the life of
+ * the process. Read by pc_dark_harry.c, which must NOT call
+ * SDL_GetRelativeMouseState itself -- the call in Pc_TpsCamera_Apply is the
+ * only place gameplay drains the accumulator, so a second reader would eat the
+ * camera's own motion. A running total rather than a per-frame flag, because a
+ * flag would sit latched at "moved" on every frame that code does not run (the
+ * classic camera, where the mouse steers nothing at all). */
+unsigned g_PcMouseLookTravel = 0;
 s32 g_TpsCamPitch = 0;           /* TPS orbit pitch (Q12) */
 /* Camera eye + forward (unit Q12) published each frame by Pc_TpsCamera_Apply for
  * free-aim: the aim ray is cast from g_TpsCamPos along g_TpsCamFwd (screen-center
@@ -659,6 +667,7 @@ static void Pc_TpsCamera_Apply(void)
 
         SDL_GetRelativeMouseState(&mdx, &mdy);
         if (frozen) { mdx = 0; mdy = 0; }
+        g_PcMouseLookTravel += (unsigned)((mdx < 0 ? -mdx : mdx) + (mdy < 0 ? -mdy : mdy));
         /* Mouse-RIGHT (mdx>0) → += yaw → view rotates right.
          * Mouse-UP (mdy<0) → pitch up by default; invert_mouse_y flips it. */
         {

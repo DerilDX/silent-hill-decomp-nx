@@ -17,6 +17,10 @@
  *   3. g_PcCharaGhostDraw     - bodyprog_80055028.c, the two chara addPrim sites
  *   4. dark_harry* keys       - pc_config.{h,c} + config.cfg
  *   5. AFKEGG                 - pc_console_cmd.c, a debug trigger
+ *   6. g_PcMouseLookTravel    - game_main.c, one line beside the only
+ *                               SDL_GetRelativeMouseState gameplay calls (a
+ *                               second reader there would eat the camera's
+ *                               own mouse motion)
  * Removing the feature = delete this file, pc_dark_harry.c, those hooks.
  *
  * It borrows two things while he is on screen and hands both back on every
@@ -39,8 +43,9 @@ void Pc_DarkHarry_Draw(void);
 int Pc_DarkHarry_Active(void);
 
 /* Put him there right now, ignoring the AFK clock. The AFKEGG console
- * command, for testing without standing still for five minutes. */
-void Pc_DarkHarry_Spawn(void);
+ * command, for testing without standing still for five minutes. Returns NULL
+ * if he is now here, otherwise why not, in words fit to print. */
+const char* Pc_DarkHarry_Spawn(void);
 
 /* Drop the apparition and restart the clock. Safe to call at any time. */
 void Pc_DarkHarry_Reset(void);

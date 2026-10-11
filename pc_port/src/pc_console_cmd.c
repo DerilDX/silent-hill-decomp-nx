@@ -1471,11 +1471,13 @@ void Pc_ConsoleExec(const char* line)
     } else if (strcmp(cmd, "AFKEGG") == 0) {
         /* Debug trigger for the Dark Harry easter egg (pc_dark_harry.c), so it
          * can be tested without standing still for five minutes. */
-        extern void Pc_DarkHarry_Spawn(void);
-        extern int  Pc_DarkHarry_Active(void);
-        Pc_DarkHarry_Spawn();
-        cprintf(Pc_DarkHarry_Active() ? "afkegg: he is here"
-                                      : "afkegg: refused (wrong map, or not in normal gameplay)");
+        extern const char* Pc_DarkHarry_Spawn(void);
+        const char* why = Pc_DarkHarry_Spawn();
+        if (why == NULL) {
+            cprintf("afkegg: he is here");
+        } else {
+            cprintf("afkegg: refused - %s", why);
+        }
     } else if (strcmp(cmd, "NOCOL") == 0 || strcmp(cmd, "NOCOLLIDE") == 0) {
         cmd_nocol(arg);
     } else if (strcmp(cmd, "HEALTH") == 0 || strcmp(cmd, "HP") == 0) {
