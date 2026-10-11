@@ -113,6 +113,8 @@ void Pc_TextOverrideApply(int mapIdx);
  * unchanged). Pc_LangMenuTextWidth measures a (first line of a) menu string
  * in pixels for the centered title/difficulty entries. */
 const char* Pc_LangMenuText(const char* str);
+/* Gfx_StringDraw length argument for a string of unfixed length (see lang_menu.c). */
+int         Pc_LangMenuGlyphCount(const char* str);
 
 /* The DE/FR/ES/IT column (lang 1..4) of the menu table for one US literal, as
  * Latin-1; NULL when absent. Region-blind: lang_quick.c decides when it applies. */

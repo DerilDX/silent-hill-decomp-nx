@@ -3253,7 +3253,9 @@ void Options_MainOptionsMenu_ConfigDraw(void) // 0x801E4FFC
                     int slot = Pc_LangSlotCurrent();
 
                     Gfx_StringSetPosition(Pc_LangSlotNameX(slot), 136);
-                    Gfx_StringDraw(Pc_LangSlotName(slot), 10);
+                    /* A pack names itself; retail's 10 is for retail's names. */
+                    Gfx_StringDraw(Pc_LangSlotName(slot),
+                                   Pc_LangMenuGlyphCount(Pc_LangSlotName(slot)));
                     break;
                 }
 #endif

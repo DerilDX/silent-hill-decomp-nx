@@ -463,6 +463,29 @@ const char* Pc_LangMenuText(const char* str)
 
 /* Pixel width of a (single-line prefix of a) menu string, for the centered
  * title/difficulty entries whose US x-offsets are hardcoded constants. */
+/* The glyph budget Gfx_StringDraw spends on `str`. That drawer stops on a
+ * COUNT, never on the terminator, and only glyph-emitting bytes count: spaces
+ * and control bytes pass for free and a Shift-JIS pair is one. Retail passes
+ * fixed counts for its fixed strings; a string whose length nobody fixed, such
+ * as a language pack's own menu label, has to be counted the same way or it is
+ * cut (10 drew "PAL Englis" and "Russki (al") or, over-counted, read past its
+ * end. Counted on the translated form, which is what the drawer walks. */
+int Pc_LangMenuGlyphCount(const char* str)
+{
+    const unsigned char* p = (const unsigned char*)Pc_LangMenuText(str);
+    int                  n = 0;
+
+    for (; *p != 0; p++)
+    {
+        if (*p == '_' || *p < GLYPH_TABLE_ASCII_OFFSET)
+            continue;
+        if (Pc_LangSjisActive() && Pc_KanjiIsLead(*p) && p[1] != 0)
+            p++;
+        n++;
+    }
+    return n;
+}
+
 int Pc_LangMenuTextWidth(const char* str)
 {
     int         width = 0;
