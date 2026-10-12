@@ -796,9 +796,10 @@ public partial class Form1 : Form
             "Overrides the Level setting.");
 
         const string uncensoredTip =
-            "PAL discs only. Checked (default): the censored \"Mumblers\", as on the\n" +
-            "retail PAL disc. Unchecked: the original Grey Children, as in the US version.\n" +
-            "No effect on USA / NTSC-J discs.";
+            "PAL and NTSC-J discs. Checked (default): the censored \"Mumblers\", as on\n" +
+            "the retail disc. Unchecked: the original Grey Children, as on the US disc.\n" +
+            "PAL censors them everywhere, NTSC-J in the school and the amusement park.\n" +
+            "No effect on a USA disc, which was never censored.";
         Set(lblMenuType,   Loc.T("Which main menu the game shows: the US picture, "
                                 + "PAL's fog-only title, or the Japanese logo. "
                                 + "Auto follows the disc."));

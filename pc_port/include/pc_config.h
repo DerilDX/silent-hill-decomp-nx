@@ -432,11 +432,12 @@ typedef struct {
      * name-priority order. */
     char discImage[128];
 
-    /* Restore the Grey Children on a PAL/EUR disc (config key: uncensored).
-     * PAL is the only region that censors them into Mumblers; the Grey Child
-     * model ships on the disc, just unused. 1 = keep Grey Children (matches
-     * US/NTSC content); 0 = retail PAL Mumblers (default). No effect on
-     * US/NTSC-J discs, which already render their retail creature. */
+    /* Restore the Grey Children on a PAL or NTSC-J disc (config key:
+     * uncensored). Both censor them into Mumblers -- PAL everywhere, NTSC-J in
+     * the school and the amusement park -- and both carry the unused Grey
+     * Child model, so nothing has to be supplied. 1 = keep Grey Children
+     * (matches the US disc); 0 = retail behaviour for the disc (default). No
+     * effect on a USA disc, which was never censored. */
     int uncensored;
 
     /* Append a "PC Port Credits" block to the end of the staff roll, and back

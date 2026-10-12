@@ -256,7 +256,7 @@ s_PcConfig g_PcConfig = {
     .menuStyle      = TITLE_STYLE_AUTO, /* the disc's own title screen */
     .region         = 0, /* 0=auto (USA wins) 1=usa 2=pal 3=jap — preferred disc when several are present */
     .discImage      = "", /* exact .bin in gamedata/ (launcher Disc dropdown); empty = auto */
-    .uncensored     = 0, /* 0=retail PAL Mumblers (default); 1=restore Grey Children on EUR (matches US) */
+    .uncensored     = 0, /* 0=retail Mumblers (default); 1=restore Grey Children on EUR/JPN (matches US) */
     .pcPortCredits  = 1, /* 1=append the PC Port Credits block to the staff roll; 0=vanilla roll */
     .playerCharacter = "harry", /* play as: harry|lisa|cybil|kaufmann|dahlia|... (also - / = in K view) */
     .femaleVoicePitch = 140, /* voiced cries; breath caps at 118 of its own. 0 = off */
