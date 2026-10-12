@@ -26,6 +26,11 @@
 /* getClut(256,16) */
 #define KANJI_CLUT_ID    ((CLUT_Y << 6) | (CLUT_X >> 4))
 
+int Pc_KanjiClutId(void)
+{
+    return KANJI_CLUT_ID;
+}
+
 extern void GR_CopyVRAM(unsigned short* src, int x, int y, int w, int h, int dst_x, int dst_y);
 
 static unsigned short s_CellSjis[CELL_COUNT];

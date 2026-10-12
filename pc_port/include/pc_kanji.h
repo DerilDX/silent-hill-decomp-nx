@@ -32,4 +32,7 @@ void Pc_KanjiAtlasReset(void);
 void Pc_KanjiSetChinese(int useChinese);
 int  Pc_KanjiChineseActive(void);
 
+/* The packed CLUT word every kanji/hanzi cell is drawn with. */
+int Pc_KanjiClutId(void);
+
 #endif /* PC_KANJI_H */

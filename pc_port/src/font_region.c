@@ -1506,6 +1506,18 @@ int Font_HiresGridLive(void)
     return s_HiresGridLive;
 }
 
+/* g_PsyX_TextGlyphTest: the game font's two palettes (US strip (304,511), PAL
+ * grid (816,255)) and the kanji atlas's. Each is used by text and nothing else,
+ * so the CLUT alone names a glyph whatever page or override it samples. */
+int Font_IsTextGlyphPrim(int tpage, int clut)
+{
+    extern int Pc_KanjiClutId(void);
+    const int  c = clut & 0xFFFF;
+
+    (void)tpage;
+    return c == 0x7FD3 || c == 0x3FF3 || c == Pc_KanjiClutId();
+}
+
 static void FontHiresGridProbeHd(void)
 {
     FILE*          f;
