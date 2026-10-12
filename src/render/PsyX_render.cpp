@@ -3907,11 +3907,11 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * changed, so the two classes disagreed about what the setting meant. Off
 	 * means off everywhere now. A native-resolution replacement comes out the
 	 * same either way (see the hi-res sampler's u_hiresHalf note). */
-	/* Text glyphs stay point-sampled under either filter. The UV-limits clamp
-	 * stopped the neighbouring cell bleeding in, but a 12x16 one-colour glyph
-	 * magnified four or five times and bilinear-smoothed is still a swollen
-	 * grey smear -- the blurred Japanese and Chinese menus. Menu art keeps the
-	 * filter; the strokes keep their pixels, as on hardware. */
+	/* Splits the host names as unfilterable glyphs (g_PsyX_TextGlyphTest: the
+	 * kanji atlas) stay point-sampled under either filter. The UV-limits clamp
+	 * stopped the neighbouring cell bleeding in, but dense one-pixel strokes
+	 * magnified four or five times and bilinear-smoothed run into blots -- the
+	 * blurred Japanese and Chinese menus. Everything else keeps the filter. */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxSplitIsGlyph       ? 0

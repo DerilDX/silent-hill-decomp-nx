@@ -687,10 +687,10 @@ static int s_curPrimIsFeedback = 0;
  * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
 static int s_curPrimIsScratch = 0;
 
-/* Host-supplied: does this tpage/CLUT pair address a text glyph (the game
- * font, the kanji atlas)? Glyphs are 12x16 one-colour cells drawn at several
- * times their size, and a menu-filter bilinear tap turns their strokes into
- * swollen grey smears, so a glyph split is always point-sampled. NULL = none. */
+/* Host-supplied: does this tpage/CLUT pair address glyphs that must not be
+ * filtered (in this port, the kanji atlas: dense one-pixel strokes that a
+ * bilinear tap at four or five times their size runs together into blots)?
+ * Such a split is always point-sampled. NULL = none. */
 extern "C" int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
 int (*g_PsyX_TextGlyphTest)(int tpage, int clut) = NULL;
 static int s_curPrimIsGlyph = 0;
