@@ -335,7 +335,11 @@ void Pc_MouseCursor_Draw(void)
     setXY1Fast(poly, cx + 16, cy);
     setXY2Fast(poly, cx,      cy + 16);
     setXY3Fast(poly, cx + 16, cy + 16);
-    setUVWH(poly, 0, 64, 32, 32);
+    /* 31, not 32: the far edge is exclusive on hardware, which never samples
+     * texel 32 -- but the Menus filter's taps are clamped to the prim's UV box,
+     * and a box ending at 32 let them reach the next sprite in BG_ETC, drawing
+     * its green as specks along the arrow's right and bottom edges. */
+    setUVWH(poly, 0, 64, 31, 31);
     poly->clut  = getClut(192, 0);
     poly->tpage = getTPage(0, 0, 768, 0);
     setRGB0(poly, 128, 128, 128);
