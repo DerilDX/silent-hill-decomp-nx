@@ -686,6 +686,15 @@ static int s_curPrimIsFeedback = 0;
 /* The primitive samples the live scene-scratch rect: a soft-focus composite
  * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
 static int s_curPrimIsScratch = 0;
+
+/* Host-supplied: does this tpage/CLUT pair address a text glyph (the game
+ * font, the kanji atlas)? Glyphs are 12x16 one-colour cells drawn at several
+ * times their size, and a menu-filter bilinear tap turns their strokes into
+ * swollen grey smears, so a glyph split is always point-sampled. NULL = none. */
+extern "C" int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
+int (*g_PsyX_TextGlyphTest)(int tpage, int clut) = NULL;
+static int s_curPrimIsGlyph = 0;
+extern int g_PsxSplitIsGlyph;
 extern "C" int GR_SceneFbRedirectCovers(int x, int y);
 extern "C" float g_PsxFeedbackDampBlend;
 
@@ -696,6 +705,8 @@ static int s_curPrimR0 = 128;
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
+
+	s_curPrimIsGlyph = (g_PsyX_TextGlyphTest != NULL) ? g_PsyX_TextGlyphTest(tpage, clut) : 0;
 
 	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
 	 * addressing the left 320 VRAM columns is the display-buffer band, which is
@@ -1696,6 +1707,8 @@ struct GPUDrawSplit
 	 * shader's per-native-texel footprint clamp needs the upscale factor. */
 	int				overrideHiresW;
 	int				overrideHiresH;
+
+	int				isGlyph; /* see g_PsyX_TextGlyphTest */
 
 	const char*		debugText;
 };
@@ -2867,6 +2880,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		curSplit.drawenv.clip.w == activeDrawEnv.clip.w &&
 		curSplit.drawenv.clip.h == activeDrawEnv.clip.h &&
 		curSplit.drawenv.dfe == activeDrawEnv.dfe &&
+		curSplit.isGlyph == (textured ? s_curPrimIsGlyph : 0) &&
 		curSplit.debugText == currentSplitDebugText)
 	{
 		return;
@@ -2900,6 +2914,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
+	split.isGlyph   = textured ? s_curPrimIsGlyph : 0;
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
@@ -2998,6 +3013,7 @@ void DrawSplit(const GPUDrawSplit& split)
 
 	GR_SetStencilMode(split.drawPrimMode);	// draw with mask 0x16
 
+	g_PsxSplitIsGlyph = split.isGlyph;
 	GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
@@ -4194,6 +4210,7 @@ int ParsePrimitive(P_TAG* polyTag)
 	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
 	s_curPrimIsFeedback = 0;
 	s_curPrimIsScratch  = 0;
+	s_curPrimIsGlyph    = 0;
 	s_curPrimR0         = polyTag->pad0; /* r0 in every prim struct */
 
 	switch (primType)

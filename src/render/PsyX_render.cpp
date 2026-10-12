@@ -888,6 +888,10 @@ int g_PcPresentScale = 2;
  * resolution: at 320x224 their text would be a few pixels tall. */
 extern "C" void (*g_PsyX_PostCaptureHook)(void);
 int g_PcNativeRender = 0;
+
+/* The split being drawn addresses text glyphs (PsyX_GPU.cpp sets it before
+ * each bind); GR_SetTextureShader keeps those point-sampled. */
+int g_PsxSplitIsGlyph = 0;
 static int s_overlayToWindow = 0;
 
 /* Sharp bilinear needs somewhere to put the nearest whole-multiple upscale
@@ -3903,11 +3907,16 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * changed, so the two classes disagreed about what the setting meant. Off
 	 * means off everywhere now. A native-resolution replacement comes out the
 	 * same either way (see the hi-res sampler's u_hiresHalf note). */
+	/* Text glyphs stay point-sampled under either filter. The UV-limits clamp
+	 * stopped the neighbouring cell bleeding in, but a 12x16 one-colour glyph
+	 * magnified four or five times and bilinear-smoothed is still a swollen
+	 * grey smear -- the blurred Japanese and Chinese menus. Menu art keeps the
+	 * filter; the strokes keep their pixels, as on hardware. */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
-		            g_PsxDitherSuppressed
-		                ? (g_cfg_menuFilter ? 2 : 0)
-		                : ((g_cfg_textureFilter > 0) ? 1 : 0));
+		            g_PsxSplitIsGlyph       ? 0
+		            : g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0)
+		                                    : ((g_cfg_textureFilter > 0) ? 1 : 0));
 
 	/* How to filter, once the gate above says whether to. Anisotropic is walked
 	 * by hand for CLUT textures (see AnisoTextureSample); 1.0 means plain
