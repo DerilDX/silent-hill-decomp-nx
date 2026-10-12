@@ -1500,9 +1500,11 @@ const char* Pc_LangSlotName(int slot)
     /* Names in the retail PAL option-menu order (= config language index).
      * Index LANG_PACK_FIRST and up are PC-side packs, labelled by the pack's
      * own `!menu` field (e.g. "POLISH"). */
-    /* The two Englishes are distinct releases, so neither is just "English". */
+    /* The disc's own English is plain "English", as retail's PAL row has it;
+     * only the OTHER release's English is qualified, so the two can be told
+     * apart without the default reading as a mouthful. */
     static const char* const s_PalNames[LANG_PACK_FIRST] = {
-        "PAL_English", "German", "French", "Spanish", "Italian", "US_English"
+        "English", "German", "French", "Spanish", "Italian", "US_English"
     };
 
     /* The pack's own `!menu` label, read from the registry rather than from
@@ -1515,7 +1517,7 @@ const char* Pc_LangSlotName(int slot)
             /* The disc's own three. Its "English" is the compiled US script,
              * so it is named as such -- PAL English is a pack on this disc. */
             static const char* const s_JpNames[JP_LANG_COUNT] = {
-                "Japanese", "Chinese", "US_English"
+                "Japanese", "Chinese", "English"
             };
             int jp = SlotJpLang(lang);
 
@@ -1525,47 +1527,44 @@ const char* Pc_LangSlotName(int slot)
         if (lang >= LANG_PACK_FIRST)
             return Pc_LangPackListName(lang - LANG_PACK_FIRST);
 
-        /* Slot 0 is whichever English the mounted disc itself carries, and the
-         * other one shares the row with it, so it has to say which. */
-        if (lang == 0 && g_GameRegion != Region_EUR)
-            return s_PalNames[LANG_EN_US];
-
         return s_PalNames[(lang >= 0 && lang < LANG_PACK_FIRST) ? lang : 0];
     }
 }
 
 /* Left edge for the value name, nudged per word length the way the retail
  * On/Off values are (the row draws right-aligned-ish against fixed arrows). */
+/* The row's arrows, in screen x, before options.c spreads them: the left one's
+ * inner tip and the right one's (FRONT_ARROWS, Auto Load row, +160 centre). */
+#define LANG_ROW_ARROW_L    208
+#define LANG_ROW_ARROW_R    248
+#define LANG_ROW_PAD        6   /* clear space between a name and either arrow */
+#define LANG_ROW_SPREAD_MIN 26  /* what the row always had: room for retail's names */
+#define LANG_ROW_SPREAD_MAX 50  /* left arrow stays clear of the row's own label */
+
+static int SlotNameWidth(int slot)
+{
+    /* Drawn translated ("English" reads "Englisch" under German), so measured so. */
+    return Pc_LangMenuTextWidth(Pc_LangMenuText(Pc_LangSlotName(slot)));
+}
+
+/* How far options.c moves each arrow outward for this name: the old fixed
+ * spread, or enough to clear a longer one ("PAL English" is 105px, the row
+ * between the arrows was 92), never so far the left arrow meets the label. */
+int Pc_LangSlotArrowSpread(int slot)
+{
+    int need = (SlotNameWidth(slot) + 2 * LANG_ROW_PAD - (LANG_ROW_ARROW_R - LANG_ROW_ARROW_L) + 1) / 2;
+
+    if (need < LANG_ROW_SPREAD_MIN)
+        need = LANG_ROW_SPREAD_MIN;
+    return (need > LANG_ROW_SPREAD_MAX) ? LANG_ROW_SPREAD_MAX : need;
+}
+
+/* Centred between the arrows. Retail placed its five by hand (198/204), which
+ * only worked because they were all about one width; a pack can be called
+ * anything, and centring is what retail's placement approximated anyway. */
 int Pc_LangSlotNameX(int slot)
 {
-    /* Retail's five names are short enough that a fixed left edge was fine --
-     * the longest, "English", ran to x=262. Descriptive names are not: "NTSC-U
-     * English" is 138px and would have run to 336 on a 320-wide screen, and an
-     * installed pack can be called anything. So anything that would not fit is
-     * right-aligned to where the longest retail name ended instead, which
-     * leaves the short ones exactly where they have always been drawn. */
-    static const unsigned char s_PalX[LANG_PACK_FIRST] = { 198, 204, 204, 198, 198, 198 };
-
-    const int   rightEdge = 264;
-    const int   leftFloor = 130; /* keeps clear of the row's own label */
-    const char* name;
-    int         x;
-    int         width;
-
-    {
-        int lang = SlotLang(slot);
-
-        x = SlotIsJp(lang)
-                ? ((SlotJpLang(lang) == 0) ? 192 : 198)
-                : ((lang > 0 && lang < LANG_PACK_FIRST) ? (int)s_PalX[lang] : 200);
-    }
-
-    name  = Pc_LangSlotName(slot);
-    width = Pc_LangMenuTextWidth(name);
-    if (x + width > rightEdge)
-        x = rightEdge - width;
-
-    return (x < leftFloor) ? leftFloor : x;
+    return (LANG_ROW_ARROW_L + LANG_ROW_ARROW_R) / 2 - SlotNameWidth(slot) / 2;
 }
 
 /* The options menu shows the Language row only on EUR discs and only when

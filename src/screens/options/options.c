@@ -3229,7 +3229,7 @@ void Options_MainOptionsMenu_ConfigDraw(void) // 0x801E4FFC
          * arrow tables were sized for — pull its arrows outward so they
          * flank every language name instead of overlapping it. */
         s32 langDx = (g_MainOptionsMenu_SelectedEntry == MainOptionsMenuEntry_AutoLoad &&
-                      Pc_LangMenuRowActive()) ? 26 : 0;
+                      Pc_LangMenuRowActive()) ? Pc_LangSlotArrowSpread(Pc_LangSlotCurrent()) : 0;
 
         /* Volume-bar rows moved right by OPT_VOLUME_BAR_DX; their flanking
          * arrows follow so they still bracket the bar (both shift the same

@@ -72,6 +72,7 @@ int         Pc_LangSlotCurrent(void);
 void        Pc_LangSlotSet(int slot);
 const char* Pc_LangSlotName(int slot);
 int         Pc_LangSlotNameX(int slot);
+int         Pc_LangSlotArrowSpread(int slot); /* outward shift of the row's arrows */
 
 /* Live language switch (0=en 1=de 2=fr 3=es 4=it): persists the config key,
  * rebinds the file table, reloads item text. Title-screen options only. */
