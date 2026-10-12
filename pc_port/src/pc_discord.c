@@ -20,6 +20,9 @@
 #include "sh_log.h"
 #include <string.h>
 #include <stdio.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 /* time()/getpid() are provided by the isolated IPC TU (pc_discord_ipc.c): their
  * <time.h>/<unistd.h> typedefs can clash with the decomp headers included here,
@@ -228,6 +231,12 @@ void Pc_Discord_Init(void)
 {
     const char* id;
     s_enabled = 0;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    /* No desktop Discord client, so no IPC socket to reach: every attempt
+     * would only fail, ten seconds apart, for the whole session. */
+    SH_DBG("[DISCORD] not available on this platform");
+    return;
+#endif
     if (!g_PcConfig.discordRichPresence)
     {
         SH_DBG("[DISCORD] disabled by config");
