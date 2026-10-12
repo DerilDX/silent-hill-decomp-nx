@@ -502,6 +502,19 @@ void GameState_KcetLogo_Update(void) // 0x800C99A4
     }
 }
 
+#ifdef SH_PC_PORT
+/* The white behind the logos, at the logo images' own white. A texel of 31
+ * decodes to 248 here (5-bit << 3) while a flat 0xFFFFFF tile stays 255; on
+ * hardware both land on framebuffer 31 and match. The screen fade subtracts
+ * the same amount from both, so near black that fixed 7-level gap is most of
+ * the picture and the logo showed as a dark panel fading in "late" (measured
+ * from a 120 fps capture: background 11 vs logo 4, 36 vs 29). The decode itself
+ * stays: the framebuffer-feedback effects are tuned against it. */
+#define BOOT_SCREEN_WHITE 0xF8F8F8
+#else
+#define BOOT_SCREEN_WHITE 0xFFFFFF
+#endif
+
 void BootScreen_ImageSegmentDraw(s_FsImageDesc* image, s32 otz, s32 vramX, s32 vramY, s32 w, s32 h, s32 x, s32 y) // 0x800C9E6C
 {
     DR_TPAGE* tPage;
@@ -556,7 +569,7 @@ void BootScreen_KonamiScreenDraw(void) // 0x800C9FB8
     
     // Draw fading overlay tile.
     addPrimFast(ptr, tile, 3);
-    setCodeWord(tile, PRIM_RECT, 0xFFFFFF);
+    setCodeWord(tile, PRIM_RECT, BOOT_SCREEN_WHITE);
     setXY0Fast(tile, -SCREEN_WIDTH, -SCREEN_HEIGHT);
     setWH(tile, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2);
 
@@ -589,7 +602,7 @@ void BootScreen_KcetScreenDraw(void) // 0x800CA120
     // Draw fading overlay tile.
     ptr = &g_OtTags0[g_ActiveBufferIdx][15];
     addPrimFast(ptr, (TILE*)GsOUT_PACKET_P, 3);
-    setCodeWord((TILE*)GsOUT_PACKET_P, PRIM_RECT, 0xFFFFFF);
+    setCodeWord((TILE*)GsOUT_PACKET_P, PRIM_RECT, BOOT_SCREEN_WHITE);
     setXY0Fast((TILE*)GsOUT_PACKET_P, -SCREEN_WIDTH, -SCREEN_HEIGHT);
     setWH((TILE*)GsOUT_PACKET_P, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2);
     GsOUT_PACKET_P = (PACKET*)((u8*)GsOUT_PACKET_P + sizeof(TILE));
