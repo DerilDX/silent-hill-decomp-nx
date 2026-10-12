@@ -2276,6 +2276,11 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	 * offset instead (a_extra.xy * 0.5 in the vertex shader, so 2 = +1 texel).
 	 * Genuine overflows past 256 keep the old clamp. */
 	int extendU = 0, extendV = 0;
+	/* The sprite's own texels end one BEFORE u+w / v+h -- the far edge is
+	 * exclusive and the hardware never reads it. Only meaningful when the
+	 * size went through untouched. */
+	const int lastU = (int(uv[0]) + w <= 255 && w > 0) ? int(uv[0]) + w - 1 : -1;
+	const int lastV = (int(uv[1]) + h <= 255 && h > 0) ? int(uv[1]) + h - 1 : -1;
 
 	if (int(uv[0]) + w == 256)     { w = 255 - uv[0]; extendU = 1; }
 	else if (int(uv[0]) + w > 255) { w = 255 - uv[0]; }
@@ -2347,6 +2352,17 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	 * around P - 0.5 itself, so nothing needs compensating here. */
 
 	SetUvLimits(vertex, 4);
+
+	/* The filter's taps are clamped to this box, and a box ending at u+w / v+h
+	 * let them read the texel past the sprite: whatever VRAM held beside it,
+	 * drawn as a coloured line down the edge of the loading-screen picture
+	 * (and anything else built from abutting sprites). End it at the last
+	 * texel the sprite really shows. */
+	for (int i = 0; i < 4; i++)
+	{
+		if (lastU >= 0) vertex[i].uhi = (unsigned char)lastU;
+		if (lastV >= 0) vertex[i].vhi = (unsigned char)lastV;
+	}
 }
 
 void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
