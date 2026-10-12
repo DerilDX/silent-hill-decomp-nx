@@ -1,5 +1,133 @@
 # Silent Hill PC Port — Changelog
 
+## beta-2026.10.12.1 -- 2026-10-12
+- Fixed the Konami and KCET logos fading in separately from their white backgrounds, they now fade in together like the original
+- All three versions of the game (USA, PAL, and Japanese) can now be played in any supported language. Pick it with the new Game Language option in the launcher, which is set to Automatic by default and uses the disc's own language. It can also be changed from the Language option in the options menu, which is now on every version and works mid-game on USA and Japanese discs
+- Supported languages:
+  - English (US)
+  - English (PAL)
+  - German
+  - French
+  - Spanish
+  - Italian
+  - Japanese
+  - Chinese
+  - Russian (Team Raccoon's translation, with the PC port's menus translated by Claude)
+  - Polish (thanks to rafalekkB)
+  - Brazilian Portuguese (thanks to StarKillerChief)
+- Languages can now be installed as mods, either by dropping a .lang file into gamedata/lang or through the Mod Manager
+- Accented and Cyrillic letters now display correctly on every version of the game
+- HD font packs now work on every version and in every language. The EU HD font by ivanproff is recommended for everything except US English on a USA disc, and the Mod Manager will offer to download it if you have the US version installed with a different language or version
+- The quick options menu, controls panel, and confirmation boxes now follow the game language, including Japanese and Chinese
+- Added a Native (PSX) resolution option in the launcher that renders every screen at the original game's resolution and switches between them like the original does 
+- UI filtering now actually works on the original menus and art instead of only texture packs, and fixed the lines it left on the loading screen, around the boot logos, and on the mouse cursor. Japanese and Chinese text stays sharp with it on
+- The main menu style (US, EU, or Japanese) can now be picked under Menu Type in the launcher on any version
+- Brightness, contrast, and saturation no longer affect menus and FMVs, and the original console Brightness setting is back 
+- Added a Crosshair Style option in Quick Options > HUD
+- Added a Rest Zoom option to the View page to move the camera closer without changing the FOV
+- A lot more controllers now work out of the box, like the PlayStation Classic controller, and controllers plugged in before launching are now detected
+- Fixed Harry sometimes not responding to input when surrounded by several enemies
+- Fixed voice lines added by voice mods getting cut off when the text box advances
+- The Uncensored option now works on the Japanese version too
+- Fixed a freeze after a few minutes of play on Android
+- Fixed a crash when picking up items in the cafe on macOS, and a black screen on macOS 
+- Fixed enlarged subtitles looking blurry
+- Fixed clicking the left arrow on the Language row going forward instead of back
+- New NOCOL console command to walk through walls and other characters
+
+Commit summaries:
+- Text overrides keep the line's own terminator, so blanked cutscenes still chain
+- Russian as a selectable language, and languages installable as mods
+- NTSC-J: English as a third choice on the Language row
+- NOCOL / NOCOLLIDE: phase a character out of collision but keep the ground
+- Russian: capital Э no longer reads as a control code on a consolgames disc
+- German, French, Spanish and Italian on any disc
+- Title screen style is a setting, not the disc
+- Japanese on any disc: the kanji never needed the Japanese one
+- US atlas: fall back for the three accents the PAL packs lean on
+- The Language row lists what THIS disc can actually offer, and PAL English joins it
+- Three main menus, any of them on any disc
+- Language switch: the glyphs change on the same frame as the advances
+- Import the PAL font atlas, so a language looks the same on any disc
+- A pack's story text installs on a US or Japanese disc too, not just PAL
+- Enlarged subtitles are no longer filtered as if they were scenery
+- Japanese menus travel with the pack, and the two Englishes are both selectable
+- Check the packs before shipping them, and recover 12 menu strings that were lost
+- The Japanese disc's Language row joins the rest, keeping its own three intact
+- Bound the walk/run blend so a swarm cannot kill player input
+- Chinese works on any disc, re-keyed out of zh.pack
+- Brightness screen: bring back the classic console control (#150)
+- Image adjustments stop grading the menus and FMVs (#150)
+- Brightness screen: size the CLASSIC label from the real space advance
+- A de/fr/es/it pack reads the menus and overlays already written for that language
+- Translate 38 menu rows retail left in English, and stop undercounting the rest
+- German, French, Spanish and Italian are complete; nothing falls back to English
+- A missing font atlas falls back instead of pointing FONT16 at empty VRAM
+- Russian and Polish are complete, and 58 story lines were never missing
+- The F10 overlay can draw Japanese and Chinese at all
+- Tool: locate the Japanese menu strings still on the disc
+- A font pack built for either region now works on both
+- Added text-box voices hold the page until the clip finishes
+- No language pack has ever appeared in the row, on any disc
+- A hi-res font pack works on the other region too, not just a raw TIM one
+- Cross-region languages are opt-in, so a release changes nothing by default
+- Launcher: pick the main menu type
+- PAL gets every language by default; the gate is only for discs that must import the atlas
+- Log what the Language row actually offers
+- Say where the pack scan looked when it cannot open the directory
+- Brazilian Portuguese, with the ten letters the PAL font cannot draw
+- A hi-res font pack gets the built letters too, at its own resolution
+- Portuguese reaches zero, and the Language row learns to say its own names
+- The save/load screen was unreachable for every translator
+- Rest Zoom: move the resting camera without touching the FOV
+- Polish and Russian get the save/load screen too
+- Keep the raw template JSON in step with the 18 new strings
+- Every language past the fifth pack was silently becoming English
+- A hi-res font pack follows the atlas when it moves home
+- Revert the hi-res re-read: it corrupted the atlas instead of following it
+- A saved language survives a reboot on the disc it was saved on
+- The Language row says Português
+- A hi-res font pack follows the atlas, this time without touching VRAM
+- Two font faults the methodical pass separated out
+- The re-laid atlas was two rows short, so Russian and Polish had nowhere to build
+- Stop writing the atlas into live map textures; the collision IS the bug
+- The scaled-text exemption was dragging world billboards out of 3D with it
+- Back out tonight's font work to the last state you confirmed good
+- Nothing draws from the PAL cell grid on a disc that keeps other art there
+- Repair twelve NUL bytes that scripted edits left where a backslash-zero belongs
+- Language defaults to automatic, and a refused one goes back to it
+- A US-cut hi-res font is for US English on a USA disc, and nothing else
+- Launcher: pick the game's language, and say where the EU font comes from
+- Say what a disc can actually show, and where the EU font comes from
+- Self-review of the language work: four things that were not right
+- Mod Manager offers the EU HD font when the US one is enabled under the wrong combo
+- Russian with an HD font on PAL, Alt Russian not listed, and the review's real finds
+- Accents on USA and NTSC-J: the PAL grid as a pinned override, never an upload
+- docs: prop physics and wind foliage feasibility (research only)
+- Console: bare kf toggles the keyframe viewer
+- Finish retiring the K key: the Quick Options row and six languages
+- Kanji packs on USA lost the Latin strip: re-lay to the disc's shape, not the layout's
+- Language row: a pack's menu label is drawn in full, not cut at 10 glyphs
+- Ship gamecontrollerdb.txt, so pads SDL doesn't know work out of the box
+- PsyCross e076d4d: pads already plugged in at boot now get opened
+- Quick Options > HUD: a Crosshair Style row
+- NTSC-J languages: pack menus, in-game switching, no switch flash, CJK quick menu
+- Overlay CJK fonts on macOS and Linux, and English instead of boxes without one
+- Filtering options: the in-game row stopped writing a key the loader discards
+- Native (PSX) resolution option (issue #155)
+- Uncensored also uncensors NTSC-J, which was censored too
+- macOS: share the exe's PsyCross with map dylibs, compile overlay shaders on core profile
+- PsyCross 1ea394d: the macOS half of #157
+- Fix the cabinet freeze: Discord IPC leaked ~3 sockets/s through PsyCross close()
+- Language row: the disc's own English is just "English", and names fit the arrows
+- Japanese, Chinese and game-font text stay sharp with the Menus filter on
+- Menus filter smooths the Latin font again; only kanji/hanzi stay sharp
+- Mouse cursor: no green specks on its edges with the Menus filter on
+- Boot logos fade in with their background, not as a dark panel inside it
+- Boot logos stay sharp under the Menus filter, so no outline around them
+- PsyCross: no coloured line on the loading screen's edge with the Menus filter
+- Options: clicking the left arrow steps back, not forward
+
 ## beta-2026.10.02.1 -- 2026-10-02
 - Fixed surround sound on the software SPU audio path (current default), now selecting 5.1 or 7.1 will work correctly
 - Added scaling mode and separated dithering from filtering in the launcher, now upscaling from low resolutions can look much better
