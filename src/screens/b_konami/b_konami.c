@@ -515,6 +515,24 @@ void GameState_KcetLogo_Update(void) // 0x800C99A4
 #define BOOT_SCREEN_WHITE 0xFFFFFF
 #endif
 
+#ifdef SH_PC_PORT
+/* The Konami and KCET logo images stay point-sampled under the Menus filter:
+ * each is drawn as several abutting sprites, and a bilinear tap at a sprite's
+ * edge reads that edge texel against the next one's, so the seams and the
+ * image border showed as a faint outline around the logo. Keyed on the two
+ * logo palettes and only while their screen is up, so the memory-card
+ * messages here and whatever later reuses the palettes keep the filter. */
+int BootScreen_IsLogoPrim(int clut)
+{
+    const int c = clut & 0xFFFF;
+
+    if (g_GameWork.gameState != GameState_KonamiLogo && g_GameWork.gameState != GameState_KcetLogo)
+        return 0;
+    return c == ((g_KonamiLogoImg.clutY << 6) | ((g_KonamiLogoImg.clutX >> 4) & 0x3F)) ||
+           c == ((g_KcetLogoImg.clutY << 6) | ((g_KcetLogoImg.clutX >> 4) & 0x3F));
+}
+#endif
+
 void BootScreen_ImageSegmentDraw(s_FsImageDesc* image, s32 otz, s32 vramX, s32 vramY, s32 w, s32 h, s32 x, s32 y) // 0x800C9E6C
 {
     DR_TPAGE* tPage;

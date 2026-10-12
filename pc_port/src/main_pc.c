@@ -705,6 +705,16 @@ static void ParseArgs(int argc, char* argv[])
     }
 }
 
+extern int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
+extern int Font_IsTextGlyphPrim(int tpage, int clut);
+extern int BootScreen_IsLogoPrim(int clut);
+
+/* Kanji/hanzi cells, and the boot screens' logo images. */
+static int Pc_UnfilteredPrim(int tpage, int clut)
+{
+    return Font_IsTextGlyphPrim(tpage, clut) || BootScreen_IsLogoPrim(clut);
+}
+
 int main(int argc, char* argv[])
 {
     /* Log file is NOT opened until after config load. SH_DBG calls before
@@ -1031,12 +1041,8 @@ int main(int argc, char* argv[])
     /* Before PsyX_Initialise: the window is confined as soon as it is created. */
     g_cfg_confineCursor = g_PcConfig.confineCursor;
 
-    /* Kanji/hanzi stay point-sampled under the Menus filter (PsyX_GPU.cpp). */
-    {
-        extern int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
-        extern int Font_IsTextGlyphPrim(int tpage, int clut);
-        g_PsyX_TextGlyphTest = Font_IsTextGlyphPrim;
-    }
+    /* Prims that stay point-sampled under the Menus filter (PsyX_GPU.cpp). */
+    g_PsyX_TextGlyphTest = Pc_UnfilteredPrim;
 
     /* Before PsyX_Initialise too: it decides whether the window may be
      * multisampled (the native target is scaled onto it by a blit). */
