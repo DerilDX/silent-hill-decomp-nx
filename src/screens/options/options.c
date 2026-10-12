@@ -2192,8 +2192,14 @@ void Options_MainOptionsMenu_Control(void) // 0x801E3770
                 }
                 else if (Pc_MouseCursor_LeftClicked())
                 {
-                    /* Vibration / Auto Load (Language) / Sound toggles. */
-                    PcMouse_InjectDir(1);
+                    /* Vibration / Auto Load (Language) / Sound: the side of the
+                     * value that was clicked is the direction, as the arrows
+                     * show. Every click used to step forward, so clicking the
+                     * back arrow on the Language row skipped ahead -- the
+                     * order looked random. 228 is midway between the row's
+                     * arrows (FRONT_ARROWS inner tips 48/88, +160 centre), and
+                     * the Language row centres its name there too. */
+                    PcMouse_InjectDir((mx < 228) ? -1 : 1);
                 }
                 else if (wheel != 0)
                 {
