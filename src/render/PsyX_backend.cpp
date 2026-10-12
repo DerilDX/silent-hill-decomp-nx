@@ -412,6 +412,24 @@ const char* PsyX_Shader_Preamble(int fragmentStage, int dialect)
 	 * GLSL 1.10 default, and stamping a version on them would only start
 	 * enforcing rules they were never written against. */
 	static const char* const kGlLegacy  = "";
+#ifdef __APPLE__
+	/* ...except on macOS, which only hands out a CORE profile: there an
+	 * unversioned body is GLSL 1.10, which the core context rejects outright
+	 * ("#version required and missing"), so the quick options overlay and the
+	 * other legacy-dialect panels never drew. Compile them as 1.50 and map the
+	 * legacy keywords onto their core equivalents. */
+	static const char* const kGlLegacyCoreVert =
+		"#version 150\n"
+		"#define attribute in\n"
+		"#define varying out\n"
+		"#define texture2D texture\n";
+	static const char* const kGlLegacyCoreFrag =
+		"#version 150\n"
+		"#define varying in\n"
+		"#define texture2D texture\n"
+		"out vec4 psyx_FragColor;\n"
+		"#define gl_FragColor psyx_FragColor\n";
+#endif
 
 	if (g_grIsGLES)
 	{
@@ -420,6 +438,10 @@ const char* PsyX_Shader_Preamble(int fragmentStage, int dialect)
 		return fragmentStage ? kEs3Frag : kEs3Vert;
 	}
 
+#ifdef __APPLE__
+	if (dialect == PSYX_GLSL_LEGACY)
+		return fragmentStage ? kGlLegacyCoreFrag : kGlLegacyCoreVert;
+#endif
 	return (dialect == PSYX_GLSL_LEGACY) ? kGlLegacy : kGl140;
 }
 

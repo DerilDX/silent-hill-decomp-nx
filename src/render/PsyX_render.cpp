@@ -7028,7 +7028,13 @@ void GR_SwapWindow()
 	{
 		GreyFrame_Present(g_internalFBO ? g_presentWidth : g_windowWidth,
 		                  g_internalFBO ? g_presentHeight : g_windowHeight);
+		/* Swap with the window framebuffer bound. macOS 26's GL-on-Metal
+		 * presents nothing (a black window) when an FBO is still bound at
+		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		SDL_GL_SwapWindow(g_window);
+		if (g_internalFBO)
+			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
 	}
 #endif
 
