@@ -1031,7 +1031,7 @@ int main(int argc, char* argv[])
     /* Before PsyX_Initialise: the window is confined as soon as it is created. */
     g_cfg_confineCursor = g_PcConfig.confineCursor;
 
-    /* Text glyphs stay point-sampled under the Menus filter (PsyX_GPU.cpp). */
+    /* Kanji/hanzi stay point-sampled under the Menus filter (PsyX_GPU.cpp). */
     {
         extern int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
         extern int Font_IsTextGlyphPrim(int tpage, int clut);

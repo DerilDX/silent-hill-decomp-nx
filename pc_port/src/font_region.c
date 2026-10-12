@@ -1506,16 +1506,17 @@ int Font_HiresGridLive(void)
     return s_HiresGridLive;
 }
 
-/* g_PsyX_TextGlyphTest: the game font's two palettes (US strip (304,511), PAL
- * grid (816,255)) and the kanji atlas's. Each is used by text and nothing else,
- * so the CLUT alone names a glyph whatever page or override it samples. */
+/* g_PsyX_TextGlyphTest: the kanji/hanzi atlas only, by its palette, which
+ * nothing else uses. The Latin font is drawn from cells with anti-aliased
+ * edges and smooths well, so it keeps the Menus filter like the rest of the
+ * menu; a kanji cell is dense one-pixel strokes, and smoothing those at four
+ * or five times their size runs them together into blots. */
 int Font_IsTextGlyphPrim(int tpage, int clut)
 {
     extern int Pc_KanjiClutId(void);
-    const int  c = clut & 0xFFFF;
 
     (void)tpage;
-    return c == 0x7FD3 || c == 0x3FF3 || c == Pc_KanjiClutId();
+    return (clut & 0xFFFF) == Pc_KanjiClutId();
 }
 
 static void FontHiresGridProbeHd(void)
