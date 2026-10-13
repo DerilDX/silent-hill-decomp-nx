@@ -129,6 +129,10 @@ int  Font_HiresGridLive(void);
  * pack can stand in for any of them. */
 int  Font_RussianLayoutActive(void);
 
+/* gamedata/load/1ST/FONT16_RU.png decoded (loaded once, owned here), or NULL
+ * when none is installed or it is not PAL-grid shaped. */
+const unsigned char* Font_RuHiresImage(int* outW, int* outH);
+
 /* What a hi-res font pack was cut for, from its pixel size alone. */
 #define FONT_PACK_SHAPE_UNKNOWN 0
 #define FONT_PACK_SHAPE_US      1

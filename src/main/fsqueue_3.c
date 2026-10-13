@@ -1707,6 +1707,33 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
             }
         }
 
+        /* The Cyrillic HD font has its own file, and the Latin pack above was
+         * declined (or absent): register it over the atlas the Russian cells
+         * were just built into. Where the grid is the pinned override instead
+         * (off PAL), Font_HiresGridSync carries it. */
+        if (!looseHires && discBitDepth > 0 &&
+            FSQ_INFO_VALID(entry->info) &&
+            (int)(entry->info - &g_FileTable[0]) == FILE_1ST_FONT16_TIM &&
+            Font_RussianLayoutActive() && !Font_HiresGridLive())
+        {
+            int                  rw = 0, rh = 0;
+            const unsigned char* ru = Font_RuHiresImage(&rw, &rh);
+
+            if (ru != NULL)
+            {
+                /* Gutterless glyph cells bleed under bilinear sampling, as in
+                 * Font_HiresGridSync. */
+                HiresOverride_SetForceNearestUpload(1);
+                looseHires = HiresOverride_RegisterRGBAKeyed(
+                    "FONT16_RU", ru, rw, rh,
+                    (int)pixelRect.x, (int)pixelRect.y,
+                    (int)pixelRect.w, (int)pixelRect.h,
+                    haveClut ? (int)clutRect.x : -1, haveClut ? (int)clutRect.y : -1,
+                    discBitDepth, 0) == 0;
+                HiresOverride_SetForceNearestUpload(0);
+            }
+        }
+
         /* DuckStation texture pack for VRAM-resident TIMs (items, HUD,
          * charas, 2D backgrounds), matched by content hash of the upload.
          * A loose hi-res replacement above takes priority.

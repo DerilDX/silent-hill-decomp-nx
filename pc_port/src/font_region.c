@@ -103,6 +103,9 @@ static int s_RussianLayoutActive;
 static unsigned char*     s_HiresGridHd; /* decoded PAL-shaped pack, pristine */
 static int                s_HiresGridHdW, s_HiresGridHdH;
 static int                s_HiresGridHdProbed;
+static unsigned char*     s_HiresRuHd; /* decoded FONT16_RU, pristine */
+static int                s_HiresRuHdW, s_HiresRuHdH;
+static int                s_HiresRuHdProbed;
 static int                s_HiresGridTimSeen;
 static int                s_HiresGridLive;
 /* Still registered after the layout leaves the grid. The frames already built
@@ -114,6 +117,10 @@ static unsigned long long s_HiresGridHash; /* source + pack flags it was built f
 
 #define EUR_ATLAS_PATH "gamedata/font/eur16.tim"
 #define HD_FONT_PATH   "gamedata/load/1ST/FONT16.png"
+/* Cyrillic HD: a PAL-shaped (21x6 cell) image carrying the Russian atlas's
+ * cells in its own order (font_ru.inc). Separate from FONT16.png because the
+ * Russian layout replaces every cell, so neither file can serve the other. */
+#define HD_FONT_RU_PATH "gamedata/load/1ST/FONT16_RU.png"
 
 /* The grid's retail PAL home and palette: tpage 12 at v 128, 64 units by 96
  * rows at 4bpp, CLUT (816,255). The override key must be exactly what
@@ -1523,7 +1530,60 @@ int Font_IsTextGlyphPrim(int tpage, int clut)
     (void)tpage;
     if (c == Pc_KanjiClutId())
         return 1;
-    return c == ((GRID_CLUT_Y << 6) | (GRID_CLUT_X >> 4)) && (s_RussianLayoutActive || Pc_RuActive());
+    /* An HD Cyrillic font is drawn art with real edges, and smooths like the
+     * Latin one. */
+    return c == ((GRID_CLUT_Y << 6) | (GRID_CLUT_X >> 4)) &&
+           (s_RussianLayoutActive || Pc_RuActive()) &&
+           !(s_RussianLayoutActive && Font_RuHiresImage(NULL, NULL) != NULL);
+}
+
+const unsigned char* Font_RuHiresImage(int* outW, int* outH)
+{
+    if (!s_HiresRuHdProbed)
+    {
+        FILE*          f;
+        long           n    = 0;
+        unsigned char* buf  = NULL;
+        unsigned char* rgba = NULL;
+        int            w = 0, h = 0;
+
+        s_HiresRuHdProbed = 1;
+        f = Pc_LooseFOpen(HD_FONT_RU_PATH, "rb");
+        if (f != NULL)
+        {
+            fseek(f, 0, SEEK_END);
+            n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            buf = (n > 0 && n < (64L << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+            if (buf != NULL && fread(buf, 1, (size_t)n, f) != (size_t)n)
+            {
+                free(buf);
+                buf = NULL;
+            }
+            fclose(f);
+        }
+        if (buf != NULL && HiresOverride_DecodeToRGBA(buf, (unsigned int)n, &rgba, &w, &h) == 0)
+        {
+            if (Font_HiresPackShape(w, h) == FONT_PACK_SHAPE_PAL)
+            {
+                s_HiresRuHd  = rgba;
+                s_HiresRuHdW = w;
+                s_HiresRuHdH = h;
+                SH_LOG("[FONT] Cyrillic HD font %s: %dx%d (%dx)", HD_FONT_RU_PATH, w, h,
+                       w / FONT_EUR_PX_W);
+            }
+            else
+            {
+                SH_WARN("[FONT] %s is %dx%d, not a whole multiple of the 256x96 PAL "
+                        "grid - ignored", HD_FONT_RU_PATH, w, h);
+                free(rgba);
+            }
+        }
+        free(buf);
+    }
+    if (outW) *outW = s_HiresRuHdW;
+    if (outH) *outH = s_HiresRuHdH;
+    return s_HiresRuHd;
 }
 
 static void FontHiresGridProbeHd(void)
@@ -1630,7 +1690,8 @@ void Font_HiresGridSync(void)
     if (!s_HiresGridHdProbed)
         FontHiresGridProbeHd();
 
-    fromHd = (s_HiresGridHd != NULL && !s_RussianLayoutActive);
+    fromHd = s_RussianLayoutActive ? (Font_RuHiresImage(NULL, NULL) != NULL)
+                                   : (s_HiresGridHd != NULL);
     flags  = (s_PolishLayoutActive ? 1 : 0) | (s_PtLayoutActive ? 2 : 0) |
              (s_RussianLayoutActive ? 4 : 0) | (Pc_RuDiscNeedsEFix() ? 8 : 0);
     hash   = 0x464F4E5447524944ull ^ ((unsigned long long)(fromHd ? 1 : 2) << 8) ^
@@ -1641,7 +1702,16 @@ void Font_HiresGridSync(void)
         return;
     }
 
-    if (fromHd)
+    if (fromHd && s_RussianLayoutActive)
+    {
+        const unsigned char* ru = Font_RuHiresImage(&w, &h);
+        size_t               bytes = (size_t)w * (size_t)h * 4;
+
+        rgba = (unsigned char*)malloc(bytes);
+        if (rgba != NULL)
+            memcpy(rgba, ru, bytes);
+    }
+    else if (fromHd)
     {
         size_t bytes = (size_t)s_HiresGridHdW * (size_t)s_HiresGridHdH * 4;
 
@@ -1680,7 +1750,7 @@ void Font_HiresGridSync(void)
             s_HiresGridRegistered = 1;
             s_HiresGridHash       = hash;
             SH_LOG("[FONT] PAL grid backed by a pinned %dx%d override from %s",
-                   w, h, fromHd ? HD_FONT_PATH : EUR_ATLAS_PATH);
+                   w, h, !fromHd ? EUR_ATLAS_PATH : s_RussianLayoutActive ? HD_FONT_RU_PATH : HD_FONT_PATH);
             return;
         }
     }
