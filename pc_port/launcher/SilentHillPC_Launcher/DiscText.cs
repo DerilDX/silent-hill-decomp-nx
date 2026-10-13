@@ -57,7 +57,7 @@ namespace SilentHillPC_Launcher
             { "MAP5_S02", 4, 43, 2 },
         };
 
-        private static readonly string[] PalLabels = { "English", "German", "French", "Spanish", "Italian" };
+        private static readonly string[] PalLabels = { "PAL English", "German", "French", "Spanish", "Italian" };
 
         /// <summary>The languages this disc can show: its own (one for USA/JAP and
         /// for fan patches, five for retail PAL) plus every PC-side pack in
@@ -83,7 +83,7 @@ namespace SilentHillPC_Launcher
                 }
                 else
                 {
-                    list.Add(new Language { Label = disc.Region == "JAP" ? "Japanese" : "English", Slot = 0 });
+                    list.Add(new Language { Label = disc.Region == "JAP" ? "Japanese" : "US English", Slot = 0 });
                 }
             }
             try
