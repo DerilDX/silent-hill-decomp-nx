@@ -148,6 +148,11 @@ static int PackOfferedHere(int packIdx)
     int         font = Pc_LangPackListFont(packIdx);
     int         i;
 
+    /* The compiled US script is on every disc already (slot 0 off PAL, id
+     * LANG_EN_US on it), so a pack of it would only be a second US English. */
+    if (strcmp(code, "en") == 0 || strcmp(code, "en_us") == 0)
+        return 0;
+
     if (g_GameRegion == Region_EUR)
     {
         for (i = 1; i < LANG_PACK_FIRST; i++)
@@ -1031,9 +1036,15 @@ static void LangInitBody(void)
 
     /* Re-entrant: the title-screen options menu re-runs this on a language
      * switch. Dropping the pool makes Pc_LangItemName/Desc fall back to the
-     * compiled US strings until (unless) a new table loads below. */
+     * compiled US strings until (unless) a new table loads below -- but only
+     * with the pointers and the ready flag cleared too: US English on a PAL
+     * disc installs nothing, so it drew the freed pool (or a Japanese pack's
+     * tables) left over from the language before it. */
     free(s_ItemPool);
-    s_ItemPool = NULL;
+    s_ItemPool      = NULL;
+    s_ItemTextReady = 0;
+    memset(s_ItemNames, 0, sizeof(s_ItemNames));
+    memset(s_ItemDescs, 0, sizeof(s_ItemDescs));
 
     /* Clean slate for the layout logic below: a previous run's fan-patch
      * override or Polish layout must not survive into this one (see
@@ -1500,11 +1511,10 @@ const char* Pc_LangSlotName(int slot)
     /* Names in the retail PAL option-menu order (= config language index).
      * Index LANG_PACK_FIRST and up are PC-side packs, labelled by the pack's
      * own `!menu` field (e.g. "POLISH"). */
-    /* The disc's own English is plain "English", as retail's PAL row has it;
-     * only the OTHER release's English is qualified, so the two can be told
-     * apart without the default reading as a mouthful. */
+    /* Both Englishes are always named by release. A plain "English" for the
+     * disc's own read as a third English beside the two qualified ones. */
     static const char* const s_PalNames[LANG_PACK_FIRST] = {
-        "English", "German", "French", "Spanish", "Italian", "US_English"
+        "PAL_English", "German", "French", "Spanish", "Italian", "US_English"
     };
 
     /* The pack's own `!menu` label, read from the registry rather than from
@@ -1514,10 +1524,10 @@ const char* Pc_LangSlotName(int slot)
 
         if (SlotIsJp(lang))
         {
-            /* The disc's own three. Its "English" is the compiled US script,
-             * so it is named as such -- PAL English is a pack on this disc. */
+            /* The disc's own three. Its English is the compiled US script --
+             * PAL English is a pack on this disc. */
             static const char* const s_JpNames[JP_LANG_COUNT] = {
-                "Japanese", "Chinese", "English"
+                "Japanese", "Chinese", "US_English"
             };
             int jp = SlotJpLang(lang);
 
@@ -1527,6 +1537,9 @@ const char* Pc_LangSlotName(int slot)
         if (lang >= LANG_PACK_FIRST)
             return Pc_LangPackListName(lang - LANG_PACK_FIRST);
 
+        /* Slot 0 off a PAL disc is the compiled US script. */
+        if (lang == 0 && g_GameRegion != Region_EUR)
+            return "US_English";
         return s_PalNames[(lang >= 0 && lang < LANG_PACK_FIRST) ? lang : 0];
     }
 }
