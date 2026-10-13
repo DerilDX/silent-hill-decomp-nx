@@ -1064,6 +1064,12 @@ static void LangInitBody(void)
             if (g_PcConfig.languageCode[0] != '\0')
                 g_PcConfig.language = Pc_LangIdFromCode(g_PcConfig.languageCode);
 
+            /* The file table was redirected at boot while the id was still 0,
+             * so a PAL disc set to a disc language kept the English map
+             * overlays and death hints -- the items alone came out translated.
+             * No-op off PAL. */
+            Fs_ApplyLanguageRedirects();
+
             /* An NTSC-J disc picks its three own languages by jpLanguage, not
              * by this id -- id 0 is Japanese, Chinese and English alike. The
              * launcher writes only `language`, so a code naming one of them

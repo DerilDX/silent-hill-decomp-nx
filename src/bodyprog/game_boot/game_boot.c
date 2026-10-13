@@ -238,6 +238,7 @@ void GameBoot_MapLoad(s32 mapIdx) // 0x8003521C
         extern void Fs_QueueWaitForEmpty(void);
         extern int  Pc_LangActive(void);
         extern void Pc_LangPatchMapMessages(int mapIdx, void* ovl, unsigned int ovlSize);
+        extern int  Pc_LangPackActive(void);
         extern e_GameRegion g_GameRegion;
 
         if (g_GameRegion == Region_EUR)
@@ -256,7 +257,11 @@ void GameBoot_MapLoad(s32 mapIdx) // 0x8003521C
                 GameFs_BgEtcGfxLoad();
             }
         }
-        if (Pc_LangActive() || g_GameRegion == Region_JPN)
+        /* A pack lays its text over the overlay's own table, so it has to wait
+         * for the overlay like the disc languages do; on a USA disc it was read
+         * before the read landed (a zero table pointer on the first map, the
+         * previous map's table after). */
+        if (Pc_LangActive() || g_GameRegion == Region_JPN || Pc_LangPackActive())
         {
             Fs_QueueWaitForEmpty();
             Pc_LangPatchMapMessages(
