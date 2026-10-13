@@ -1506,17 +1506,24 @@ int Font_HiresGridLive(void)
     return s_HiresGridLive;
 }
 
-/* g_PsyX_TextGlyphTest: the kanji/hanzi atlas only, by its palette, which
- * nothing else uses. The Latin font is drawn from cells with anti-aliased
- * edges and smooths well, so it keeps the Menus filter like the rest of the
- * menu; a kanji cell is dense one-pixel strokes, and smoothing those at four
- * or five times their size runs them together into blots. */
+/* g_PsyX_TextGlyphTest: the kanji/hanzi atlas, by its palette, which nothing
+ * else uses. The Latin font is drawn from cells with anti-aliased edges and
+ * smooths well, so it keeps the Menus filter like the rest of the menu; a
+ * kanji cell is dense one-pixel strokes, and smoothing those at four or five
+ * times their size runs them together into blots. The Cyrillic atlas is the
+ * same case in the PAL grid: its letters fill the 12px cell edge to edge (some
+ * advance 13-14), so the filter both thickens them and pulls in the next
+ * cell's strokes. Its palette is the grid's (816,255), text-only too. */
 int Font_IsTextGlyphPrim(int tpage, int clut)
 {
     extern int Pc_KanjiClutId(void);
+    extern int Pc_RuActive(void);
+    const int  c = clut & 0xFFFF;
 
     (void)tpage;
-    return (clut & 0xFFFF) == Pc_KanjiClutId();
+    if (c == Pc_KanjiClutId())
+        return 1;
+    return c == ((GRID_CLUT_Y << 6) | (GRID_CLUT_X >> 4)) && (s_RussianLayoutActive || Pc_RuActive());
 }
 
 static void FontHiresGridProbeHd(void)
