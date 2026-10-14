@@ -721,6 +721,7 @@ typedef struct {
     int               isOpen;
     int32_t           lastSamples[2][2]; /* [channel][prev0=newer, prev1=older] */
     int               sectorsDecoded;
+    int               holdPaused;        /* device stays paused until the first frame is shown */
 } FmvAudioState;
 
 static FmvAudioState s_fmvAudio;
@@ -888,7 +889,7 @@ static void FmvAudio_OnSector(const uint8_t* sector, void* user)
         st->sampleRate = got.freq;
         st->isStereo   = (got.channels == 2);
         st->isOpen     = 1;
-        SDL_PauseAudioDevice(st->dev, 0);
+        SDL_PauseAudioDevice(st->dev, st->holdPaused ? 1 : 0);
         printf("[FMV] XA audio opened: %d Hz %s (coding=0x%02X)\n",
                sampleRate, isStereo ? "stereo" : "mono", coding);
     }
@@ -1084,11 +1085,51 @@ static int PlayFromBin(int table_idx, int max_frames)
     static uint16_t bs[STR_FRAME_BS_MAX_HALFWORDS];
     mdec_ctx_t ctx;
     int ctx_initialized = 0;
-    uint8_t* rgb = NULL;
-    int rgb_w = 0, rgb_h = 0;
 
     str_frame_info_t info;
     size_t bs_halfwords = 0;
+
+    /* Decoded frames are kept a few ahead of the presentation clock. The
+     * STR interleaves its XA sectors with the video, so demuxing ahead is
+     * what fills the SDL queue ahead: with one sector per 1/15 s tick the
+     * queue sat at 0-1 sectors while the device pulled 4096-sample
+     * callbacks, and every movie opened with underrun crackle. The device
+     * is held paused until the first frame is shown so audio time zero
+     * still lines up with video time zero. */
+    enum { FMV_PREROLL_FRAMES = 4 };
+    struct FmvFrameSlot { uint8_t* rgb; int w; int h; };
+    FmvFrameSlot ring[FMV_PREROLL_FRAMES] = {};
+    int ringHead = 0, ringCount = 0, eof = 0;
+    s_fmvAudio.holdPaused = 1;
+
+    auto demuxOne = [&]() -> int {
+        if (eof || ringCount >= FMV_PREROLL_FRAMES) return 0;
+        int r = str_read_frame(&stream, bs, &info, &bs_halfwords);
+        if (r <= 0) { eof = 1; return 0; } /* EOF or demux error */
+
+        FmvFrameSlot& slot = ring[(ringHead + ringCount) % FMV_PREROLL_FRAMES];
+        if (slot.w != info.width || slot.h != info.height) {
+            ::free(slot.rgb);
+            slot.rgb = (uint8_t*)calloc((size_t)info.width * info.height * 3u, 1);
+            slot.w = info.width;
+            slot.h = info.height;
+        }
+        if (!ctx_initialized) {
+            mdec_init(&ctx, info.width, info.height);
+            ctx_initialized = 1;
+        }
+        if (!slot.rgb) { eof = 1; return 0; }
+
+        int mb = mdec_decode_frame(&ctx, (const uint8_t*)bs, bs_halfwords * 2u, slot.rgb);
+        if (mb < 0) {
+            /* Decode failure — emit a blank frame so timing still ticks. */
+            memset(slot.rgb, 0, (size_t)info.width * info.height * 3u);
+        }
+        ringCount++;
+        return 1;
+    };
+
+    while (demuxOne()) {}
 
     timerCtx_t fmvTimer;
     Util_InitHPCTimer(&fmvTimer);
@@ -1132,41 +1173,27 @@ static int PlayFromBin(int table_idx, int max_frames)
             continue;
         }
 
-        int r = str_read_frame(&stream, bs, &info, &bs_halfwords);
-        if (r <= 0) break; /* EOF or demux error */
+        if (ringCount == 0 && !demuxOne()) break; /* EOF or demux error */
 
         if (max_frames > 0 && done_frames >= max_frames) break;
 
-        /* (Re)allocate RGB buffer if dimensions changed (shouldn't for a
-         * single FMV, but cheap to be defensive). */
-        if (info.width != rgb_w || info.height != rgb_h) {
-            ::free(rgb);
-            rgb = (uint8_t*)calloc((size_t)info.width * info.height * 3u, 1);
-            rgb_w = info.width;
-            rgb_h = info.height;
-            if (!ctx_initialized) {
-                mdec_init(&ctx, info.width, info.height);
-                ctx_initialized = 1;
-            }
-        }
-        if (!rgb) break;
-
-        int mb = mdec_decode_frame(&ctx,
-                                   (const uint8_t*)bs,
-                                   bs_halfwords * 2u,
-                                   rgb);
-        if (mb < 0) {
-            /* Decode failure — emit a blank frame so timing still ticks. */
-            memset(rgb, 0, (size_t)info.width * info.height * 3u);
-        }
+        FmvFrameSlot& slot = ring[ringHead];
+        ringHead = (ringHead + 1) % FMV_PREROLL_FRAMES;
+        ringCount--;
 
         /* Move into the persistent decode buffer for DrawVideoFrame, then
          * blit. We copy because s_decodeBuffer is what DrawVideoFrame
          * uploads to GL — keeping that contract stable. */
-        size_t bytes = (size_t)info.width * info.height * 3u;
+        size_t bytes = (size_t)slot.w * slot.h * 3u;
         if (EnsureDecodeBuffer(bytes) == 0) {
-            memcpy(s_decodeBuffer, rgb, bytes);
-            DrawVideoFrame(info.width, info.height);
+            memcpy(s_decodeBuffer, slot.rgb, bytes);
+            DrawVideoFrame(slot.w, slot.h);
+        }
+
+        if (done_frames == 0) {
+            s_fmvAudio.holdPaused = 0;
+            if (s_fmvAudio.dev)
+                SDL_PauseAudioDevice(s_fmvAudio.dev, 0);
         }
 
         /* PSX STR videos target 15fps (every other NTSC frame). */
@@ -1174,9 +1201,23 @@ static int PlayFromBin(int table_idx, int max_frames)
         done_frames++;
 
         if (want_quit) break;
+
+        demuxOne();
     }
 
-    ::free(rgb);
+    /* PSX movie_main cuts the CD audio when the movie ends (SsSetSerialVol
+     * 0), so the queued tail is dropped rather than left to bleed into the
+     * next scene. Closing also matters on its own: SDL2 caps open devices at
+     * 16, and leaving one open per movie made later movies open silent. */
+    if (s_fmvAudio.dev) {
+        SDL_PauseAudioDevice(s_fmvAudio.dev, 1);
+        SDL_ClearQueuedAudio(s_fmvAudio.dev);
+        SDL_CloseAudioDevice(s_fmvAudio.dev);
+        s_fmvAudio.dev    = 0;
+        s_fmvAudio.isOpen = 0;
+    }
+    for (int i = 0; i < FMV_PREROLL_FRAMES; i++)
+        ::free(ring[i].rgb);
     fclose(bin);
 
     /* Wait for skip keys to release before returning so the still-held key

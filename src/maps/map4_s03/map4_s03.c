@@ -5148,6 +5148,10 @@ void Map_WorldObjectsInit(void) // 0x800D991C
     WorldObject_ModelNameSet(&g_CommonWorldObjects[5], D_800A99E4[7]);
 }
 
+#ifdef SH_PC_PORT
+static q19_12 s_fenceTiltAcc;
+#endif
+
 void Map_WorldObjectsUpdate(void) // 0x800D9BB0
 {
     q19_12 var_a0; // Angle?
@@ -5169,6 +5173,9 @@ void Map_WorldObjectsUpdate(void) // 0x800D9BB0
 
                 g_SysWork.playerWork.player.fallSpeed += Q12(1.0f);
                 D_800E05AE += Q12(1.0f);
+#ifdef SH_PC_PORT
+                s_fenceTiltAcc = 0;
+#endif
             }
 
             Collision_FlagBitsClear(CollisionFlag_1);
@@ -5176,10 +5183,31 @@ void Map_WorldObjectsUpdate(void) // 0x800D9BB0
 
             if (D_800E05AC) {} // @hack
 
+#ifdef SH_PC_PORT
+            /* The hinge swing is a per-call accumulation (`var` has no dt
+             * term and grows as the per-frame gravity shrinks) damped to zero
+             * over the first 0.5 s, so the angle it settles at is "how many
+             * calls fit in half a second": about 39 degrees at the PSX's 30
+             * calls, 86 degrees at 240 fps. The grating then flips flat
+             * before Harry's dt-correct fall is visible. Step it at the PSX
+             * cadence; the Y motion below is already dt-scaled and untouched. */
+            s_fenceTiltAcc += g_DeltaTime;
+            while (s_fenceTiltAcc >= TIMESTEP_30_FPS)
+            {
+                q19_12 gravity30 = Q12_MULT(TIMESTEP_30_FPS, Q12(9.8f));
+
+                s_fenceTiltAcc -= TIMESTEP_30_FPS;
+                var = ratan2(Q12_ANGLE(360.0f), FP_FROM(gravity30 * Math_Cos(g_WorldObject_Fence.rotation.vx), Q12_SHIFT));
+                var_a0 = MAX(Q12(0.0f), Q12(1.0f) - (D_800E05A8 * 2));
+                D_800E05AC = Q12_MULT_PRECISE(var_a0, D_800E05AC + var);
+                g_WorldObject_Fence.rotation.vx += Q12_MULT_PRECISE(TIMESTEP_30_FPS, D_800E05AC);
+            }
+#else
             var = ratan2(Q12_ANGLE(360.0f), FP_FROM(g_GravitySpeed * Math_Cos(g_WorldObject_Fence.rotation.vx), Q12_SHIFT));
             var_a0 = MAX(Q12(0.0f), Q12(1.0f) - (D_800E05A8 * 2));
             D_800E05AC = Q12_MULT_PRECISE(var_a0, D_800E05AC + var);
             g_WorldObject_Fence.rotation.vx += Q12_MULT_PRECISE(g_DeltaTime, D_800E05AC);
+#endif
 
             D_800E05AE = MIN(Q12(15.0f), (D_800E05AE + g_GravitySpeed) + (g_GravitySpeed >> 4));
 

@@ -2528,26 +2528,18 @@ void MainLoop(void) // 0x80032EE0
 #endif
 
 #ifdef SH_PC_PORT
-        /* Flashlight shadow master gate: the light-POV depth pre-pass is a
-         * live-gameplay-only effect. Running it on menu / room-load-fade /
-         * transition frames corrupts unrelated rendering (white flash between
-         * rooms, on inventory/map open-close, and on first load; Harry's face
-         * dropping out on the options screen). Arm it only in settled gameplay:
-         * the in-game state, the plain gameplay sub-state (not paused/menu/map),
-         * and no screen fade in progress. Recomputed every frame here, before the
-         * OT is drawn; reset paths (menus, fades) simply leave it 0. */
+        /* Flashlight shadow master gate: the light-POV depth pre-pass runs on
+         * every frame the world was submitted this tick, and only those. The
+         * old sysState/fade test dropped shadows on live-rendered frames that
+         * are not plain gameplay (examine, the item-pickup tick, door fades,
+         * menu transition ticks), and the whole scene popped brighter there.
+         * The white flash that test was written against was the pass leaving
+         * blending off for the subtractive fade tile; PsyCross re-arms blend
+         * state after the pass now, and a batch without casters no longer runs
+         * the pass at all, so the positive "world drawn" signal is enough. */
         {
             extern int g_PsyX_ShadowsAllowed;
-            /* GamePaused counts as settled too: the pause screen keeps
-             * rendering the live world behind its menu, so dropping the depth
-             * pre-pass there just made every flashlight shadow pop out of the
-             * scene the moment the player paused. It is a stable state with no
-             * fade -- none of the transition/menu hazards this gate exists for
-             * (room loads, map/inventory opens, the options screen) apply. */
-            g_PsyX_ShadowsAllowed = (g_GameWork.gameState == GameState_InGame &&
-                                     (g_SysWork.sysState == SysState_Gameplay ||
-                                      g_SysWork.sysState == SysState_GamePaused) &&
-                                     ScreenFade_IsNone()) ? 1 : 0;
+            g_PsyX_ShadowsAllowed = g_PcWorldDrawnThisFrame;
         }
 
         /* Release the freeze-frame the instant the world item-pickup ends

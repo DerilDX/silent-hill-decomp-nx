@@ -9,11 +9,11 @@ KNOWN (previously investigated, no PC fault found yet), NEW (not yet investigate
 |---|------|------|--------|
 | 1 | Combat | Split Head (first boss) melee attack: rumble but no flinch, no damage | FIXED |
 | 2 | Render | Dahlia first encounter close-up: wall textures missing (no HD pack) | NEW |
-| 3 | Audio | Lisa encounter FMV has no music; audio odd at the start of every FMV | NEW |
-| 4 | Cutscene | Sewer fence drop before Twinfeeler: fence falls first, then Harry | NEW |
+| 3 | Audio | Lisa encounter FMV has no music; audio odd at the start of every FMV | FIXED (start) / OPEN (music) |
+| 4 | Cutscene | Sewer fence drop before Twinfeeler: fence falls first, then Harry | FIXED |
 | 5 | Enemies | Rompers hop over things they should not, sometimes out of view | KNOWN |
-| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | NEW |
-| 7 | Render | Projected shadows vanish in menus, pickups, doors, examine | OPEN |
+| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | OPEN (needs screenshot) |
+| 7 | Render | Projected shadows vanish in menus, pickups, doors, examine | FIXED |
 | 8 | Cutscene | Original pauses between dialogue lines gone; wants a launcher option | FIXED |
 | 9 | Render | Incubator to Incubus switch effect looks broken | NEW |
 | 10 | Render | After final boss: Harry runs on black floor; town shot has no road | NEW |
@@ -33,6 +33,39 @@ quantiser; `player.c` scales the accumulator and the applied damage back by the 
 fraction so per-second totals match the PSX, and keys the rumble to the per-tick amount.
 Other bosses use the attack table and were never affected.
 
+## 3. FMV audio (start glitch FIXED, Lisa music OPEN)
+
+Start glitch: the disc STR player opened the SDL device on the first audio sector and
+unpaused it at once, then fed it one sector per video frame. The queue held 0 to 1 sectors
+while the device pulled 108 ms callbacks, so every movie opened with underrun silence gaps.
+The device was also never closed, so each movie leaked one device (SDL caps at 16) and the
+previous movie's queued tail bled into the next scene.
+
+Fix in `fmv_player.cpp`: decode four frames ahead of the presentation clock (the STR
+interleaves its audio with the video, so this fills the queue ahead), hold the device paused
+until the first frame is shown so audio time zero matches video time zero, and pause, clear
+and close the device when the movie ends or is skipped.
+
+Lisa music: the STR for that movie (M7_01536) carries a single XA channel and its audio is
+not static; the quiet music bed is in the file. Two candidates remain, both decided by the
+user's log right after `playing FMV (file=2061`:
+- `[FMV] SDL_OpenAudioDevice failed` means the device leak above hit the 16-device cap and
+  the movie played silent. The close fix above resolves that.
+- `[FMV] Container override: gamedata/fmv/M7_01536.mp4` means an FMV mod was playing, and
+  the missing music is that file's audio track, not the port.
+
+## 4. Sewer fence drop (FIXED)
+
+Not a cutscene. The grating in map4_s03 is a world object; Harry's ride down is plain
+player physics with the grating's collision surface removed. The grating's vertical motion
+is delta-time scaled and matched Harry at any frame rate, but its hinge swing accumulated
+once per call with no delta-time term and was damped to zero after half a second, so the
+final angle was "how many calls fit in 0.5 s": about 39 degrees on the PSX, 86 degrees at
+240 fps. The grating flipped flat before Harry's fall was visible.
+
+Fix in `map4_s03.c`: the hinge is stepped at the PSX 30 Hz cadence with the PSX per-step
+gravity, so the swing matches the original at any frame rate.
+
 ## 5. Romper hops (KNOWN, no PC fault found 2026-09-06)
 
 Read in full before: the hop has no line-of-sight gate, an airborne enemy clears any step
@@ -41,11 +74,41 @@ All of that is the original formula. "Jumped so high I could not see them" is ne
 The build prints one `[ROMPER-HOP]` line per launch and landing; a log from a session where
 it happens, plus the map name, is what is needed to go further.
 
-## 7. Shadows vanish in menus, pickups, doors, examine (OPEN)
+## 6. Sewer water reflection (OPEN, needs a screenshot)
 
-Deliberate gate: shadows only run while game state is in-game, system state is gameplay
-and no screen fade is active. It was added because the shadow pre-pass produced a white
-flash on room-load frames. Investigation in progress to narrow the gate.
+Not a regression in the water code: `water.c` is unchanged since July. What changed is that
+on 2026-07-27 the flashlight's reflective octagon on the water (an eight-sided dark disc
+ahead of Harry that turns with him, two opaque layers plus two additive ones) was restored in
+all flashlight modes after being hidden the day before. Its colours are hardcoded, which is
+why Classic mode does not change it. On PSX the water surface's caustic texels with the STP
+bit clear paint opaque over that disc; the PC adds them instead, so the dark disc stays
+fully visible under the lit water and reads as a hard-edged hole.
+
+Options: draw the octagon's two opaque layers semi-transparent and additive (warmth only,
+no occlusion), or drop them and keep the dark outer ring, or the engine-faithful route of
+honouring STP=0 texels as opaque on semi-transparent textured prims in PsyCross. A screenshot
+decides which prim the user is seeing: an eight-sided dark disc ahead of Harry that rotates
+with him, or a bright patch directly under him that brightens as he faces the camera (that
+one is the beam highlight the user approved in July).
+
+## 7. Shadows vanish in menus, pickups, doors, examine (FIXED)
+
+Two layered causes. The master gate only allowed shadows in the plain gameplay and pause
+sub-states with no fade, so every live-rendered frame outside those (the whole of an examine
+message, the item-pickup tick that gets frozen behind the item, both door fades, the first
+tick of the status and map screens) rendered without shadows. Separately, the shadow depth
+pre-pass ran once per ordering table, and the UI table has no casters, so every frame ended
+with the shadow map cleared. The shader was already allowed to sample the "last" map on
+gated frames, but that map was always empty.
+
+The white flash the gate was written against (2026-07-05) came from the pass leaving GL
+blending disabled, so the subtractive full-screen fade tile drew as opaque white; the
+blend tracker was fixed on 2026-07-20 but the gate was never revisited.
+
+Fix: the gate is now the positive "world was submitted this tick" flag; the pre-pass opens
+lazily on the first caster so a casterless batch neither clears the map nor touches GL
+state; and the scissor-state tracker now applies the requested state instead of toggling
+the previous one (a real leak after the pass's sentinel reset).
 
 ## 8. Dialogue pauses (FIXED, launcher 2026.10.14.1)
 
