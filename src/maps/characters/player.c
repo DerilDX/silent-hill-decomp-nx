@@ -942,6 +942,9 @@ void sharedFunc_800D2E8C_0_s00(q19_12 posX, q19_12 posZ, VECTOR3* vec)
     s32             playerExtraState;
     s_SubCharacter* playerChara;
     s_PlayerExtra*  playerExtra;
+#ifdef SH_PC_PORT
+    s32             tickDamage;
+#endif
 
     playerChara = &g_SysWork.playerWork.player;
     playerExtra = &g_SysWork.playerWork.extra;
@@ -972,7 +975,14 @@ void sharedFunc_800D2E8C_0_s00(q19_12 posX, q19_12 posZ, VECTOR3* vec)
     }
 
     vecSqr      = SQUARE(vec->vx) + SQUARE(vec->vz);
+#ifdef SH_PC_PORT
+    /* `vec` arrives rescaled to one 30 Hz tick (split_head.c) and this runs
+     * every frame, so the accumulator and the damage are scaled back by the
+     * frame fraction to keep the per-second totals the PSX had. */
+    D_800D587C += TIMESTEP_SCALE_30_FPS(g_DeltaTime, SquareRoot0(vecSqr));
+#else
     D_800D587C += SquareRoot0(vecSqr);
+#endif
 
     if (vecSqr > Q12(0.75f))
     {
@@ -1039,6 +1049,10 @@ void sharedFunc_800D2E8C_0_s00(q19_12 posX, q19_12 posZ, VECTOR3* vec)
         }
     }
 
+#ifdef SH_PC_PORT
+    tickDamage = (vecSqr > Q12(1.75f)) ? (SquareRoot0(vecSqr) * 4) : (SquareRoot0(vecSqr) * 64);
+    playerChara->damage.amount = TIMESTEP_SCALE_30_FPS(g_DeltaTime, tickDamage);
+#else
     if (vecSqr > Q12(1.75f))
     {
         playerChara->damage.amount = SquareRoot0(vecSqr) * 4;
@@ -1047,6 +1061,7 @@ void sharedFunc_800D2E8C_0_s00(q19_12 posX, q19_12 posZ, VECTOR3* vec)
     {
         playerChara->damage.amount = SquareRoot0(vecSqr) * 64;
     }
+#endif
 
     if (!(g_SysWork.playerWork.player.properties.player.flags & PlayerFlag_DamageReceived) &&
         vecSqr > Q12(0.75f) && vecSqr <= Q12(1.75f))
@@ -1062,7 +1077,11 @@ void sharedFunc_800D2E8C_0_s00(q19_12 posX, q19_12 posZ, VECTOR3* vec)
         g_SysWork.playerWork.player.properties.player.flags &= ~PlayerFlag_Unk2;
 
         playerChara->health -= playerChara->damage.amount;
+#ifdef SH_PC_PORT
+        func_800893D0(tickDamage); /* rumble strength keyed to the PSX per-tick amount */
+#else
         func_800893D0(playerChara->damage.amount);
+#endif
         playerChara->damage.amount = Q12(0.0f);
     }
 #endif

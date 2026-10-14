@@ -1640,6 +1640,10 @@ void sharedFunc_800D3B30_1_s05(s_SubCharacter* splitHead)
     q19_12                      deltaZ;
     s32                         var_v1;
     q3_12                       var_v1_3;
+#ifdef SH_PC_PORT
+    s32                         offsetX30;
+    s32                         offsetZ30;
+#endif
 
     splitHead->collision.box.bottom               = Q12(0.0f);
     splitHead->collision.cylinder.radius          = Q12(0.0f);
@@ -1689,6 +1693,26 @@ void sharedFunc_800D3B30_1_s05(s_SubCharacter* splitHead)
     }
     else
     {
+#ifdef SH_PC_PORT
+        /* The residual is how far the boss moved into Harry since the previous
+         * frame, so it shrinks with the frame time. The 32 dead zone, the >>4
+         * quantisation and the flinch/pushback thresholds in player.c were all
+         * tuned for the 30 Hz tick: at 240 fps a full charge fell below the
+         * flinch threshold and a walk fell inside the dead zone (rumble, no
+         * animation, no visible damage). Rescale to one tick first. */
+        offsetX30 = (g_DeltaTime > 0) ? (s32)(((s64)offsetX * TIMESTEP_30_FPS) / g_DeltaTime) : offsetX;
+        offsetZ30 = (g_DeltaTime > 0) ? (s32)(((s64)offsetZ * TIMESTEP_30_FPS) / g_DeltaTime) : offsetZ;
+
+        temp_v0 = ABS(offsetX30) - 32;
+        var_v1  = (temp_v0 < 0) ? 0 : (temp_v0 >> 4);
+        sp38.vx = (offsetX30 <= 0) ? (var_v1 * -var_v1) : SQUARE(var_v1);
+
+        sp38.vy = 0;
+
+        temp_v0 = ABS(offsetZ30) - 32;
+        var_v1  = (temp_v0 < 0) ? 0 : (temp_v0 >> 4);
+        sp38.vz = (offsetZ30 <= 0) ? (var_v1 * -var_v1) : SQUARE(var_v1);
+#else
         temp_v0 = ABS(offsetX) - 32;
         var_v1  = (temp_v0 < 0) ? 0 : (temp_v0 >> 4);
         sp38.vx = (offsetX <= 0) ? (var_v1 * -var_v1) : SQUARE(var_v1);
@@ -1698,6 +1722,7 @@ void sharedFunc_800D3B30_1_s05(s_SubCharacter* splitHead)
         temp_v0 = ABS(offsetZ) - 32;
         var_v1  = (temp_v0 < 0) ? 0 : (temp_v0 >> 4);
         sp38.vz = (offsetZ <= 0) ? (var_v1 * -var_v1) : SQUARE(var_v1);
+#endif
     }
 
     sharedFunc_800D2E8C_0_s00(offsetX + sharedData_800D8684_1_s05, offsetZ + sharedData_800D8688_1_s05, &sp38);

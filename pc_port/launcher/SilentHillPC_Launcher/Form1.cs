@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -275,6 +275,7 @@ public partial class Form1 : Form
         Loc.LocalizeItems(comboPost);
         Loc.LocalizeItems(comboTone);
         Loc.LocalizeItems(comboFlash);
+        Loc.LocalizeItems(comboLineGap);
         Loc.LocalizeItems(comboAudioOut);
         Loc.LocalizeItems(comboRender);
         Loc.LocalizeItems(comboMinimap);
@@ -855,6 +856,14 @@ public partial class Form1 : Form
         Set(flashLabel, flashTip);
         Set(comboFlash, flashTip);
 
+        const string lineGapTip =
+            "Minimum pause after each spoken line in cutscenes.\n" +
+            "The PSX paused while the CD seeked to the next line; the PC loads instantly.\n" +
+            "Off runs lines together. Short is the default. Medium and Long are closer\n" +
+            "to the original pacing but can push voices late in tightly timed scenes.";
+        Set(lblLineGap, lineGapTip);
+        Set(comboLineGap, lineGapTip);
+
         Set(btnManager, "Manage texture packs, load-folder and FMV mods: enable, disable and set load order.");
 
         Set(btnPlay, "Save settings and start the game.");
@@ -1275,6 +1284,16 @@ public partial class Form1 : Form
             comboFlash.SelectedIndex = fmIdx;
         }
 
+        // cutscene_line_gap_ms: minimum pause after a voiced cutscene line.
+        // Presets only; a hand-set value that matches none shows the nearest
+        // preset and stays in the file unless the dropdown is changed.
+        {
+            int ms;
+            if (!int.TryParse(config.Get("cutscene_line_gap_ms", "300"), out ms)) ms = 300;
+            _lineGapLoadedIdx = LineGapIndexFor(ms);
+            comboLineGap.SelectedIndex = _lineGapLoadedIdx;
+        }
+
         // Audio output (speaker layout): auto = OpenAL detects the system
         // layout. With rears active the game pans SFX on the full circle and
         // sends wide-stereo BGM layers to the surrounds.
@@ -1490,6 +1509,10 @@ public partial class Form1 : Form
             config.Set("flashlight_shadows", (fmIdx == 1 || fmIdx == 3) ? "1" : "0");
         }
 
+        if (comboLineGap.SelectedIndex >= 0 &&
+            (comboLineGap.SelectedIndex != _lineGapLoadedIdx || config.Get("cutscene_line_gap_ms", "") == ""))
+            config.Set("cutscene_line_gap_ms", LineGapValues[comboLineGap.SelectedIndex].ToString());
+
         // Audio output dropdown -> audio_output string id.
         if (comboAudioOut.SelectedIndex >= 0)
             config.Set("audio_output", AudioOutputIds[comboAudioOut.SelectedIndex]);
@@ -1535,6 +1558,17 @@ public partial class Form1 : Form
 
     // Dropdown index -> audio_output config id (matches the game's parser).
     private static readonly string[] AudioOutputIds = { "auto", "stereo", "quad", "51", "71", "hrtf" };
+
+    // Dialog Pause dropdown -> cutscene_line_gap_ms. 300 is the engine default.
+    private static readonly int[] LineGapValues = { 0, 300, 700, 1200 };
+    private int _lineGapLoadedIdx = 1;
+    private static int LineGapIndexFor(int ms)
+    {
+        if (ms <= 0)   return 0;
+        if (ms <= 450) return 1;
+        if (ms <= 900) return 2;
+        return 3;
+    }
 
     private const string RandomizerMapEntry = "Randomizer Enabled";
 

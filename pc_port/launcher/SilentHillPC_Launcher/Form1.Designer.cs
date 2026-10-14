@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Windows.Forms;
 
 partial class Form1
@@ -69,6 +69,8 @@ partial class Form1
     private ComboBox comboTone;
     private Label flashLabel;
     private ComboBox comboFlash;
+    private Label lblLineGap;
+    private ComboBox comboLineGap;
     private Label regionLabel;
     private ComboBox comboMap;
     private ComboBox comboDisc;
@@ -172,6 +174,8 @@ partial class Form1
             this.lblRender = new System.Windows.Forms.Label();
             this.lblShadow = new System.Windows.Forms.Label();
             this.comboShadow = new System.Windows.Forms.ComboBox();
+            this.lblLineGap = new System.Windows.Forms.Label();
+            this.comboLineGap = new System.Windows.Forms.ComboBox();
             this.lblMinimap = new System.Windows.Forms.Label();
             this.comboMinimap = new System.Windows.Forms.ComboBox();
             this.vsyncPanel.SuspendLayout();
@@ -376,7 +380,7 @@ partial class Form1
             // 
             // lblUpdateStatus
             // 
-            this.lblUpdateStatus.Location = new System.Drawing.Point(209, 589);
+            this.lblUpdateStatus.Location = new System.Drawing.Point(209, 619);
             this.lblUpdateStatus.Name = "lblUpdateStatus";
             this.lblUpdateStatus.Size = new System.Drawing.Size(237, 15);
             this.lblUpdateStatus.TabIndex = 14;
@@ -629,7 +633,7 @@ partial class Form1
             // consoleLabel
             // 
             this.consoleLabel.AutoSize = true;
-            this.consoleLabel.Location = new System.Drawing.Point(210, 613);
+            this.consoleLabel.Location = new System.Drawing.Point(210, 643);
             this.consoleLabel.Name = "consoleLabel";
             this.consoleLabel.Size = new System.Drawing.Size(89, 13);
             this.consoleLabel.TabIndex = 36;
@@ -640,7 +644,7 @@ partial class Form1
             // 
             this.consolePanel.Controls.Add(this.consoleYes);
             this.consolePanel.Controls.Add(this.consoleNo);
-            this.consolePanel.Location = new System.Drawing.Point(296, 609);
+            this.consolePanel.Location = new System.Drawing.Point(296, 639);
             this.consolePanel.Name = "consolePanel";
             this.consolePanel.Size = new System.Drawing.Size(120, 33);
             this.consolePanel.TabIndex = 56;
@@ -754,6 +758,28 @@ partial class Form1
             this.comboFlash.Size = new System.Drawing.Size(135, 21);
             this.comboFlash.TabIndex = 61;
             // 
+            // lblLineGap
+            // 
+            this.lblLineGap.AutoSize = true;
+            this.lblLineGap.Location = new System.Drawing.Point(9, 579);
+            this.lblLineGap.Name = "lblLineGap";
+            this.lblLineGap.Size = new System.Drawing.Size(75, 13);
+            this.lblLineGap.TabIndex = 100;
+            this.lblLineGap.Text = "Dialog Pause:";
+            // 
+            // comboLineGap
+            // 
+            this.comboLineGap.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.comboLineGap.Items.AddRange(new object[] {
+            "Off",
+            "Short",
+            "Medium",
+            "Long"});
+            this.comboLineGap.Location = new System.Drawing.Point(94, 575);
+            this.comboLineGap.Name = "comboLineGap";
+            this.comboLineGap.Size = new System.Drawing.Size(135, 21);
+            this.comboLineGap.TabIndex = 101;
+            // 
             // regionLabel
             // 
             this.regionLabel.AutoSize = true;
@@ -848,7 +874,7 @@ partial class Form1
             // 
             // btnHelp
             // 
-            this.btnHelp.Location = new System.Drawing.Point(4, 587);
+            this.btnHelp.Location = new System.Drawing.Point(4, 617);
             this.btnHelp.Name = "btnHelp";
             this.btnHelp.Size = new System.Drawing.Size(39, 23);
             this.btnHelp.TabIndex = 53;
@@ -858,7 +884,7 @@ partial class Form1
             // 
             // btnBug
             // 
-            this.btnBug.Location = new System.Drawing.Point(98, 587);
+            this.btnBug.Location = new System.Drawing.Point(98, 617);
             this.btnBug.Name = "btnBug";
             this.btnBug.Size = new System.Drawing.Size(70, 23);
             this.btnBug.TabIndex = 54;
@@ -868,7 +894,7 @@ partial class Form1
             // 
             // btnReset
             // 
-            this.btnReset.Location = new System.Drawing.Point(44, 587);
+            this.btnReset.Location = new System.Drawing.Point(44, 617);
             this.btnReset.Name = "btnReset";
             this.btnReset.Size = new System.Drawing.Size(53, 23);
             this.btnReset.TabIndex = 55;
@@ -982,7 +1008,7 @@ partial class Form1
             // 
             // btnRA
             // 
-            this.btnRA.Location = new System.Drawing.Point(170, 587);
+            this.btnRA.Location = new System.Drawing.Point(170, 617);
             this.btnRA.Name = "btnRA";
             this.btnRA.Size = new System.Drawing.Size(30, 23);
             this.btnRA.TabIndex = 92;
@@ -1053,7 +1079,9 @@ partial class Form1
             // 
             // Form1
             // 
-            this.ClientSize = new System.Drawing.Size(454, 612);
+            this.ClientSize = new System.Drawing.Size(454, 642);
+            this.Controls.Add(this.lblLineGap);
+            this.Controls.Add(this.comboLineGap);
             this.Controls.Add(this.lblMinimap);
             this.Controls.Add(this.comboMinimap);
             this.Controls.Add(this.lblShadow);
