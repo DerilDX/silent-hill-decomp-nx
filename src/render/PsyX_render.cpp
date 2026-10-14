@@ -4420,10 +4420,13 @@ void GR_SetScissorState(int enable)
 		return;
 
 #if USE_OPENGL
-	if (g_PreviousScissorState)
-		glDisable(GL_SCISSOR_TEST);
-	else
+	/* Keyed on the request, not on the tracker: with the -999 sentinel the
+	 * shadow pass leaves behind, toggling off the old value applied the
+	 * opposite of what was asked. */
+	if (enable)
 		glEnable(GL_SCISSOR_TEST);
+	else
+		glDisable(GL_SCISSOR_TEST);
 #endif
 	g_PreviousScissorState = enable;
 }
@@ -5577,12 +5580,9 @@ static void GR_BuildShadowMatrix(void)
 
 int GR_FlashlightShadowActive(void)
 {
-	/* g_PsyX_ShadowsAllowed is re-armed by the game only during settled gameplay
-	 * (see its definition). Outside that — menus, room-load fades, cutscenes and
-	 * frozen/transition frames (g_PsxPresentLastFrame) — the light-POV depth
-	 * pre-pass corrupts unrelated rendering (white flash on room/inventory/map
-	 * transitions, Harry's face dropping out on the options screen). Shadows are a
-	 * live-gameplay-only effect. */
+	/* g_PsyX_ShadowsAllowed is re-armed by the game on every frame the world
+	 * was submitted (see its definition); 2D screens and frozen re-presented
+	 * frames (g_PsxPresentLastFrame) leave it 0 and sample nothing new. */
 	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 	        g_PsyX_FlashlightActive && g_PsyX_ShadowsAllowed &&
 	        !g_PsxPresentLastFrame) ? 1 : 0;

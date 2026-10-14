@@ -3105,7 +3105,12 @@ static bool ShadowTriangleCanCast(const GrVertex* vertex)
 	return true;
 }
 
-static void DrawShadowCasters(const GPUDrawSplit& split)
+/* The pass is opened lazily on the first caster so a batch with none (the
+ * UI OT, the water OT, 2D-only frames) neither clears the shadow map built by
+ * the world batch nor disturbs GL state. The map therefore always holds the
+ * last world batch, which is what the lit shader samples on frames that do
+ * not rebuild it. */
+static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 {
 	int runStart = -1;
 	for (int offset = 0; offset + 2 < split.numVerts; offset += 3)
@@ -3117,13 +3122,17 @@ static void DrawShadowCasters(const GPUDrawSplit& split)
 		}
 		else if (runStart >= 0)
 		{
+			if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
 			GR_ShadowPassDraw(split.startVertex + runStart, offset - runStart);
 			runStart = -1;
 		}
 	}
 
 	if (runStart >= 0)
+	{
+		if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
 		GR_ShadowPassDraw(split.startVertex + runStart, split.numVerts - runStart);
+	}
 }
 
 //
@@ -3171,7 +3180,7 @@ void DrawAllSplits()
 	 * vertices into a false shadow. */
 	if (GR_FlashlightShadowActive())
 	{
-		GR_ShadowPassBegin();
+		bool passBegun = false;
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -3179,9 +3188,10 @@ void DrawAllSplits()
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
-			DrawShadowCasters(s);
+			DrawShadowCasters(s, passBegun);
 		}
-		GR_ShadowPassEnd();
+		if (passBegun)
+			GR_ShadowPassEnd();
 	}
 
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
