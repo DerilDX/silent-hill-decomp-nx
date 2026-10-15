@@ -10,6 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include <SDL_timer.h>
+#include <algorithm>
 
 #include "psx/gtereg.h"
 
@@ -396,7 +397,7 @@ static unsigned s_wmGt4;
 static unsigned long long s_wmClsCyc[18];
 static unsigned s_wmClsN[18];
 static unsigned long long s_wmTscStart;
-extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0; }
+extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0, g_wmFarMeshKeys = 0, g_wmFarMeshDraws = 0, g_wmFarMeshQueued = 0; }
 #define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmClsCyc[i] += __rdtsc() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
 #define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
@@ -465,7 +466,7 @@ extern "C" void PGXP_CoverageTick(void)
 					c == 16 ? "far" : (c == 17 ? "flush" : "0x"), c >= 16 ? 0 : c * 16, s_wmClsN[c], (double)s_wmClsCyc[c] / cycPerMs);
 				if (len >= (int)sizeof(buf) - 64) break;
 			}
-			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u farSplits=%u farFlushes=%u gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmFarSplits, g_wmFarFlushes, g_wmTGpu, 10);
+			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u farSplits=%u farFlushes=%u | gpuMeshes=%u keys=%u draws=%u | gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmFarSplits, g_wmFarFlushes, g_wmFarMeshQueued, g_wmFarMeshKeys, g_wmFarMeshDraws, g_wmTGpu, 10);
 		}
 		if (s_wmGt4)
 			eprintinfo("[WMPROBE] GT4 cycles/prim over %u: begin=%llu drop=%llu hires=%llu split=%llu vert=%llu depth=%llu tex=%llu col=%llu emit=%llu\n",
@@ -485,7 +486,7 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmDevPrims = s_wmPrecPrims = 0;
 		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
 		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
-		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = 0; s_wmTscStart = __rdtsc();
+		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = __rdtsc();
 		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
 		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
@@ -1842,7 +1843,7 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	ItemProbe_RecordDraw(vertex, polyTag, isQuad, zBefore);
 }
 
-enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN, GPU_SPLIT_FBCAPTURE };
+enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN, GPU_SPLIT_FBCAPTURE, GPU_SPLIT_FARMESH };
 
 struct GPUDrawSplit
 {
@@ -3324,6 +3325,8 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 //
 // Draws all polygons after AggregatePTAG
 //
+static void DrawFarMeshSplit(const GPUDrawSplit& split);
+
 void DrawAllSplits()
 {
 #ifdef _DEBUG
@@ -3387,6 +3390,8 @@ void DrawAllSplits()
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
 			GR_DrawModernMesh(g_splits[i].modernHandle);
+		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
+			DrawFarMeshSplit(g_splits[i]);
 		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
 			GR_CaptureFrameToVramRect(g_splits[i].drawenv.clip.x, g_splits[i].drawenv.clip.y,
 			                          g_splits[i].drawenv.clip.w, g_splits[i].drawenv.clip.h);
@@ -4656,6 +4661,144 @@ static void EmitFarChain(int first)
 	}
 }
 
+/* ---- Whole-map GPU far meshes (0xB6) ---- */
+extern "C" unsigned GR_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                     const unsigned* indices, int indexCount);
+extern "C" void GR_FarMeshFree(unsigned handle);
+extern "C" void GR_FarMeshSetUniforms(const PsyX_FarMeshFrame* f, float ofsX, float ofsY, float layerK);
+extern "C" void GR_FarMeshDraw(unsigned handle, const float base[3], const float eye[3], int firstIndex, int indexCount);
+extern "C" void GR_FarMeshEnd(void);
+
+struct FarMeshQueued
+{
+	unsigned                 handle;
+	float                    base[3], eye[3];
+	const PsyX_FarMeshRange* ranges;
+	int                      rangeCount;
+};
+#define FAR_MESH_QUEUE_MAX 512
+static FarMeshQueued     s_fmQueue[FAR_MESH_QUEUE_MAX];
+static int               s_fmCount = 0;
+static PsyX_FarMeshFrame s_fmFrame;
+static float             s_fmOfsX = 0.0f, s_fmOfsY = 0.0f;
+/* Coplanar layering: each pixel's depth moves this fraction of the way toward
+ * its quad's farthest point, so where two layers share a plane the smaller one
+ * (a marking inside the asphalt it sits on) is nearer, the same rule the PSX
+ * far list's max-depth order applies. Console `wholemap layer`. */
+extern "C" { float g_PsxFarLayerK = 0.0625f; }
+
+extern "C" unsigned PsyX_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                       const unsigned* indices, int indexCount)
+{
+	return GR_FarMeshUpload(handle, v, vertexCount, indices, indexCount);
+}
+
+extern "C" void PsyX_FarMeshFree(unsigned handle)
+{
+	GR_FarMeshFree(handle);
+}
+
+extern "C" void PsyX_FarMeshFrameBegin(const PsyX_FarMeshFrame* frame)
+{
+	s_fmFrame = *frame;
+	s_fmCount = 0;
+}
+
+extern "C" void PsyX_FarMeshQueue(unsigned handle, const float base[3], const float eye[3],
+                                  const PsyX_FarMeshRange* ranges, int rangeCount)
+{
+	if (s_fmCount >= FAR_MESH_QUEUE_MAX || handle == 0 || rangeCount <= 0)
+		return;
+	FarMeshQueued& q = s_fmQueue[s_fmCount++];
+	q.handle = handle;
+	q.base[0] = base[0]; q.base[1] = base[1]; q.base[2] = base[2];
+	q.eye[0] = eye[0]; q.eye[1] = eye[1]; q.eye[2] = eye[2];
+	q.ranges = ranges;
+	q.rangeCount = rangeCount;
+}
+
+static void AddFarMeshSplit(void)
+{
+	GPUDrawSplit& current = g_splits[g_splitIndex];
+	current.numVerts = g_vertexIndex - current.startVertex;
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+		return;
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_FARMESH;
+	split.drawenv = activeDrawEnv;
+	split.dispenv = activeDispEnv;
+	split.drawPrimMode = g_DrawPrimMode;
+	split.startVertex = g_vertexIndex;
+	split.numVerts = 0;
+	DrawEnvOffset(s_fmOfsX, s_fmOfsY);
+}
+
+struct FarMeshItem { unsigned key; unsigned short q, r; };
+
+static void DrawFarMeshSplit(const GPUDrawSplit& split)
+{
+	static FarMeshItem items[1 << 16];
+	int n = 0;
+
+	if (s_fmCount == 0)
+		return;
+	if (g_PsxWholeMapProbe == 1)
+		g_wmFarMeshQueued = (unsigned)s_fmCount;
+	for (int q = 0; q < s_fmCount; q++)
+		for (int r = 0; r < s_fmQueue[q].rangeCount && n < (int)(sizeof(items) / sizeof(items[0])); r++)
+		{
+			items[n].key = ((unsigned)s_fmQueue[q].ranges[r].tpage << 16) | s_fmQueue[q].ranges[r].clut;
+			items[n].q = (unsigned short)q;
+			items[n].r = (unsigned short)r;
+			n++;
+		}
+	std::sort(items, items + n, [](const FarMeshItem& a, const FarMeshItem& b) { return a.key < b.key; });
+
+	for (int i = 0; i < n; )
+	{
+		const unsigned key = items[i].key;
+		int j = i;
+		while (j < n && items[j].key == key)
+			j++;
+
+		const unsigned short tpage = (unsigned short)(key >> 16), clut = (unsigned short)(key & 0xFFFF);
+		const FarTexMemo* m = FarTexLookup(tpage, clut);
+		if (m != NULL && !m->drop)
+		{
+			TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
+			TextureID textureId = g_vramTexture;
+			if (m->tex != 0)
+			{
+				texFormat = TF_32_BIT_RGBA;
+				textureId = m->tex;
+			}
+			GR_SetStencilMode(split.drawPrimMode);
+			g_PsxSplitIsGlyph = m->glyph;
+			GR_SetTexture(textureId, texFormat);
+			if (texFormat == TF_32_BIT_RGBA)
+				GR_SetOverrideTextureSize(m->w, m->h, m->ox, m->oy, m->hw, m->hh);
+			GR_SetupClipMode(&split.drawenv.clip, split.drawenv.dfe);
+			GR_SetOffscreenState(&split.drawenv.clip, !split.drawenv.dfe);
+			GR_SetBlendMode(BM_NONE);
+			GR_SetDepthFuncAlways(0);
+			GR_FarMeshSetUniforms(&s_fmFrame, s_fmOfsX, s_fmOfsY, g_PsxFarLayerK);
+			for (int k = i; k < j; k++)
+			{
+				const FarMeshQueued&     fq = s_fmQueue[items[k].q];
+				const PsyX_FarMeshRange& rg = fq.ranges[items[k].r];
+				GR_FarMeshDraw(fq.handle, fq.base, fq.eye, rg.firstIndex, rg.indexCount);
+			}
+			if (g_PsxWholeMapProbe == 1)
+			{
+				g_wmFarMeshKeys++;
+				g_wmFarMeshDraws += (unsigned)(j - i);
+			}
+		}
+		i = j;
+	}
+	GR_FarMeshEnd();
+}
+
 static int ProcessPsyXPrims(P_TAG* polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
@@ -4689,6 +4832,9 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		AddModernSplit(modern->code[1]);
 		return 2;
 	}
+	case 0x06:
+		AddFarMeshSplit();
+		return 2;
 	case 0x05:
 	{
 		const DR_PSYX_FARQUADS* fq = (const DR_PSYX_FARQUADS*)polyTag;

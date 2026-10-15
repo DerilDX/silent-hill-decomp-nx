@@ -818,6 +818,65 @@ extern PsyX_FarQuad* PsyX_FarQuadAlloc(int* index);
 }
 #endif
 
+/* 0xB6: whole-map GPU far meshes. The frame's queued meshes draw at this point
+ * in OT order, depth-tested, one draw per mesh per texture. code[1] unused. */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FARMESH;
+
+static_assert(sizeof(DR_PSYX_FARMESH) / 4 - P_LEN == 2, "DR_PSYX_FARMESH size must be 2 longs");
+
+/* One vertex of a static far mesh, uploaded once. Positions are local to the
+ * mesh origin (the shader projects them); c/h are the owning quad's bounding
+ * box (centre, half extents) and plane0/1 its two triangles' planes
+ * (normal, dot(normal, vertex)), both for per-quad decisions in the shader. */
+#pragma pack(push, 1)
+typedef struct PsyX_FarMeshVertex {
+	short          x, y, page, clut;
+	unsigned char  u, v, bright, dither;
+	unsigned char  r, g, b, a;
+	char           tcx, tcy, fog, p1;
+	float          px, py, pz;
+	float          cx, cy, cz;
+	float          hx, hy, hz;
+	unsigned char  ulo, vlo, uhi, vhi;
+	float          plane0[4];
+	float          plane1[4];
+} PsyX_FarMeshVertex;
+#pragma pack(pop)
+
+typedef struct PsyX_FarMeshRange {
+	unsigned short tpage, clut;
+	int            firstIndex, indexCount;
+} PsyX_FarMeshRange;
+
+/* Per-frame camera and fog. rot = view rotation rows (VbWvsMatrix / 4096);
+ * screen = (ofs + H * view.xy / view.z), plus the draw-env offset added here. */
+typedef struct PsyX_FarMeshFrame {
+	float         rot[9];
+	float         h, ofsX, ofsY;
+	float         detSign;
+	int           fogOn, fogShift, fogIntensity;
+	unsigned char fogRamp[128];
+} PsyX_FarMeshFrame;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* handle 0 creates; returns the handle, 0 on failure. */
+extern unsigned PsyX_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                   const unsigned* indices, int indexCount);
+extern void     PsyX_FarMeshFree(unsigned handle);
+extern void     PsyX_FarMeshFrameBegin(const PsyX_FarMeshFrame* frame);
+/* base = R*(origin - cam) + T, eye = camera position - origin; ranges must
+ * stay valid until the frame is drawn. */
+extern void     PsyX_FarMeshQueue(unsigned handle, const float base[3], const float eye[3],
+                                  const PsyX_FarMeshRange* ranges, int rangeCount);
+#ifdef __cplusplus
+}
+#endif
+
 typedef struct {
 	DECLARE_P_ADDR
 	u_int  code;

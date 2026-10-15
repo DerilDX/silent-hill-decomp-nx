@@ -2437,6 +2437,17 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_szMax;\n"\
 	"	uniform float u_pgxpFarW;\n"\
 	"	uniform float u_worldFarBias;\n"\
+	"	attribute vec4 a_farP0;\n"\
+	"	attribute vec4 a_farP1;\n"\
+	"	uniform int u_farMode;\n"\
+	"	uniform vec3 u_farR0;\n"\
+	"	uniform vec3 u_farR1;\n"\
+	"	uniform vec3 u_farR2;\n"\
+	"	uniform vec3 u_farBase;\n"\
+	"	uniform vec3 u_farEye;\n"\
+	"	uniform vec4 u_farProj;\n"\
+	"	uniform vec4 u_farFogP;\n"\
+	"	uniform vec4 u_farFogRamp[32];\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -2449,7 +2460,29 @@ int g_PsxFogToBlack = 0;
 	"		v_page_clut.w = floor(a_position.w / 64.0) / 512.0;\n"\
 	"		v_page_clut.xy += c_UVFudge;\n"\
 	"		v_page_clut.zw += c_UVFudge;\n"\
+	"		float farFog = 0.0;\n"\
+	"		if (u_farMode > 0) {\n"\
+	"			vec3 fv = vec3(dot(u_farR0, a_pgxp), dot(u_farR1, a_pgxp), dot(u_farR2, a_pgxp)) + u_farBase;\n"\
+	"			float n012 = (a_farP0.w - dot(a_farP0.xyz, u_farEye)) * u_farFogP.w;\n"\
+	"			float n312 = (a_farP1.w - dot(a_farP1.xyz, u_farEye)) * u_farFogP.w;\n"\
+	"			vec4 b = Projection * vec4(u_farProj.y * fv.z + u_farProj.x * fv.x, u_farProj.z * fv.z + u_farProj.x * fv.y, 0.0, fv.z);\n"\
+	"			float zc = dot(u_farR2, a_viewpos) + u_farBase.z;\n"\
+	"			float zmax = zc + dot(abs(u_farR2), a_normal);\n"\
+	"			float dvz = min(fv.z + u_farProj.w * (zmax - fv.z) + u_worldFarBias, u_szMax);\n"\
+	"			b.z = (2.0 * dvz / u_szMax - 1.0) * b.w;\n"\
+	"			gl_Position = (n012 <= 0.0 && n312 >= 0.0) ? vec4(2.0, 2.0, 2.0, 1.0) : b;\n"\
+	"			float fi = floor(fv.z * u_farFogP.y);\n"\
+	"			float fb = 255.0;\n"\
+	"			if (fi < 128.0) {\n"\
+	"				int ii = int(max(fi, 0.0));\n"\
+	"				vec4 rr = u_farFogRamp[ii / 4];\n"\
+	"				int cc = ii - (ii / 4) * 4;\n"\
+	"				fb = (cc == 0) ? rr.x : ((cc == 1) ? rr.y : ((cc == 2) ? rr.z : rr.w));\n"\
+	"			}\n"\
+	"			farFog = (u_farFogP.x > 0.5) ? clamp(fb * 16.0 + u_farFogP.z, 0.0, 4096.0) / 4096.0 : 0.0;\n"\
+	"		} else {\n"\
 	GTE_PERSPECTIVE_CORRECTION\
+	"		}\n"\
 	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp.
 	 * a_pgxp.z is the PGXP view W: > 0 only on vertices the GTE
 	 * actually projected, which is exactly the 3D content. It only
@@ -2480,6 +2513,14 @@ int g_PsxFogToBlack = 0;
 	"		float shadowInvZ = (a_viewpos.z > 0.0) ? (1.0 / a_viewpos.z) : 0.0;\n"\
 	"		float shadowClipW = (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) ? ((u_pgxpFarW > 0.0) ? min(a_pgxp.z, u_pgxpFarW) : a_pgxp.z) : 1.0;\n"\
 	"		v_shadowViewPos = vec4(a_viewpos * shadowInvZ, shadowInvZ) * shadowClipW;\n"\
+	"		if (u_farMode > 0) {\n"\
+	"			v_is3d = 1.0;\n"\
+	"			v_fogAmount = farFog;\n"\
+	"			v_viewpos = vec3(0.0);\n"\
+	"			v_fade = 0.0;\n"\
+	"			v_geom3d = 1.0;\n"\
+	"			v_shadowViewPos = vec4(0.0);\n"\
+	"		}\n"\
 	"	}\n"
 
 /* Fog + per-pixel flashlight + shadow uniforms shared by every shader that
@@ -3054,6 +3095,8 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
 	glBindAttribLocation(program, a_geom3d, "a_geom3d");
 	glBindAttribLocation(program, a_uvlim, "a_uvlim");
+	glBindAttribLocation(program, a_farP0, "a_farP0");
+	glBindAttribLocation(program, a_farP1, "a_farP1");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -7517,6 +7560,162 @@ int GR_DrawModernMesh(unsigned int mesh_handle)
 	g_PreviousBlendMode = g_PreviousDepthMode = g_PreviousStencilMode = -999;
 	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = g_PreviousOffscreenState = -999;
 	return 1;
+}
+
+/* Whole-map GPU far meshes: static per-chunk geometry, projected by the GTE
+ * shaders' u_farMode branch. Own VAO per mesh; the frame VAO is rebound after
+ * every touch so the legacy stream never notices. */
+struct FarMeshGL { GLuint vao, vbo, ibo; };
+#define FAR_MESH_GL_MAX 1024
+static FarMeshGL s_farMeshGL[FAR_MESH_GL_MAX];
+
+struct FarMeshLocs { GLuint prog; GLint mode, r0, r1, r2, base, eye, proj, fogP, ramp; };
+static FarMeshLocs s_farMeshLocs[8];
+static FarMeshLocs* s_farMeshCur = NULL;
+
+static void GR_FarMeshRestoreFrameVao()
+{
+	glBindVertexArray(g_glVertexArray[g_curVertexBuffer ^ 1]);
+	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer ^ 1]);
+}
+
+extern "C" unsigned GR_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                     const unsigned* indices, int indexCount)
+{
+	if (handle == 0)
+	{
+		for (int i = 0; i < FAR_MESH_GL_MAX; i++)
+		{
+			if (s_farMeshGL[i].vao == 0)
+			{
+				glGenVertexArrays(1, &s_farMeshGL[i].vao);
+				glGenBuffers(1, &s_farMeshGL[i].vbo);
+				glGenBuffers(1, &s_farMeshGL[i].ibo);
+				handle = (unsigned)i + 1;
+				break;
+			}
+		}
+		if (handle == 0)
+			return 0;
+	}
+	else if (handle > FAR_MESH_GL_MAX || s_farMeshGL[handle - 1].vao == 0)
+		return 0;
+
+	FarMeshGL& m = s_farMeshGL[handle - 1];
+	const GLsizei st = sizeof(PsyX_FarMeshVertex);
+	glBindVertexArray(m.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertexCount * st, v, GL_STATIC_DRAW);
+	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->x);
+	glEnableVertexAttribArray(a_position);
+	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->u);
+	glEnableVertexAttribArray(a_texcoord);
+	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, &((PsyX_FarMeshVertex*)NULL)->r);
+	glEnableVertexAttribArray(a_color);
+	glVertexAttribPointer(a_extra, 4, GL_BYTE, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->tcx);
+	glEnableVertexAttribArray(a_extra);
+	glVertexAttribPointer(a_pgxp, 3, GL_FLOAT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->px);
+	glEnableVertexAttribArray(a_pgxp);
+	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->cx);
+	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_normal, 3, GL_FLOAT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->hx);
+	glEnableVertexAttribArray(a_normal);
+	glVertexAttribPointer(a_uvlim, 4, GL_UNSIGNED_BYTE, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->ulo);
+	glEnableVertexAttribArray(a_uvlim);
+	glVertexAttribPointer(a_farP0, 4, GL_FLOAT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->plane0);
+	glEnableVertexAttribArray(a_farP0);
+	glVertexAttribPointer(a_farP1, 4, GL_FLOAT, GL_FALSE, st, &((PsyX_FarMeshVertex*)NULL)->plane1);
+	glEnableVertexAttribArray(a_farP1);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m.ibo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)indexCount * sizeof(unsigned), indices, GL_STATIC_DRAW);
+	GR_FarMeshRestoreFrameVao();
+	return handle;
+}
+
+extern "C" void GR_FarMeshFree(unsigned handle)
+{
+	if (handle == 0 || handle > FAR_MESH_GL_MAX || s_farMeshGL[handle - 1].vao == 0)
+		return;
+	FarMeshGL& m = s_farMeshGL[handle - 1];
+	glDeleteVertexArrays(1, &m.vao);
+	glDeleteBuffers(1, &m.vbo);
+	glDeleteBuffers(1, &m.ibo);
+	m.vao = m.vbo = m.ibo = 0;
+	GR_FarMeshRestoreFrameVao();
+}
+
+/* Pushes the frame's far camera onto the program GR_SetTexture just bound. */
+extern "C" void GR_FarMeshSetUniforms(const PsyX_FarMeshFrame* f, float ofsX, float ofsY, float layerK)
+{
+	const GLuint prog = (GLuint)g_PreviousShader;
+	FarMeshLocs* L = NULL;
+	for (int i = 0; i < 8; i++)
+	{
+		if (s_farMeshLocs[i].prog == prog) { L = &s_farMeshLocs[i]; break; }
+		if (s_farMeshLocs[i].prog == 0)
+		{
+			L = &s_farMeshLocs[i];
+			L->prog = prog;
+			L->mode = glGetUniformLocation(prog, "u_farMode");
+			L->r0   = glGetUniformLocation(prog, "u_farR0");
+			L->r1   = glGetUniformLocation(prog, "u_farR1");
+			L->r2   = glGetUniformLocation(prog, "u_farR2");
+			L->base = glGetUniformLocation(prog, "u_farBase");
+			L->eye  = glGetUniformLocation(prog, "u_farEye");
+			L->proj = glGetUniformLocation(prog, "u_farProj");
+			L->fogP = glGetUniformLocation(prog, "u_farFogP");
+			L->ramp = glGetUniformLocation(prog, "u_farFogRamp");
+			break;
+		}
+	}
+	s_farMeshCur = L;
+	if (L == NULL || L->mode == -1)
+		return;
+	float ramp[128];
+	for (int i = 0; i < 128; i++)
+		ramp[i] = (float)f->fogRamp[i];
+	const float proj[4] = { f->h, f->ofsX + ofsX, f->ofsY + ofsY, layerK };
+	const float fogP[4] = { (float)(f->fogOn != 0), 128.0f / (float)(1u << (f->fogShift & 31)),
+	                        (float)f->fogIntensity, f->detSign };
+	glUniform1i(L->mode, 1);
+	glUniform3fv(L->r0, 1, &f->rot[0]);
+	glUniform3fv(L->r1, 1, &f->rot[3]);
+	glUniform3fv(L->r2, 1, &f->rot[6]);
+	glUniform4fv(L->proj, 1, proj);
+	glUniform4fv(L->fogP, 1, fogP);
+	glUniform4fv(L->ramp, 32, ramp);
+}
+
+extern "C" void GR_FarMeshDraw(unsigned handle, const float base[3], const float eye[3], int firstIndex, int indexCount)
+{
+	if (s_farMeshCur == NULL || s_farMeshCur->mode == -1 || handle == 0 || handle > FAR_MESH_GL_MAX ||
+	    s_farMeshGL[handle - 1].vao == 0 || indexCount <= 0)
+		return;
+	glUniform3fv(s_farMeshCur->base, 1, base);
+	glUniform3fv(s_farMeshCur->eye, 1, eye);
+	glBindVertexArray(s_farMeshGL[handle - 1].vao);
+	if (s_gf.draws++ == 0)
+		GreyFrame_FirstDraw();
+	s_gf.tris += indexCount / 3;
+	glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, (const void*)((uintptr_t)firstIndex * sizeof(unsigned)));
+}
+
+/* u_farMode is per-program state: clear it on every program that took it, or
+ * the next legacy split through that shader would run the far branch. */
+extern "C" void GR_FarMeshEnd(void)
+{
+	for (int i = 0; i < 8; i++)
+	{
+		if (s_farMeshLocs[i].prog != 0 && s_farMeshLocs[i].mode != -1)
+		{
+			glUseProgram(s_farMeshLocs[i].prog);
+			glUniform1i(s_farMeshLocs[i].mode, 0);
+		}
+	}
+	glUseProgram(0);
+	g_PreviousShader = (ShaderID)-1;
+	s_farMeshCur = NULL;
+	GR_FarMeshRestoreFrameVao();
 }
 
 void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
