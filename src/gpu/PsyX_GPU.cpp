@@ -383,7 +383,6 @@ extern "C" { int g_PsxWholeMapFarDepth = 0; }
 extern "C" { int g_PsxWholeMapProbe = 0; }
 static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
 static unsigned s_wmDevPrims, s_wmPrecPrims;
-static int s_wmDevSamples;
 /* Probe-frame CPU time (ms) by stage, and batch volume. */
 extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
 static Uint64 s_wmFrameStart = 0;
@@ -391,11 +390,17 @@ static Uint64 s_wmFrameStart = 0;
 #include <x86intrin.h>
 static unsigned long long s_wmCyc[9];
 static unsigned s_wmGt4;
+/* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
+ * 17 = mid-parse vertex-buffer flushes. TSC rate is calibrated against the
+ * SDL counter over the probe frame to report milliseconds. */
+static unsigned long long s_wmClsCyc[18];
+static unsigned s_wmClsN[18];
+static unsigned long long s_wmTscStart;
+extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0; }
+#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmClsCyc[i] += __rdtsc() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
 #define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
-static int s_wmAffSamples;
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
-static int s_wmSamples;
 static unsigned char s_lastLookupFar;
 
 extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void* a2, const void* a3,
@@ -448,6 +453,20 @@ extern "C" void PGXP_CoverageTick(void)
 		eprintinfo("[WMPROBE] time: frame=%.2fms chunkSubmit=%.2fms parse=%.2fms drawSplits=%.2fms (of submit: transform=%.2fms meshEmit=%.2fms) | OT draws=%u splits=%u verts=%u\n",
 			(double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency(),
 			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
+		{
+			const double frameMs = (double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+			const double cycPerMs = (frameMs > 0.0) ? (double)(__rdtsc() - s_wmTscStart) / frameMs : 1.0;
+			char buf[1024];
+			int len = 0;
+			for (int c = 0; c < 18; c++)
+			{
+				if (!s_wmClsN[c]) continue;
+				len += snprintf(buf + len, sizeof(buf) - len, " %s%X=%u/%.2fms",
+					c == 16 ? "far" : (c == 17 ? "flush" : "0x"), c >= 16 ? 0 : c * 16, s_wmClsN[c], (double)s_wmClsCyc[c] / cycPerMs);
+				if (len >= (int)sizeof(buf) - 64) break;
+			}
+			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmTGpu, 10);
+		}
 		if (s_wmGt4)
 			eprintinfo("[WMPROBE] GT4 cycles/prim over %u: begin=%llu drop=%llu hires=%llu split=%llu vert=%llu depth=%llu tex=%llu col=%llu emit=%llu\n",
 				s_wmGt4, s_wmCyc[0] / s_wmGt4, s_wmCyc[1] / s_wmGt4, s_wmCyc[2] / s_wmGt4, s_wmCyc[3] / s_wmGt4,
@@ -461,10 +480,12 @@ extern "C" void PGXP_CoverageTick(void)
 	else if (g_PsxWholeMapProbe == 2)
 	{
 		s_wmBfCalls = s_wmBfFallback = s_wmBfCull = s_wmCaptured = s_wmParsed = s_wmAffineVerts = s_wmPreciseVerts = 0;
-		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
-		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0; s_wmAffSamples = 0;
-		s_wmDevPrims = s_wmPrecPrims = 0; s_wmDevSamples = 0;
+		s_wmWMin = s_wmWMax = 0.0f;
+		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0;
+		s_wmDevPrims = s_wmPrecPrims = 0;
 		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
+		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
+		g_wmTGpu = 0; g_wmFarQuads = 0; s_wmTscStart = __rdtsc();
 		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
 		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
@@ -1319,22 +1340,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 			prec = 1;
 		}
 		s_wmPrecPrims += prec;
-		if (dev > 2.0f)
-		{
-			s_wmDevPrims++;
-			if (s_wmDevSamples < 12)
-			{
-				s_wmDevSamples++;
-				eprintinfo("[WMPROBE] off-by %.1fpx code=%02x bucket=%d | v0 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v1 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v2 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v3 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f%c",
-					(double)dev, (unsigned)polyTag->code, s_otBucketAbs,
-					(double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy, (double)vertex[0].ppw,
-					(double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppx, (double)vertex[1].ppy, (double)vertex[1].ppw,
-					(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppx, (double)vertex[2].ppy, (double)vertex[2].ppw,
-					(double)(isQuad ? vertex[3].x : 0.0f), (double)(isQuad ? vertex[3].y : 0.0f),
-					(double)(isQuad ? vertex[3].ppx : 0.0f), (double)(isQuad ? vertex[3].ppy : 0.0f),
-					(double)(isQuad ? vertex[3].ppw : 0.0f), 10);
-			}
-		}
+		s_wmDevPrims += (dev > 2.0f);
 	}
 	if (g_PsxWholeMapProbe == 1 && s_otBucketAbs == g_currentOTBucketCount - 1)
 	{
@@ -1345,14 +1351,6 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		s_wmLastPrims++;
 		s_wmLastAffine += aff;
 		if (PsyX_LookupGteDepths(polyTag, tsz)) s_wmLastHit++;
-		if (aff && s_wmAffSamples < 6)
-		{
-			s_wmAffSamples++;
-			eprintinfo("[WMPROBE] affine lastBucket prim code=%02x v0=(%.1f,%.1f pp=%.1f,%.1f w=%.0f vsz=%.0f) v1=(%.1f,%.1f w=%.0f) v2=(%.1f,%.1f w=%.0f)%c",
-				(unsigned)polyTag->code, (double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy,
-				(double)vertex[0].ppw, (double)vertex[0].vsz, (double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppw,
-				(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppw, 10);
-		}
 	}
 	uint32_t sz[4];
 	unsigned char kind = SZ_KIND_NONE;
@@ -1467,17 +1465,6 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 					if (s_wmWMin == 0.0f || vertex[i].ppw < s_wmWMin) s_wmWMin = vertex[i].ppw;
 					if (vertex[i].ppw > s_wmWMax) s_wmWMax = vertex[i].ppw;
 				} else s_wmAffineVerts++;
-			}
-			if (s_wmSamples < 8 && (s_wmParsed % 97) == 1)
-			{
-				s_wmSamples++;
-				eprintinfo("[WMPROBE] prim code=%02x flatz=%.4f sz=%u,%u,%u,%u | v0=(%.1f,%.1f pp=%.1f,%.1f w=%.0f p1=%d) v1=(%.1f,%.1f pp=%.1f,%.1f w=%.0f) v2=(%.1f,%.1f pp=%.1f,%.1f w=%.0f) v3=(%.1f,%.1f pp=%.1f,%.1f w=%.0f)\n",
-					(unsigned)polyTag->code, (double)vertex[0].z, (unsigned)sz[0], (unsigned)sz[1], (unsigned)sz[2], (unsigned)sz[3],
-					(double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy, (double)vertex[0].ppw, (int)vertex[0]._p1,
-					(double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppx, (double)vertex[1].ppy, (double)vertex[1].ppw,
-					(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppx, (double)vertex[2].ppy, (double)vertex[2].ppw,
-					(double)(isQuad ? vertex[3].x : 0.0f), (double)(isQuad ? vertex[3].y : 0.0f), (double)(isQuad ? vertex[3].ppx : 0.0f),
-					(double)(isQuad ? vertex[3].ppy : 0.0f), (double)(isQuad ? vertex[3].ppw : 0.0f));
 			}
 		}
 		return;
@@ -3477,9 +3464,16 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					{
 						GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
 						flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
-						DrawAllSplits();
+						WM_CLS(17, DrawAllSplits());
 					}
-					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
+					if (g_PsxWholeMapProbe == 1)
+					{
+						const unsigned code = reinterpret_cast<P_TAG*>(currentPacket)->code;
+						const int cls = (code == 0xB5) ? 16 : (int)(code >> 4);
+						WM_CLS(cls, primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket)));
+					}
+					else
+						primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
@@ -4514,7 +4508,10 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 	{
 		const DR_PSYX_FARQUADS* fq = (const DR_PSYX_FARQUADS*)polyTag;
 		for (int i = (int)fq->code[1]; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+		{
 			EmitFarQuad(&s_farQuads[i]);
+			if (g_PsxWholeMapProbe == 1) g_wmFarQuads++;
+		}
 		return 2;
 	}
 	case 0x04:

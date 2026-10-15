@@ -496,7 +496,13 @@ void DrawOTag(u_long* p)
 				g_wmVerts += (unsigned)g_vertexIndex;
 				g_wmOtDraws++;
 				DrawAllSplits();
-				g_wmTDraw += (double)(SDL_GetPerformanceCounter() - t1) * f;
+				{
+					extern double g_wmTGpu;
+					const Uint64 t2 = SDL_GetPerformanceCounter();
+					g_wmTDraw += (double)(t2 - t1) * f;
+					glFinish();
+					g_wmTGpu += (double)(SDL_GetPerformanceCounter() - t2) * f;
+				}
 				continue;
 			}
 		}
