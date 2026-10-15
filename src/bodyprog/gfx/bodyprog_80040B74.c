@@ -2037,13 +2037,18 @@ static void Pc_WholeMapRoomTableEnsure(void)
      * adjoining bands. Hosted-interior rooms come from the per-cell fallback
      * grid (MAP_ROOM_IDXS), so all 5 samples agree inside a house cell and it
      * can never gain an outdoor sample. Room cell counts are DISTINCT-CELL
-     * counts (a room seen by several samples of one cell counts once). */
+     * counts (a room seen by several samples of one cell counts once).
+     * Size alone still lost map2_s00's crossroads: each is its own 1-cell
+     * room, and a cell lying wholly inside one sees it at all 5 samples. So a
+     * second test: a room that covers only PART of some cell (8x8 samples) is
+     * a street-grid band, never a per-cell interior, and counts as outdoor. */
     static const s32 SAMPLE_OFS[5][2] = {
         { 0, 0 },
         { -Q12(14.0f), -Q12(14.0f) }, { -Q12(14.0f), Q12(14.0f) },
         {  Q12(14.0f), -Q12(14.0f) }, {  Q12(14.0f), Q12(14.0f) },
     };
     u8  cellRooms[19][16][5];
+    u8  partial[256];
     s32 x;
     s32 z;
     s32 s;
@@ -2054,6 +2059,7 @@ static void Pc_WholeMapRoomTableEnsure(void)
 
     bzero(s_pcRoomCellCount, sizeof(s_pcRoomCellCount));
     bzero(s_pcCellOutdoor, sizeof(s_pcCellOutdoor));
+    bzero(partial, sizeof(partial));
 
     if (g_MapOverlayHdr.mapRoomIdxGet == NULL || g_Map.chunkGridCenter == NULL)
     {
@@ -2088,9 +2094,30 @@ static void Pc_WholeMapRoomTableEnsure(void)
                 if (!seen)
                     s_pcRoomCellCount[room]++;
             }
+
+            {
+                u8  hits[256];
+                u8  dense[64];
+                s32 i;
+
+                bzero(hits, sizeof(hits));
+                for (i = 0; i < 64; i++)
+                {
+                    dense[i] = g_MapOverlayHdr.mapRoomIdxGet(
+                        x * CHUNK_CELL_SIZE + ((i & 7) * 2 + 1) * (CHUNK_CELL_SIZE / 16),
+                        z * CHUNK_CELL_SIZE + ((i >> 3) * 2 + 1) * (CHUNK_CELL_SIZE / 16));
+                    hits[dense[i]]++;
+                }
+                for (i = 0; i < 64; i++)
+                {
+                    if (hits[dense[i]] < 64)
+                        partial[dense[i]] = 1;
+                }
+            }
         }
     }
 
+    partial[0] = 0; /* "no room": the void around authored areas */
     for (z = -8; z < 11; z++)
     {
         for (x = -8; x < 8; x++)
@@ -2100,7 +2127,8 @@ static void Pc_WholeMapRoomTableEnsure(void)
 
             for (s = 0; s < 5; s++)
             {
-                if (s_pcRoomCellCount[cellRooms[z + 8][x + 8][s]] >= PC_WM_MIN_ROOM_CELLS)
+                if (s_pcRoomCellCount[cellRooms[z + 8][x + 8][s]] >= PC_WM_MIN_ROOM_CELLS ||
+                    partial[cellRooms[z + 8][x + 8][s]])
                 {
                     s_pcCellOutdoor[z + 8][x + 8] = 1;
                     outdoorCells++;
@@ -2119,8 +2147,9 @@ static void Pc_WholeMapRoomTableEnsure(void)
         for (r = 0; r < 256; r++)
         {
             if (s_pcRoomCellCount[r] != 0)
-                SH_DBG("[WHOLEMAP]   room %d: %d cells%s", r, (int)s_pcRoomCellCount[r],
-                       (s_pcRoomCellCount[r] >= PC_WM_MIN_ROOM_CELLS) ? " (outdoor)" : "");
+                SH_DBG("[WHOLEMAP]   room %d: %d cells%s%s", r, (int)s_pcRoomCellCount[r],
+                       (s_pcRoomCellCount[r] >= PC_WM_MIN_ROOM_CELLS || partial[r]) ? " (outdoor)" : "",
+                       partial[r] ? " partial" : "");
         }
     }
 }
