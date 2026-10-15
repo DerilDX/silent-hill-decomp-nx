@@ -16,6 +16,7 @@
 #include "dbg_overlay.h" /* DbgOverlay_ToastLine — quick-heal result line */
 #include <stdio.h>
 #include "bodyprog/sound/sound_system.h"
+extern int Pc_ConsoleIsOpen(void);
 
 extern const unsigned char* g_sdlKeyboardState;
 extern int PsyX_RawControllerButtonHeld(int sdlGameControllerButton);
@@ -654,6 +655,15 @@ void Pc_ExtraActionsUpdate(void)
         s_reloadLatchT    = 0;
     }
 
+    /* Typing in the console presses these keys too: the quick-heal letter fired
+     * mid-command. Pc_ConsoleIsOpen also covers the apply window after Enter,
+     * when input is briefly unfrozen but the panel is still up. */
+    if (Pc_ConsoleIsOpen())
+    {
+        g_PcQuickTurnRequest = 0;
+        g_PcReloadRequest    = 0;
+        return;
+    }
     if (!Pc_ActionSafe())
     {
         g_PcQuickTurnRequest = 0; /* not safe gameplay -> drop any pending turn */
@@ -704,7 +714,7 @@ void Pc_RearLookUpdate(void)
     g_PcRearLookActive = (held && g_DebugThirdPersonCam && !g_PcFpsCam &&
                           g_GameWork.gameState == GameState_InGame &&
                           g_SysWork.sysState   == SysState_Gameplay &&
-                          !g_PcConsoleInputActive && !g_PcQuickOptionsActive) ? 1 : 0;
+                          !Pc_ConsoleIsOpen() && !g_PcQuickOptionsActive) ? 1 : 0;
 }
 
 /* OTS/TPS free-aim aim assist.
