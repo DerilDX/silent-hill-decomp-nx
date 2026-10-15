@@ -2189,7 +2189,13 @@ int g_PsxFogToBlack = 0;
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
-		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack)) * (1.0 - fogAmt);\n"\
+		/* Untextured additive prims keep the dither: the PSX dithers gouraud
+		 * shading whatever the blend mode, and a faint additive gradient
+		 * quantized without it collapses into one hard 5-bit step (the sewer
+		 * water octagon read as two flat rings). The blood-decal leak above
+		 * was a textured subtractive prim, which stays excluded. */\
+		"		float addDither = (u_untextured > 0) ? 1.0 : (1.0 - float(u_fogToBlack));\n"\
+		"		float dStrength = u_ditherForce * v_is3d * addDither * (1.0 - fogAmt);\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
 		"		    vec3 qcol = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
