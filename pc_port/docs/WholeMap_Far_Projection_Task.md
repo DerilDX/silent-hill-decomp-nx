@@ -1,6 +1,32 @@
 # Whole-Map Far Projection — Task Spec (dedicated session)
 
-Status: **v5 FAR-BAND Z-BUFFER 2026-10-15 (console `wholemap`, awaiting in-game test).**
+Status: **VISUALS DONE 2026-10-15 (user: "perfect"). PERF = the open item; fast far path planned below.**
+
+## Performance (2026-10-15)
+
+[WMPROBE] timing, whole-town view (~107k GT4 prims/frame through the PSX path):
+frame 134 ms = chunk submit 44 ms (vertex transform 10, mesh emission 31 = emulated
+GTE colour + packet build + PGXP shadow copies) + OT parse 69 ms (~1600 cycles per
+GT4: vertex build 646 = shadow-table misses because the OT walk is depth-ordered,
+depth 566, begin 177) + draws 2 ms + ~20 ms GPU (the flashlight shadow pass redraws
+every legacy split, i.e. the whole town). Micro-optimisations done: address-ordered
+shadow hash, view-space lookups skipped past 64u, PSX fog-overlay colour skipped on PC
+(~10% total). The per-prim PSX emulation cost is structural.
+
+### Fast far path (plan)
+1. Per chunk (cached, rebuilt on lighting / material-slot change): world-space prims
+   (4 float verts, uv, tpage, clut, lit colours computed once with the game's GTE
+   colour code). Standard unlit/Gfx_MeshDraw models only; lit (field_B_0), chained
+   (field_B_4) models and billboards stay on the PSX path.
+2. Per frame: float view transform + projection, float backface (PSX NCLIP
+   semantics), frustum reject, bucket by max view depth (own sorted list, PSX
+   painter order: bucket then reverse submission).
+3. Draw: custom 0xB_ packet at the head of the last OT bucket; PsyCross emits the
+   prepared prims straight into g_vertexBuffer + AddSplit (ApplyHiresOverride per
+   prim, so packs/virtual slots work), fog byte from the fog ramp, FLAT world depth.
+4. Chunks near the player (vanilla range) keep the full PSX/PGXP path.
+Also: the shadow pass should skip far splits.
+
 
 ## v5 (2026-10-15): why v4 still stacked blocks and trees
 
