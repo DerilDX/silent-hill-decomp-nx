@@ -88,10 +88,18 @@ void func_80057228(MATRIX* mat, s32 alpha, SVECTOR* arg2, VECTOR3* arg3);
  * real hardware's OTZ register saturates to, and an out-of-range addPrim writes
  * the packet pointer into adjacent memory -> split-pointer cutscene crashes. */
 #ifdef SH_PC_PORT
+/* The drawers add at tag[depth >> shift >> 2], and func_80057090 hands them a
+ * tag that already starts func_800571D0(field_B_1) buckets in (0..99). The
+ * clamp has to leave room for that base, or a clamped far poly lands up to 99
+ * entries past org[] -- into the other frame's OT or whatever follows it. The
+ * vanilla draw distance never got there; whole-map mode puts most of the town
+ * there, which is where its distant road and buildings were going. */
+static s32 s_pcOtTagBase = 0;
+#define SH_OT_LAST_DEPTH(shift) ((ORDERING_TABLE_SIZE - 1 - s_pcOtTagBase) << ((shift) + 2))
 #define SH_CLAMP_OT_DEPTH(depth, shift)                                         \
     do {                                                                        \
-        if ((((depth) >> (shift)) >> 2) >= ORDERING_TABLE_SIZE)                 \
-            (depth) = (ORDERING_TABLE_SIZE - 1) << ((shift) + 2);               \
+        if ((((depth) >> (shift)) >> 2) >= ORDERING_TABLE_SIZE - s_pcOtTagBase) \
+            (depth) = SH_OT_LAST_DEPTH(shift);                                  \
     } while (0)
 
 /* Whole-town mode (Pc_WholeMapDrawActive): the visible-square radius is set
@@ -115,14 +123,14 @@ void func_80057228(MATRIX* mat, s32 alpha, SVECTOR* arg2, VECTOR3* arg3);
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift)                                  \
     do {                                                                        \
         if ((depth) < 0 && Pc_WholeMapDrawActive())                             \
-            (depth) = (ORDERING_TABLE_SIZE - 1) << ((shift) + 2);               \
+            (depth) = SH_OT_LAST_DEPTH(shift);                                  \
     } while (0)
 /* True iff this poly was depth-rescued/clamped into the last OT bucket — the
  * far band the whole-map mode adds. Gates the far-only render tweaks below so
  * the near scene keeps stock PSX behavior exactly. Depth compare FIRST: this
  * runs per poly in the drawers, and the gate is a cross-TU call. */
 #define SH_WHOLEMAP_FAR_POLY(depth, shift)                                      \
-    ((depth) == ((ORDERING_TABLE_SIZE - 1) << ((shift) + 2)) && Pc_WholeMapDrawActive())
+    ((depth) == SH_OT_LAST_DEPTH(shift) && Pc_WholeMapDrawActive())
 extern int g_PsxWholeMapFar;
 /* Lit world models never report their SZ, so the depth capture hands a far
  * poly the last OT bucket's seed and it paints over the depth-tested town.
@@ -2152,6 +2160,9 @@ void func_80057090(s_ModelInfo* modelInfo, GsOT* arg1, s32 arg2, MATRIX* viewMat
 
     otTag = &arg1->org[func_800571D0(modelHdr->field_B_1)];
     temp_a0 = modelHdr->field_B_4;
+#ifdef SH_PC_PORT
+    s_pcOtTagBase = func_800571D0(modelHdr->field_B_1);
+#endif
 
 #ifdef SH_PC_PORT
     /* v7 high-poly model: draw the dense wide geometry instead of the stock
