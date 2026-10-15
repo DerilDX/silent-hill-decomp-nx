@@ -385,8 +385,13 @@ static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
 static unsigned s_wmDevPrims, s_wmPrecPrims;
 static int s_wmDevSamples;
 /* Probe-frame CPU time (ms) by stage, and batch volume. */
-extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
+extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
 static Uint64 s_wmFrameStart = 0;
+/* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
+#include <x86intrin.h>
+static unsigned long long s_wmCyc[9];
+static unsigned s_wmGt4;
+#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
 static int s_wmAffSamples;
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
@@ -440,9 +445,13 @@ extern "C" void PGXP_CoverageTick(void)
 	PGXP_BumpGen();
 	if (g_PsxWholeMapProbe == 1)
 	{
-		eprintinfo("[WMPROBE] time: frame=%.2fms chunkSubmit=%.2fms parse=%.2fms drawSplits=%.2fms | OT draws=%u splits=%u verts=%u\n",
+		eprintinfo("[WMPROBE] time: frame=%.2fms chunkSubmit=%.2fms parse=%.2fms drawSplits=%.2fms (of submit: transform=%.2fms meshEmit=%.2fms) | OT draws=%u splits=%u verts=%u\n",
 			(double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency(),
-			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmOtDraws, g_wmSplits, g_wmVerts);
+			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
+		if (s_wmGt4)
+			eprintinfo("[WMPROBE] GT4 cycles/prim over %u: begin=%llu drop=%llu hires=%llu split=%llu vert=%llu depth=%llu tex=%llu col=%llu emit=%llu\n",
+				s_wmGt4, s_wmCyc[0] / s_wmGt4, s_wmCyc[1] / s_wmGt4, s_wmCyc[2] / s_wmGt4, s_wmCyc[3] / s_wmGt4,
+				s_wmCyc[4] / s_wmGt4, s_wmCyc[5] / s_wmGt4, s_wmCyc[6] / s_wmGt4, s_wmCyc[7] / s_wmGt4, s_wmCyc[8] / s_wmGt4);
 		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u | precise prims=%u offByOver2px=%u\n",
 			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
 			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp,
@@ -455,7 +464,8 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
 		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0; s_wmAffSamples = 0;
 		s_wmDevPrims = s_wmPrecPrims = 0; s_wmDevSamples = 0;
-		g_wmTParse = g_wmTDraw = g_wmTChunks = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
+		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
+		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
 		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
 	}
@@ -3890,7 +3900,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 {
 	/* PGXP hint (3D polygons only). 0xFFFF / ignored when PGXP off. */
 	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
-	if (g_PsxUsePgxp) PGXP_BeginPrim(polyTag);
+	if (g_PsxUsePgxp) WM_CYC(0, PGXP_BeginPrim(polyTag));
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
@@ -3993,18 +4003,21 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	case 0xC:
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
+		bool gt4Drop;
 		activeDrawEnv.tpage = poly->tpage;
-		if (!ShouldDropForClut("GT4", poly->tpage, poly->clut))
+		if (g_PsxWholeMapProbe == 1) s_wmGt4++;
+		WM_CYC(1, gt4Drop = ShouldDropForClut("GT4", poly->tpage, poly->clut));
+		if (!gt4Drop)
 		{
-			ApplyHiresOverride(poly->tpage, poly->clut);
+			WM_CYC(2, ApplyHiresOverride(poly->tpage, poly->clut));
 
-			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			WM_CYC(3, AddSplit(semiTrans, true, SplitDepthForPrim(polyTag)));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-			MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
-			ApplyGtePerVertexDepth(firstVertex, polyTag, true);
-			MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+			WM_CYC(4, MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex));
+			WM_CYC(5, ApplyGtePerVertexDepth(firstVertex, polyTag, true));
+			WM_CYC(6, MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd));
+			WM_CYC(7, MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2));
 
 			// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
 			firstVertex[0]._p0 = (unsigned char)poly->pad2;  // v0: own fog (game carries it in pad2; v0 color word's pad is the code byte)
@@ -4014,7 +4027,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 			TriangulateQuad();
 
-			g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
+			WM_CYC(8, g_vertexIndex += PgxpEmitPoly(firstVertex, 6));
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
