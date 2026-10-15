@@ -3316,6 +3316,11 @@ void DrawAllSplits()
 // forward declarations
 int ParsePrimitive(P_TAG* polyTag);
 
+/* Nodes of a game-side sub-OT spliced into a bucket (whole-map far list):
+ * empty tags like real buckets, but not buckets of THIS OT, so counting them
+ * would shift every later bucket's depth seed and the UI-bucket test. */
+extern "C" { uintptr_t g_PsxOtNoBucketLo = 0, g_PsxOtNoBucketHi = 0; }
+
 void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 {
 	if (!p)
@@ -3407,7 +3412,8 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					}
 				}
 			}
-			else if (tagLength == 0)
+			else if (tagLength == 0 &&
+			         !(basePacket >= g_PsxOtNoBucketLo && basePacket < g_PsxOtNoBucketHi))
 			{
 				// OT bucket boundary — advance to the next bucket's depth.
 				if (g_PsxUsePgxp && s_otViewZShift > 0)
