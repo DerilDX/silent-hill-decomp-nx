@@ -51,6 +51,7 @@ static s16 Pc_OverlayQuadHalfW(void)
 #ifdef SH_PC_PORT
 #include <stdio.h>
 #include "sh_log.h"
+#include <SDL_timer.h>
 #include "pc_config.h"
 #include "hires_override.h"
 #include "pc_wide_lm.h"
@@ -2397,6 +2398,24 @@ void func_80057344(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
                 break;
         }
 
+#ifdef SH_PC_PORT
+        {
+            extern int    g_PsxWholeMapProbe;
+            extern double g_wmTXform, g_wmTMesh;
+            if (g_PsxWholeMapProbe == 1)
+            {
+                const double f  = 1000.0 / (double)SDL_GetPerformanceFrequency();
+                Uint64       t0 = SDL_GetPerformanceCounter();
+                Uint64       t1;
+                func_80057B7C(curMeshHdr, vertOffset, scratchData, mat);
+                t1 = SDL_GetPerformanceCounter();
+                Gfx_MeshDraw(curMeshHdr, scratchData, otTag, arg2);
+                g_wmTXform += (double)(t1 - t0) * f;
+                g_wmTMesh  += (double)(SDL_GetPerformanceCounter() - t1) * f;
+                continue;
+            }
+        }
+#endif
         func_80057B7C(curMeshHdr, vertOffset, scratchData, mat);
 
         Gfx_MeshDraw(curMeshHdr, scratchData, otTag, arg2);
