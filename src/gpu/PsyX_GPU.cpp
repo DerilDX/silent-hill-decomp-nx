@@ -600,6 +600,8 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	if (GetPreciseVertex(addr, *(const unsigned*)addr, rawX, rawY, ofsX, ofsY, &ox, &oy, &ow)) {
 		WeldVertex(&ox, &oy, &ow);
 		v->ppx = ox; v->ppy = oy; v->ppw = ow; s_pgxpDet++;
+		if (g_PsxPgxpDbg & 64) v->ppw = 1.0f;
+		if (g_PsxPgxpDbg & 128) { v->ppx = (float)v->x; v->ppy = (float)v->y; }
 	} else {
 		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++;
 	}
