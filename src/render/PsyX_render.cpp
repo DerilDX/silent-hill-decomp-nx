@@ -2698,7 +2698,7 @@ const char* gte_shader_4 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
-	"varying vec4 v_uvlim;\n"
+	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2716,7 +2716,7 @@ const char* gte_shader_8 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
-	"varying vec4 v_uvlim;\n"
+	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2734,7 +2734,7 @@ const char* gte_shader_16 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
-	"varying vec4 v_uvlim;\n"
+	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2752,7 +2752,7 @@ const char* gte_shader_32_rgba =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
-	"varying vec4 v_uvlim;\n"
+	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
