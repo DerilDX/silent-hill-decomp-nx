@@ -12,7 +12,7 @@ KNOWN (previously investigated, no PC fault found yet), NEW (not yet investigate
 | 3 | Audio | Lisa encounter FMV has no music; audio odd at the start of every FMV | FIXED (start) / OPEN (music) |
 | 4 | Cutscene | Sewer fence drop before Twinfeeler: fence falls first, then Harry | FIXED |
 | 5 | Enemies | Rompers hop over things they should not, sometimes out of view | KNOWN |
-| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | OPEN (screenshot received, cause not found yet) |
+| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | FIXED (needs test) |
 | 7 | Render | Projected shadows vanish in menus, pickups, doors, examine | FIXED |
 | 8 | Cutscene | Original pauses between dialogue lines gone; wants a launcher option | FIXED (reworked as seek delay) |
 | 9 | Render | Incubator to Incubus switch effect looks broken | DROPPED (effect shown from the wrong angle; user call) |
@@ -169,3 +169,21 @@ dump of that frame) before changing anything.
 
 Reported with the ending replay. No lines in the log point at it (no [COORD] guard hits).
 Not investigated yet.
+
+## 6, resolved (2026-10-15, PsyCross 5a729ca, main 7a4a5a572)
+
+The water surface is a palette trick. The game composites two scrolled copies of a 4-bit wave
+texture into a 32x32 VRAM tile, then the water polygons sample that tile back as a 4-bit
+texture through a different palette, so every 16-bit colour word turns into four palette
+indices. The look only comes out right when the words are bit-exact PSX GPU output. On the
+PC the tile went through the GL offscreen path (shader modulation, filtering, dither, an RGBA
+readback and a repack whose STP bit was set pseudo-randomly by an operator-precedence bug),
+so the water came back as mid-grey noise, and the flashlight's dark octagon underneath showed
+through as flat bands because additive blending ignored the STP bit that makes the PSX draw
+those texels solid.
+
+Fix: the tile is now composited in software with the GPU's own arithmetic, additive
+primitives follow the STP rule (set = add, clear = solid) the way the 50/50 mode already did,
+and the pack bug is fixed. Measured from the screenshot: the band brightness steps matched the
+octagon's authored colours exactly, and the scene's black floor of 36 is the brightness 1.3
+setting on the quantized output, not a rendering fault.
