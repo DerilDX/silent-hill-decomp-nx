@@ -8,15 +8,15 @@ KNOWN (previously investigated, no PC fault found yet), NEW (not yet investigate
 | # | Area | Item | Status |
 |---|------|------|--------|
 | 1 | Combat | Split Head (first boss) melee attack: rumble but no flinch, no damage | FIXED |
-| 2 | Render | Dahlia first encounter close-up: wall textures missing (no HD pack) | NEW |
+| 2 | Render | Dahlia first encounter close-up: wall textures missing (no HD pack) | DROPPED (camera framing shows too much vertically; user call) |
 | 3 | Audio | Lisa encounter FMV has no music; audio odd at the start of every FMV | FIXED (start) / OPEN (music) |
 | 4 | Cutscene | Sewer fence drop before Twinfeeler: fence falls first, then Harry | FIXED |
 | 5 | Enemies | Rompers hop over things they should not, sometimes out of view | KNOWN |
 | 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | OPEN (needs screenshot) |
 | 7 | Render | Projected shadows vanish in menus, pickups, doors, examine | FIXED |
 | 8 | Cutscene | Original pauses between dialogue lines gone; wants a launcher option | FIXED |
-| 9 | Render | Incubator to Incubus switch effect looks broken | NEW |
-| 10 | Render | After final boss: Harry runs on black floor; town shot has no road | NEW |
+| 9 | Render | Incubator to Incubus switch effect looks broken | DROPPED (effect shown from the wrong angle; user call) |
+| 10 | Render | After final boss: Harry runs on black floor; town shot has no road | OPEN (needs log) |
 
 ## 1. Split Head melee does no damage (FIXED)
 
@@ -117,3 +117,23 @@ instantly. The port already had a minimum-gap setting (`cutscene_line_gap_ms`, d
 300 ms, config-file only). The launcher now exposes it as "Dialog Pause": Off (0),
 Short (300, default), Medium (700), Long (1200). The tooltip says longer values can push
 voices late in tightly timed scenes.
+
+## 10. Ending floor black, town road missing (OPEN, needs a log)
+
+Both are world objects, not procedural prims: `URA_HIDE` and `UNDER_HI` (the otherworld
+run floor) and `REAL_HID` (the town road), three scrolling 20-unit tiles placed around
+(100, 0, -140) by `func_800E98EC` in map7_s03_3.c and switched on per ending step. Their
+geometry lives only in chunk ER02FC (cell 2,-4). A world object resolves its model through
+the chunk at the player's cell on interior maps, and the PC drops any world object whose
+chunk has no resident textures (the June gate in world_draw.c that stopped far props drawing
+with garbage pages). The player is moved to (140, -100), cell (3,-3), for the town shot.
+
+Candidates, in order:
+- The object resolves but its chunk is loaded-but-untextured, so the draw gate drops it
+  every frame. The log prints `[WOBJ-TEX] 'REAL_HID'` only when it is drawn.
+- The object never resolves (`[WOBJ] find-fail name='REAL_HID'`, printed once per name).
+- The 2026-09-17 change that limits map7_s03 to drawing exactly the player's cell. It
+  gates chunk geometry, not world objects, so it is the least likely of the three.
+
+What settles it in one step: a SilentHill.log from a run through the ending (grep for
+`WOBJ`, `IPD-INIT` and `playing FMV`) plus a screenshot of the running segment.
