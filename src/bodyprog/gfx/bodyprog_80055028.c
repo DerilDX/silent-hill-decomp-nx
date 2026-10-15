@@ -5646,6 +5646,7 @@ typedef struct
     PcFarPrim*         prims;
     s32                count;
     u32                lightKey;
+    u32                sig;
     /* GPU copy (wholemap gpu): mesh handle, its texture ranges, and the local
      * origin its positions are relative to (float precision stays at cell scale). */
     u32                gpu;
@@ -5707,6 +5708,37 @@ static u32 Pc_FarLightKey(void)
         PC_FAR_MIX(g_WorldEnvWork.field_60.vx >> 16);
         PC_FAR_MIX(g_WorldEnvWork.field_60.vy >> 16);
         PC_FAR_MIX(g_WorldEnvWork.field_60.vz >> 16);
+    }
+#undef PC_FAR_MIX
+    return h;
+}
+
+/* The cache is found by IPD buffer address, but streaming reuses a buffer for
+ * another cell, and a texture re-claim moves a chunk's pages/CLUTs in VRAM
+ * (Lm_MaterialFlagsApply rebakes the prims). Either leaves a cached copy
+ * drawing the old cell or the old texture slots: garbled far storefronts and
+ * missing buildings after a reload or a long free-cam flight. The committed
+ * material state (field_F/12/16) is what the prims were last baked from. */
+static u32 Pc_FarChunkSig(const s_IpdHeader* ipd)
+{
+    const s_LmHeader* lm = ipd->lmHdr;
+    u32               h  = 2166136261u;
+    s32               i;
+#define PC_FAR_MIX(v) (h = (h ^ (u32)(v)) * 16777619u)
+    PC_FAR_MIX((u8)ipd->cellX);
+    PC_FAR_MIX((u8)ipd->cellZ);
+    PC_FAR_MIX((uintptr_t)lm);
+    if (lm != NULL && lm->magic == LM_HEADER_MAGIC)
+    {
+        PC_FAR_MIX(lm->materialCount);
+        for (i = 0; i < lm->materialCount; i++)
+        {
+            const s_Material* m = &lm->materials[i];
+            PC_FAR_MIX(m->field_F);
+            PC_FAR_MIX(m->field_12);
+            PC_FAR_MIX(m->field_16.u16);
+            PC_FAR_MIX(m->texture != NULL);
+        }
     }
 #undef PC_FAR_MIX
     return h;
@@ -5974,6 +6006,7 @@ static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
     fc->count    = 0;
     fc->ipd      = ipd;
     fc->lightKey = Pc_FarLightKey();
+    fc->sig      = Pc_FarChunkSig(ipd);
     if (fc->prims == NULL)
         return;
 
@@ -6212,15 +6245,17 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
     PcFarChunk* fc;
     s32         i;
     const u32   key = Pc_FarLightKey();
+    u32         sig;
 
     if (!g_PcWholeMapFast || !s_pcFarOtActive)
         return 0;
     fc = Pc_FarChunkFind(ipd);
     if (fc == NULL)
         return 0;
-    /* Rebuilds are budgeted per frame: an unbuilt chunk takes the PSX path,
-     * a built one keeps its old colours until its turn (a frame or two). */
-    if ((fc->ipd != ipd || fc->lightKey != key) && s_pcFarBuildBudget > 0)
+    sig = Pc_FarChunkSig(ipd);
+    /* Rebuilds are budgeted per frame: an unbuilt or stale chunk takes the PSX
+     * path, a built one keeps its old colours until its turn (a frame or two). */
+    if ((fc->ipd != ipd || fc->sig != sig || fc->lightKey != key) && s_pcFarBuildBudget > 0)
     {
         s_pcFarBuildBudget--;
         Pc_FarChunkBuild(fc, ipd);
@@ -6231,7 +6266,7 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
     {
         s32 b;
         s_pcFarPrbChunks++;
-        if (fc->ipd != ipd)
+        if (fc->ipd != ipd || fc->sig != sig)
             s_pcFarPrbUnbuilt++;
         else
             s_pcFarPrbCached += fc->count;
@@ -6259,7 +6294,7 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
             }
         }
     }
-    if (fc->ipd != ipd)
+    if (fc->ipd != ipd || fc->sig != sig)
         return 0;
 
     if (g_PcWholeMapGpu)

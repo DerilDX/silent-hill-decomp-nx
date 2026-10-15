@@ -1265,15 +1265,18 @@ static int Kf_HoldRepeat(int cur, int prev, Uint32* pressMs, Uint32* lastMs)
 }
 
 /* ---- Free camera (Numpad * / quick options "Free camera") -------------
- * Mouse look + W/A/S/D, Space up, C down, Shift fast, Ctrl slow. Harry stays
- * frozen where he was (his pad input is swallowed while it is on, see the
- * pad-suppression block in MainLoop) so the keys fly the camera only. Shared
- * by the key and the quick options row, and applied on every early-return
- * path of DebugCamera_Update so it also works with debug keys off and holds
- * its view while the quick options / console are open. */
-#define FC_MOVE_SPEED  640  /* Q12 units per 60 fps frame (~9u/s; Shift x4) */
+ * Photo-mode style: mouse look, W/A/S/D move, E/Q up/down, wheel speed,
+ * Shift fast, Ctrl slow, Space steady, comma cruise, G brings Harry, F makes
+ * him follow, H hides the controls panel (pc_freecam_hud.c). Harry stands
+ * still by default (his pad input is swallowed while it is on, see the
+ * pad-suppression block in MainLoop). Shared by the key and the quick options
+ * row, and applied on every early-return path of DebugCamera_Update so it also
+ * works with debug keys off and holds its view while the quick options /
+ * console are open. */
+#define FC_MOVE_SPEED  640  /* Q12 units per 60 fps frame at x1 (~9u/s) */
 #define FC_VERT_SPEED  384
 #define FC_HARRY_BEHIND Q12(2.0f)
+#define FC_HARRY_AHEAD  Q12(3.0f)
 #define FC_MOUSE_YAW   6    /* Q12 angle units per mouse pixel */
 #define FC_MOUSE_PITCH 4
 /* Controller look tuning for the free camera; mirrors the TPS cam's
@@ -1282,6 +1285,28 @@ static int Kf_HoldRepeat(int cur, int prev, Uint32* pressMs, Uint32* lastMs)
 #define FC_STICK_YAW      40
 #define FC_STICK_PITCH    28
 #define FC_PITCH_MAX   900  /* ~79 degrees either way */
+/* Ease times (seconds) toward the wanted velocity / look rate. Free flight
+ * stays responsive; steady is long enough to hide hand jitter on a pan. */
+#define FC_EASE_MOVE   0.12f
+#define FC_EASE_STEADY 0.60f
+#define FC_EASE_LOOK   0.25f
+#define FC_STEADY_MUL  0.25f
+#define FC_SPEED_MIN   (1.0f / 32.0f)
+#define FC_SPEED_MAX   32.0f
+
+/* Read by the controls panel (pc_freecam_hud.c). */
+int   g_PcFreeCamHudHidden = 0;
+int   g_PcFreeCamSteady    = 0;
+int   g_PcFreeCamCruise    = 0;
+int   g_PcFreeCamFollow    = 0;
+float g_PcFreeCamSpeedMul  = 1.0f;
+
+static float         s_fcVel[3];      /* Q12 units per second */
+static float         s_fcCruiseVel[3];
+static float         s_fcYaw, s_fcPitch; /* fractional shadows of g_DebugCamAngleY/X */
+static float         s_fcLookVel[2];
+static float         s_fcTrackYaw, s_fcTrackPitch;
+static unsigned char s_fcKeyPrev[4];
 
 void Pc_FreeCam_Set(int on)
 {
@@ -1290,11 +1315,23 @@ void Pc_FreeCam_Set(int on)
         return;
     g_DebugCamEnabled = on;
     if (on) {
+        extern int  g_PsyX_WheelNotches;
+        extern void Pc_FreeCamHud_Preload(void);
         /* Start from the current camera so switching on is seamless. */
         vcGetNowCamPos(&g_DebugCamPos);
         g_DebugCamAngleY = g_SysWork.cameraAngleY;
         g_DebugCamAngleX = 0;
         g_DebugCamInited = 1;
+        s_fcYaw   = (float)(g_DebugCamAngleY & 0xFFF);
+        s_fcPitch = 0.0f;
+        memset(s_fcVel, 0, sizeof(s_fcVel));
+        memset(s_fcLookVel, 0, sizeof(s_fcLookVel));
+        /* Held keys must be released before they toggle anything. */
+        memset(s_fcKeyPrev, 1, sizeof(s_fcKeyPrev));
+        g_PcFreeCamCruise   = 0;
+        g_PcFreeCamSteady   = 0;
+        g_PsyX_WheelNotches = 0;
+        Pc_FreeCamHud_Preload();
         SDL_GetRelativeMouseState(NULL, NULL); /* drop travel accumulated before capture */
         /* Fog off by default. Outdoors the fog wall sits a few units past
          * Harry, so a camera that flies anywhere useful is already behind it
@@ -1302,7 +1339,7 @@ void Pc_FreeCam_Set(int on)
          * Numpad . turns it back on when the fog itself is what you want to
          * look at. */
         g_DebugFogDisabled = 1;
-        SH_DBG_ECHO("[FREECAM] on -- mouse look, W/A/S/D move, Space/C up/down, Shift fast, Ctrl slow");
+        SH_DBG_ECHO("[FREECAM] on -- controls panel bottom-left, H hides it");
     } else {
         g_SysWork.playerWork.player.model.anim.flags |= AnimFlag_Visible;
         g_SysWork.playerWork.extra.model.anim.flags |= AnimFlag_Visible;
@@ -1310,25 +1347,75 @@ void Pc_FreeCam_Set(int on)
     }
 }
 
+static int Pc_FreeCam_KeyEdge(const unsigned char* ks, int sc, int slot)
+{
+    int cur = ks[sc] != 0;
+    int hit = cur && !s_fcKeyPrev[slot];
+    s_fcKeyPrev[slot] = (unsigned char)cur;
+    return hit;
+}
+
+static void Pc_FreeCam_HarryHere(void)
+{
+    s32 sinY = Math_Sin(g_DebugCamAngleY);
+    s32 cosY = Math_Cos(g_DebugCamAngleY);
+
+    if (g_GameWork.gameState != GameState_InGame)
+        return;
+    /* A little ahead of the camera so he lands in shot; his height is left to
+     * the ground, as the follow mode does. */
+    g_SysWork.playerWork.player.position.vx = g_DebugCamPos.vx + (s32)((s64)FC_HARRY_AHEAD * sinY >> 12);
+    g_SysWork.playerWork.player.position.vz = g_DebugCamPos.vz + (s32)((s64)FC_HARRY_AHEAD * cosY >> 12);
+}
+
 static void Pc_FreeCam_Input(void)
 {
+    extern int           g_PsyX_WheelNotches;
     const unsigned char* ks = g_sdlKeyboardState;
-    int   mdx = 0, mdy = 0;
+    int   mdx = 0, mdy = 0, moving = 0, i, notches;
     float ms  = g_PcConfig.mouseSensitivity;
-    s32   spd, vspd, sinY, cosY, fwd, dy;
+    float dt, dYaw, dPitch, speed, vspeed, k;
+    float yawR, pitchR, fwd[3], right[3], wish[3] = { 0.0f, 0.0f, 0.0f }, vert = 0.0f, target[3];
 
     if (!ks)
         return;
 
-    SDL_GetRelativeMouseState(&mdx, &mdy);
-    g_DebugCamAngleY = (g_DebugCamAngleY + (s32)(mdx * FC_MOUSE_YAW * ms)) & 0xFFF;
-    {
-        /* AngleX positive = looking down; mouse up (mdy < 0) looks up. */
-        s32 dp = (s32)(mdy * FC_MOUSE_PITCH * ms);
-        g_DebugCamAngleX += g_PcConfig.invertMouseY ? -dp : dp;
-        if (g_DebugCamAngleX >  FC_PITCH_MAX) g_DebugCamAngleX =  FC_PITCH_MAX;
-        if (g_DebugCamAngleX < -FC_PITCH_MAX) g_DebugCamAngleX = -FC_PITCH_MAX;
+    dt = (float)g_DeltaTime / 4096.0f;
+    if (dt < 0.0f) dt = 0.0f;
+    if (dt > 0.1f) dt = 0.1f;
+
+    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_H, 0))
+        g_PcFreeCamHudHidden ^= 1;
+    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_COMMA, 1)) {
+        g_PcFreeCamCruise ^= 1;
+        memcpy(s_fcCruiseVel, s_fcVel, sizeof(s_fcVel));
     }
+    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_G, 2))
+        Pc_FreeCam_HarryHere();
+    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_F, 3))
+        g_PcFreeCamFollow ^= 1;
+
+    /* Steady locks the travel direction where it was when Space went down, so
+     * a dolly stays on its line while the look pans. */
+    if (ks[SDL_SCANCODE_SPACE] && !g_PcFreeCamSteady) {
+        s_fcTrackYaw   = s_fcYaw;
+        s_fcTrackPitch = s_fcPitch;
+    }
+    g_PcFreeCamSteady = ks[SDL_SCANCODE_SPACE] != 0;
+
+    notches = g_PsyX_WheelNotches;
+    g_PsyX_WheelNotches = 0;
+    for (; notches > 0; notches--) g_PcFreeCamSpeedMul *= 1.25f;
+    for (; notches < 0; notches++) g_PcFreeCamSpeedMul /= 1.25f;
+    if (g_PcFreeCamSpeedMul < FC_SPEED_MIN) g_PcFreeCamSpeedMul = FC_SPEED_MIN;
+    if (g_PcFreeCamSpeedMul > FC_SPEED_MAX) g_PcFreeCamSpeedMul = FC_SPEED_MAX;
+    /* Snap near 1 so the panel can read x1.00 again after scrolling back. */
+    if (g_PcFreeCamSpeedMul > 0.99f && g_PcFreeCamSpeedMul < 1.01f) g_PcFreeCamSpeedMul = 1.0f;
+
+    SDL_GetRelativeMouseState(&mdx, &mdy);
+    dYaw   = (float)mdx * FC_MOUSE_YAW * ms;
+    /* AngleX positive = looking down; mouse up (mdy < 0) looks up. */
+    dPitch = (float)mdy * FC_MOUSE_PITCH * ms * (g_PcConfig.invertMouseY ? -1.0f : 1.0f);
 
     /* Controller look (right stick), parity with the alt-camera scheme in
      * Pc_TpsCamera_Apply: same deadzone, controller sensitivity, invert flag
@@ -1343,76 +1430,89 @@ static void Pc_FreeCam_Input(void)
         if (rx != 0 || ry != 0)
         {
             float cs = g_PcConfig.controllerSensitivity;
-            s32 dYaw   = TIMESTEP_SCALE_30_FPS(g_DeltaTime, (s32)(((rx * FC_STICK_YAW)   >> 7) * cs));
-            s32 dPitch = TIMESTEP_SCALE_30_FPS(g_DeltaTime, (s32)(((ry * FC_STICK_PITCH) >> 7) * cs));
-            g_DebugCamAngleY = (g_DebugCamAngleY + dYaw) & 0xFFF;
-            /* ry>0 = stick down = look down (AngleX positive), matching the
-             * mouse convention above; invert flag flips it. */
-            g_DebugCamAngleX += g_PcConfig.invertControllerY ? -dPitch : dPitch;
-            if (g_DebugCamAngleX >  FC_PITCH_MAX) g_DebugCamAngleX =  FC_PITCH_MAX;
-            if (g_DebugCamAngleX < -FC_PITCH_MAX) g_DebugCamAngleX = -FC_PITCH_MAX;
+            dYaw   += (float)TIMESTEP_SCALE_30_FPS(g_DeltaTime, (s32)(((rx * FC_STICK_YAW)   >> 7) * cs));
+            dPitch += (float)TIMESTEP_SCALE_30_FPS(g_DeltaTime, (s32)(((ry * FC_STICK_PITCH) >> 7) * cs)) *
+                      (g_PcConfig.invertControllerY ? -1.0f : 1.0f);
         }
     }
 
-    spd  = TIMESTEP_SCALE_60_FPS(g_DeltaTime, FC_MOVE_SPEED);
-    vspd = TIMESTEP_SCALE_60_FPS(g_DeltaTime, FC_VERT_SPEED);
-    if (ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT]) { spd *= 4; vspd *= 4; }
-    if (ks[SDL_SCANCODE_LCTRL]) { spd >>= 2; vspd >>= 2; }
+    if (g_PcFreeCamSteady && dt > 0.0f) {
+        k = 1.0f - expf(-dt / FC_EASE_LOOK);
+        s_fcLookVel[0] += (dYaw   * FC_STEADY_MUL / dt - s_fcLookVel[0]) * k;
+        s_fcLookVel[1] += (dPitch * FC_STEADY_MUL / dt - s_fcLookVel[1]) * k;
+        dYaw   = s_fcLookVel[0] * dt;
+        dPitch = s_fcLookVel[1] * dt;
+    } else {
+        s_fcLookVel[0] = (dt > 0.0f) ? dYaw / dt : 0.0f;
+        s_fcLookVel[1] = (dt > 0.0f) ? dPitch / dt : 0.0f;
+    }
+    s_fcYaw += dYaw;
+    while (s_fcYaw >= 4096.0f) s_fcYaw -= 4096.0f;
+    while (s_fcYaw < 0.0f)     s_fcYaw += 4096.0f;
+    s_fcPitch += dPitch;
+    if (s_fcPitch >  FC_PITCH_MAX) s_fcPitch =  FC_PITCH_MAX;
+    if (s_fcPitch < -FC_PITCH_MAX) s_fcPitch = -FC_PITCH_MAX;
+    g_DebugCamAngleY = (s32)s_fcYaw & 0xFFF;
+    g_DebugCamAngleX = (s32)s_fcPitch;
+
+    speed = (float)FC_MOVE_SPEED * 60.0f * g_PcFreeCamSpeedMul;
+    if (ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT]) speed *= 4.0f;
+    if (ks[SDL_SCANCODE_LCTRL]) speed *= 0.25f;
     /* R1 = fast (Shift), L1 = slow (Ctrl). */
-    if (g_Controller0 && (g_Controller0->heldBtnFlags & ControllerFlag_R1)) { spd *= 4; vspd *= 4; }
-    if (g_Controller0 && (g_Controller0->heldBtnFlags & ControllerFlag_L1)) { spd >>= 2; vspd >>= 2; }
+    if (g_Controller0 && (g_Controller0->heldBtnFlags & ControllerFlag_R1)) speed *= 4.0f;
+    if (g_Controller0 && (g_Controller0->heldBtnFlags & ControllerFlag_L1)) speed *= 0.25f;
+    if (g_PcFreeCamSteady) speed *= FC_STEADY_MUL;
+    vspeed = speed * ((float)FC_VERT_SPEED / (float)FC_MOVE_SPEED);
 
-    sinY = Math_Sin(g_DebugCamAngleY);
-    cosY = Math_Cos(g_DebugCamAngleY);
-    /* Fly along the view direction: forward carries the pitch too. */
-    fwd  = (s32)((s64)spd * Math_Cos(g_DebugCamAngleX) >> 12);
-    dy   = (s32)((s64)spd * Math_Sin(g_DebugCamAngleX) >> 12);
+    /* Fly along the view direction: forward carries the pitch too (+Y is down). */
+    yawR   = (g_PcFreeCamSteady ? s_fcTrackYaw   : s_fcYaw)   * (6.2831853f / 4096.0f);
+    pitchR = (g_PcFreeCamSteady ? s_fcTrackPitch : s_fcPitch) * (6.2831853f / 4096.0f);
+    fwd[0]   = sinf(yawR) * cosf(pitchR);
+    fwd[1]   = sinf(pitchR);
+    fwd[2]   = cosf(yawR) * cosf(pitchR);
+    right[0] = cosf(yawR);
+    right[1] = 0.0f;
+    right[2] = -sinf(yawR);
 
-    if (ks[SDL_SCANCODE_W]) {
-        g_DebugCamPos.vx += (s32)((s64)fwd * sinY >> 12);
-        g_DebugCamPos.vz += (s32)((s64)fwd * cosY >> 12);
-        g_DebugCamPos.vy += dy;
-    }
-    if (ks[SDL_SCANCODE_S]) {
-        g_DebugCamPos.vx -= (s32)((s64)fwd * sinY >> 12);
-        g_DebugCamPos.vz -= (s32)((s64)fwd * cosY >> 12);
-        g_DebugCamPos.vy -= dy;
-    }
-    if (ks[SDL_SCANCODE_A]) {
-        g_DebugCamPos.vx -= (s32)((s64)spd * cosY >> 12);
-        g_DebugCamPos.vz += (s32)((s64)spd * sinY >> 12);
-    }
-    if (ks[SDL_SCANCODE_D]) {
-        g_DebugCamPos.vx += (s32)((s64)spd * cosY >> 12);
-        g_DebugCamPos.vz -= (s32)((s64)spd * sinY >> 12);
-    }
-    if (ks[SDL_SCANCODE_SPACE]) g_DebugCamPos.vy -= vspd; /* PSX +Y is down */
-    if (ks[SDL_SCANCODE_C])     g_DebugCamPos.vy += vspd;
-
-    /* Controller move (left stick) + R2/L2 vertical. Left stick maps to the
-     * WASD plane: up = forward along the view (pitch carried, like W), right =
-     * strafe (like D); scaled by deflection so a light push creeps. */
-    if (g_Controller0)
     {
-        s32 lx = (s32)g_Controller0->analogController.leftX - 128;
-        s32 ly = (s32)g_Controller0->analogController.leftY - 128;
-        if (lx > -FC_STICK_DEADZONE && lx < FC_STICK_DEADZONE) lx = 0;
-        if (ly > -FC_STICK_DEADZONE && ly < FC_STICK_DEADZONE) ly = 0;
-        if (lx != 0 || ly != 0)
+        float f = (float)((ks[SDL_SCANCODE_W] != 0) - (ks[SDL_SCANCODE_S] != 0));
+        float r = (float)((ks[SDL_SCANCODE_D] != 0) - (ks[SDL_SCANCODE_A] != 0));
+        vert = (float)(((ks[SDL_SCANCODE_Q] || ks[SDL_SCANCODE_C]) != 0) - (ks[SDL_SCANCODE_E] != 0));
+
+        /* Controller move (left stick) + R2/L2 vertical, scaled by deflection
+         * so a light push creeps. Stick up (ly<0) = forward. */
+        if (g_Controller0)
         {
-            /* fwd/dy carry the pitch (set above from spd); scale by stick
-             * deflection over 128. Stick up (ly<0) = forward. */
-            s32 fwdAmt = (s32)((s64)fwd  * -ly / 128);
-            s32 vyAmt  = (s32)((s64)dy   * -ly / 128);
-            s32 strAmt = (s32)((s64)spd  *  lx / 128);
-            g_DebugCamPos.vx += (s32)((s64)fwdAmt * sinY >> 12) + (s32)((s64)strAmt * cosY >> 12);
-            g_DebugCamPos.vz += (s32)((s64)fwdAmt * cosY >> 12) - (s32)((s64)strAmt * sinY >> 12);
-            g_DebugCamPos.vy += vyAmt;
+            s32 lx = (s32)g_Controller0->analogController.leftX - 128;
+            s32 ly = (s32)g_Controller0->analogController.leftY - 128;
+            if (lx > -FC_STICK_DEADZONE && lx < FC_STICK_DEADZONE) lx = 0;
+            if (ly > -FC_STICK_DEADZONE && ly < FC_STICK_DEADZONE) ly = 0;
+            f += (float)-ly / 128.0f;
+            r += (float)lx / 128.0f;
+            if (g_Controller0->heldBtnFlags & ControllerFlag_R2) vert -= 1.0f;
+            if (g_Controller0->heldBtnFlags & ControllerFlag_L2) vert += 1.0f;
         }
-        /* R2 = up (Space), L2 = down (C). */
-        if (g_Controller0->heldBtnFlags & ControllerFlag_R2) g_DebugCamPos.vy -= vspd;
-        if (g_Controller0->heldBtnFlags & ControllerFlag_L2) g_DebugCamPos.vy += vspd;
+        for (i = 0; i < 3; i++)
+            wish[i] = fwd[i] * f + right[i] * r;
+        moving = (f != 0.0f || r != 0.0f || vert != 0.0f);
     }
+    for (i = 0; i < 3; i++)
+        target[i] = wish[i] * speed;
+    target[1] += vert * vspeed;
+
+    /* Cruise holds the last velocity; any move input re-aims it. */
+    if (g_PcFreeCamCruise) {
+        if (moving)
+            memcpy(s_fcCruiseVel, target, sizeof(target));
+        memcpy(target, s_fcCruiseVel, sizeof(target));
+    }
+
+    k = (dt > 0.0f) ? 1.0f - expf(-dt / (g_PcFreeCamSteady ? FC_EASE_STEADY : FC_EASE_MOVE)) : 0.0f;
+    for (i = 0; i < 3; i++)
+        s_fcVel[i] += (target[i] - s_fcVel[i]) * k;
+    g_DebugCamPos.vx += (s32)(s_fcVel[0] * dt);
+    g_DebugCamPos.vy += (s32)(s_fcVel[1] * dt);
+    g_DebugCamPos.vz += (s32)(s_fcVel[2] * dt);
 }
 
 static void Pc_FreeCam_Apply(void)
@@ -1421,11 +1521,10 @@ static void Pc_FreeCam_Apply(void)
     s32 cosY    = Math_Cos(g_DebugCamAngleY);
     s32 forward = (s32)((s64)20480 * Math_Cos(g_DebugCamAngleX) >> 12);
 
-    /* Harry rides along a little behind the camera (horizontally; his height
-     * stays the ground's): the world streams, and the whole-map near cells
-     * centre, around his position, so a pinned Harry left the camera flying
-     * over unloaded or far-path geometry. */
-    if (g_GameWork.gameState == GameState_InGame)
+    /* Follow mode: Harry rides a little behind the camera (horizontally; his
+     * height stays the ground's), so the world streams and the whole-map near
+     * cells centre around where the camera is. */
+    if (g_PcFreeCamFollow && g_GameWork.gameState == GameState_InGame)
     {
         g_SysWork.playerWork.player.position.vx = g_DebugCamPos.vx - (s32)((s64)FC_HARRY_BEHIND * sinY >> 12);
         g_SysWork.playerWork.player.position.vz = g_DebugCamPos.vz - (s32)((s64)FC_HARRY_BEHIND * cosY >> 12);
@@ -2260,6 +2359,14 @@ void MainLoop(void) // 0x80032EE0
         /* Free camera: Harry is frozen in place and W/A/S/D fly the camera
          * (the alt-cam scheme walks with the same keys), so none of his pad
          * input may reach the game. */
+        /* A save load or map load ends the free camera. DebugCamera_Update only
+         * runs in the world update, so its own off-path never sees these
+         * states, and the camera (with Harry riding it) survived the reload. */
+        if (g_DebugCamEnabled &&
+            (g_GameWork.gameState == GameState_MainMenu || g_GameWork.gameState == GameState_LoadSavegameScreen ||
+             g_GameWork.gameState == GameState_MainLoadScreen || g_GameWork.gameState == GameState_AutoLoadSavegame ||
+             g_GameWork.gameState == GameState_LoadMapScreen))
+            Pc_FreeCam_Set(0);
         {
             extern int g_PcQuickOptionsActive;
             if (g_DebugCamEnabled && !g_PcQuickOptionsActive) {

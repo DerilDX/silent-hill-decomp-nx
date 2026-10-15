@@ -2085,6 +2085,9 @@ void DbgOverlay_Render(void)
      * it would never run during normal gameplay. */
     { extern void Pc_RaToast_Draw(void); Pc_RaToast_Draw(); }
 
+    /* Free camera controls panel, same self-contained-GL arrangement. */
+    { extern void Pc_FreeCamHud_Draw(void); Pc_FreeCamHud_Draw(); }
+
     /* Main-menu achievement browser — same self-contained-GL arrangement as the
      * toast above, and drawn after it so an unlock popup stays on top. */
     { extern void Pc_RaBrowser_Draw(void); Pc_RaBrowser_Draw(); }
