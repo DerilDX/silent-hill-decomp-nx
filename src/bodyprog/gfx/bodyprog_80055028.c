@@ -5646,6 +5646,12 @@ typedef struct
     PcFarPrim*         prims;
     s32                count;
     u32                lightKey;
+    /* GPU copy (wholemap gpu): mesh handle, its texture ranges, and the local
+     * origin its positions are relative to (float precision stays at cell scale). */
+    u32                gpu;
+    PsyX_FarMeshRange* ranges;
+    s32                rangeCount;
+    float              orgX, orgZ;
 } PcFarChunk;
 
 #define PC_FAR_CHUNK_MAX      256
@@ -5664,6 +5670,12 @@ static const void* s_pcFarMapKey;
 
 /* Console `wholemap fast 0|1`. */
 int g_PcWholeMapFast = 1;
+/* Console `wholemap gpu 0|1`: far chunks drawn from GPU-resident meshes
+ * (projected, culled and fogged in the shader) instead of per-frame CPU quads. */
+int g_PcWholeMapGpu = 1;
+static double s_pcFarEye[3];
+static double s_pcFarRd[9], s_pcFarTd[3], s_pcFarCamd[3];
+static s32    s_pcFarGpuQueued;
 
 /* [WMPROBE] far-path tallies for the probe frame: where the far prims go, and
  * which models the cache refuses (those stay on the PSX path every frame). */
@@ -5758,6 +5770,175 @@ static void Pc_FarVertexColor(const CVECTOR* tint, u8 inten, u8* out)
     out[1] = c.g;
     out[2] = c.b;
     out[3] = 0;
+}
+
+static u32 Pc_FarPrimKey(const PcFarPrim* fp)
+{
+    return ((u32)fp->prim->field_6.bits.field_6_0 << 16) | (u16)fp->prim->field_2;
+}
+
+static const PcFarPrim* s_pcFarSortPrims;
+
+static int Pc_FarPrimKeyCmp(const void* a, const void* b)
+{
+    const u32 ka = Pc_FarPrimKey(&s_pcFarSortPrims[*(const s32*)a]);
+    const u32 kb = Pc_FarPrimKey(&s_pcFarSortPrims[*(const s32*)b]);
+    if (ka != kb)
+        return (ka < kb) ? -1 : 1;
+    return *(const s32*)a - *(const s32*)b;
+}
+
+static void Pc_FarPlane(const float* a, const float* b, const float* c, float* out)
+{
+    const float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const float vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    float       nx = uy * vz - uz * vy;
+    float       ny = uz * vx - ux * vz;
+    float       nz = ux * vy - uy * vx;
+    const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+
+    /* Unit length keeps the shader's plane-distance sign exact at town scale; a
+     * zero normal (a triangle's collapsed second half) reads as "not front". */
+    if (len > 0.0f)
+    {
+        nx /= len;
+        ny /= len;
+        nz /= len;
+    }
+    out[0] = nx;
+    out[1] = ny;
+    out[2] = nz;
+    out[3] = nx * a[0] + ny * a[1] + nz * a[2];
+}
+
+/* One upload per (re)build: quads sorted by texture so each texture is one
+ * index range, 4 vertices + 6 indices each, in the order EmitFarChain used. */
+static void Pc_FarChunkUploadGpu(PcFarChunk* fc)
+{
+    PsyX_FarMeshVertex* verts;
+    u32*                idx;
+    s32*                order;
+    s32                 i;
+    s32                 r = 0;
+
+    free(fc->ranges);
+    fc->ranges     = NULL;
+    fc->rangeCount = 0;
+    if (fc->count <= 0)
+        return;
+
+    verts      = (PsyX_FarMeshVertex*)calloc((size_t)fc->count * 4, sizeof(PsyX_FarMeshVertex));
+    idx        = (u32*)malloc(sizeof(u32) * 6 * (size_t)fc->count);
+    order      = (s32*)malloc(sizeof(s32) * (size_t)fc->count);
+    fc->ranges = (PsyX_FarMeshRange*)malloc(sizeof(PsyX_FarMeshRange) * (size_t)fc->count);
+    if (verts == NULL || idx == NULL || order == NULL || fc->ranges == NULL)
+    {
+        free(verts);
+        free(idx);
+        free(order);
+        free(fc->ranges);
+        fc->ranges = NULL;
+        return;
+    }
+
+    for (i = 0; i < fc->count; i++)
+        order[i] = i;
+    s_pcFarSortPrims = fc->prims;
+    qsort(order, (size_t)fc->count, sizeof(s32), Pc_FarPrimKeyCmp);
+
+    for (i = 0; i < fc->count; i++)
+    {
+        const PcFarPrim*    fp  = &fc->prims[order[i]];
+        const s_Primitive*  p   = fp->prim;
+        PsyX_FarMeshVertex* v   = &verts[i * 4];
+        const u32           key = Pc_FarPrimKey(fp);
+        const u8*           uvs[4];
+        float               pos[4][3];
+        float               mn[3], mx[3];
+        float               pl0[4], pl1[4];
+        u8                  ulo, uhi, vlo, vhi;
+        s32                 k, c;
+
+        uvs[0] = (const u8*)&p->field_0;
+        uvs[1] = (const u8*)&p->field_4;
+        uvs[2] = (const u8*)&p->field_8;
+        uvs[3] = (const u8*)&p->field_A;
+        ulo = uhi = uvs[0][0];
+        vlo = vhi = uvs[0][1];
+        for (k = 0; k < 4; k++)
+        {
+            pos[k][0] = fp->wx[k] - fc->orgX;
+            pos[k][1] = fp->wy[k];
+            pos[k][2] = fp->wz[k] - fc->orgZ;
+            if (uvs[k][0] < ulo) ulo = uvs[k][0];
+            if (uvs[k][0] > uhi) uhi = uvs[k][0];
+            if (uvs[k][1] < vlo) vlo = uvs[k][1];
+            if (uvs[k][1] > vhi) vhi = uvs[k][1];
+        }
+        for (c = 0; c < 3; c++)
+        {
+            mn[c] = mx[c] = pos[0][c];
+            for (k = 1; k < 4; k++)
+            {
+                if (pos[k][c] < mn[c]) mn[c] = pos[k][c];
+                if (pos[k][c] > mx[c]) mx[c] = pos[k][c];
+            }
+        }
+        /* NCLIP of the PSX quad: tri 0,1,2 and tri 1,2,3 (the stock n312). */
+        Pc_FarPlane(pos[0], pos[1], pos[2], pl0);
+        Pc_FarPlane(pos[1], pos[2], pos[3], pl1);
+
+        for (k = 0; k < 4; k++)
+        {
+            v[k].page   = (short)(p->field_6.bits.field_6_0 & 0x1F);
+            v[k].clut   = (short)p->field_2;
+            v[k].u      = uvs[k][0];
+            v[k].v      = uvs[k][1];
+            v[k].bright = 2;
+            v[k].dither = 1; /* world DRAWENV dtd (main.c) */
+            v[k].r      = fp->rgb[k][0];
+            v[k].g      = fp->rgb[k][1];
+            v[k].b      = fp->rgb[k][2];
+            v[k].a      = 255;
+            v[k].p1     = 1;
+            v[k].px     = pos[k][0];
+            v[k].py     = pos[k][1];
+            v[k].pz     = pos[k][2];
+            v[k].cx     = (mn[0] + mx[0]) * 0.5f;
+            v[k].cy     = (mn[1] + mx[1]) * 0.5f;
+            v[k].cz     = (mn[2] + mx[2]) * 0.5f;
+            v[k].hx     = (mx[0] - mn[0]) * 0.5f;
+            v[k].hy     = (mx[1] - mn[1]) * 0.5f;
+            v[k].hz     = (mx[2] - mn[2]) * 0.5f;
+            v[k].ulo    = ulo;
+            v[k].vlo    = vlo;
+            v[k].uhi    = uhi;
+            v[k].vhi    = vhi;
+            memcpy(v[k].plane0, pl0, sizeof(pl0));
+            memcpy(v[k].plane1, pl1, sizeof(pl1));
+        }
+        idx[i * 6 + 0] = (u32)(i * 4 + 0);
+        idx[i * 6 + 1] = (u32)(i * 4 + 1);
+        idx[i * 6 + 2] = (u32)(i * 4 + 2);
+        idx[i * 6 + 3] = (u32)(i * 4 + 1);
+        idx[i * 6 + 4] = (u32)(i * 4 + 2);
+        idx[i * 6 + 5] = (u32)(i * 4 + 3);
+
+        if (r == 0 || ((u32)fc->ranges[r - 1].tpage << 16 | fc->ranges[r - 1].clut) != key)
+        {
+            fc->ranges[r].tpage      = (u16)(key >> 16);
+            fc->ranges[r].clut       = (u16)key;
+            fc->ranges[r].firstIndex = i * 6;
+            fc->ranges[r].indexCount = 0;
+            r++;
+        }
+        fc->ranges[r - 1].indexCount += 6;
+    }
+    fc->rangeCount = r;
+    fc->gpu        = PsyX_FarMeshUpload(fc->gpu, verts, fc->count * 4, idx, fc->count * 6);
+    free(verts);
+    free(idx);
+    free(order);
 }
 
 static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
@@ -5888,6 +6069,10 @@ static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
         }
     }
     fc->count = n;
+    fc->orgX  = (float)cellBoundX;
+    fc->orgZ  = (float)cellBoundZ;
+    if (g_PcWholeMapGpu)
+        Pc_FarChunkUploadGpu(fc);
 }
 
 static PcFarChunk* Pc_FarChunkFind(const s_IpdHeader* ipd)
@@ -5901,10 +6086,7 @@ static PcFarChunk* Pc_FarChunkFind(const s_IpdHeader* ipd)
     }
     if (s_pcFarChunkCount >= PC_FAR_CHUNK_MAX)
         return NULL;
-    s_pcFarChunks[s_pcFarChunkCount].ipd      = NULL;
-    s_pcFarChunks[s_pcFarChunkCount].prims    = NULL;
-    s_pcFarChunks[s_pcFarChunkCount].count    = 0;
-    s_pcFarChunks[s_pcFarChunkCount].lightKey = 0;
+    memset(&s_pcFarChunks[s_pcFarChunkCount], 0, sizeof(s_pcFarChunks[0]));
     return &s_pcFarChunks[s_pcFarChunkCount++];
 }
 
@@ -5918,7 +6100,11 @@ void Pc_FarFrameBegin(s32 arg, const void* mapKey)
     if (s_pcFarMapKey != mapKey)
     {
         for (i = 0; i < s_pcFarChunkCount; i++)
+        {
             free(s_pcFarChunks[i].prims);
+            free(s_pcFarChunks[i].ranges);
+            PsyX_FarMeshFree(s_pcFarChunks[i].gpu);
+        }
         s_pcFarChunkCount = 0;
         s_pcFarMapKey     = mapKey;
     }
@@ -5952,6 +6138,51 @@ void Pc_FarFrameBegin(s32 arg, const void* mapKey)
         if (s_pcFarHalfW < psxHalfW)
             s_pcFarHalfW = psxHalfW;
         s_pcFarHalfH = (float)(g_GameWork.gsScreenHeight >> 1) + 64.0f;
+    }
+
+    s_pcFarGpuQueued = 0;
+    {
+        PsyX_FarMeshFrame f;
+        double            inv[9];
+        double            det;
+
+        for (i = 0; i < 9; i++)
+        {
+            s_pcFarRd[i] = (double)VbWvsMatrix.m[i / 3][i % 3] / 4096.0;
+            f.rot[i]     = (float)s_pcFarRd[i];
+        }
+        for (i = 0; i < 3; i++)
+        {
+            s_pcFarTd[i]   = (double)VbWvsMatrix.t[i];
+            s_pcFarCamd[i] = (double)D_800C3868.t[i];
+        }
+        /* The eye is where the view transform R*(w - cam) + T is zero. */
+        inv[0] = s_pcFarRd[4] * s_pcFarRd[8] - s_pcFarRd[5] * s_pcFarRd[7];
+        inv[1] = s_pcFarRd[2] * s_pcFarRd[7] - s_pcFarRd[1] * s_pcFarRd[8];
+        inv[2] = s_pcFarRd[1] * s_pcFarRd[5] - s_pcFarRd[2] * s_pcFarRd[4];
+        inv[3] = s_pcFarRd[5] * s_pcFarRd[6] - s_pcFarRd[3] * s_pcFarRd[8];
+        inv[4] = s_pcFarRd[0] * s_pcFarRd[8] - s_pcFarRd[2] * s_pcFarRd[6];
+        inv[5] = s_pcFarRd[2] * s_pcFarRd[3] - s_pcFarRd[0] * s_pcFarRd[5];
+        inv[6] = s_pcFarRd[3] * s_pcFarRd[7] - s_pcFarRd[4] * s_pcFarRd[6];
+        inv[7] = s_pcFarRd[1] * s_pcFarRd[6] - s_pcFarRd[0] * s_pcFarRd[7];
+        inv[8] = s_pcFarRd[0] * s_pcFarRd[4] - s_pcFarRd[1] * s_pcFarRd[3];
+        det    = s_pcFarRd[0] * inv[0] + s_pcFarRd[1] * inv[3] + s_pcFarRd[2] * inv[6];
+        for (i = 0; i < 3; i++)
+        {
+            s_pcFarEye[i] = s_pcFarCamd[i];
+            if (det != 0.0)
+                s_pcFarEye[i] -= (inv[i * 3 + 0] * s_pcFarTd[0] + inv[i * 3 + 1] * s_pcFarTd[1] +
+                                  inv[i * 3 + 2] * s_pcFarTd[2]) / det;
+        }
+        f.h            = s_pcFarH;
+        f.ofsX         = s_pcFarOfx;
+        f.ofsY         = s_pcFarOfy;
+        f.detSign      = (det < 0.0) ? -1.0f : 1.0f;
+        f.fogOn        = g_WorldEnvWork.isFogEnabled;
+        f.fogShift     = g_WorldEnvWork.fog.depthShift;
+        f.fogIntensity = g_WorldEnvWork.fog.intensity;
+        memcpy(f.fogRamp, g_WorldEnvWork.fogRamp, sizeof(f.fogRamp));
+        PsyX_FarMeshFrameBegin(&f);
     }
 }
 
@@ -6030,6 +6261,33 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
     }
     if (fc->ipd != ipd)
         return 0;
+
+    if (g_PcWholeMapGpu)
+    {
+        float  base[3], eye[3];
+        double d[3];
+
+        if (fc->count <= 0)
+            return 1;
+        if (fc->gpu == 0)
+            Pc_FarChunkUploadGpu(fc);
+        if (fc->gpu == 0)
+            return 0;
+        d[0] = (double)fc->orgX - s_pcFarCamd[0];
+        d[1] = -s_pcFarCamd[1];
+        d[2] = (double)fc->orgZ - s_pcFarCamd[2];
+        for (i = 0; i < 3; i++)
+            base[i] = (float)(s_pcFarRd[i * 3 + 0] * d[0] + s_pcFarRd[i * 3 + 1] * d[1] +
+                              s_pcFarRd[i * 3 + 2] * d[2] + s_pcFarTd[i]);
+        eye[0] = (float)(s_pcFarEye[0] - (double)fc->orgX);
+        eye[1] = (float)s_pcFarEye[1];
+        eye[2] = (float)(s_pcFarEye[2] - (double)fc->orgZ);
+        PsyX_FarMeshQueue(fc->gpu, base, eye, fc->ranges, fc->rangeCount);
+        s_pcFarGpuQueued++;
+        if (g_PsxWholeMapProbe == 1)
+            s_pcFarPrbEmit += fc->count;
+        return 1;
+    }
 
     for (i = 0; i < fc->count; i++)
     {
@@ -6154,6 +6412,18 @@ void Pc_FarFrameEnd(GsOT* ot)
     s_pcFarPrbClip = s_pcFarPrbBack = s_pcFarPrbEmit = 0;
     s_pcFarPrbLit = s_pcFarPrbWide = 0;
     s_pcFarPrbB4[0] = s_pcFarPrbB4[1] = s_pcFarPrbB4[2] = s_pcFarPrbB4[3] = 0;
+
+    /* Farthest far-list slot: the town is drawn depth-tested before anything
+     * the far list or the OT buckets paint over it. */
+    if (s_pcFarGpuQueued > 0)
+    {
+        DR_PSYX_FARMESH* fm = (DR_PSYX_FARMESH*)GsOUT_PACKET_P;
+        setlen(fm, 2);
+        fm->code[0] = 0xB6000000;
+        fm->code[1] = 0;
+        addPrim(&s_pcFarOt[PC_FAR_OT_SIZE - 1], fm);
+        GsOUT_PACKET_P = (PACKET*)(fm + 1);
+    }
 
     for (i = 0; i < ORDERING_TABLE_SIZE; i++)
     {

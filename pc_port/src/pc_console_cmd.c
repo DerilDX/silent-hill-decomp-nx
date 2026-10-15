@@ -1800,6 +1800,22 @@ void Pc_ConsoleExec(const char* line)
             cprintf("whole map fast far path: %s", g_PcWholeMapFast ? "ON" : "OFF (all chunks through the PSX path)");
             return;
         }
+        if (strncmp(arg, "GPU", 3) == 0) {
+            extern int g_PcWholeMapGpu;
+            const char* v = arg + 3;
+            while (*v == ' ') v++;
+            g_PcWholeMapGpu = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PcWholeMapGpu);
+            cprintf("whole map GPU far meshes: %s", g_PcWholeMapGpu ? "ON" : "OFF (far quads built on the CPU)");
+            return;
+        }
+        if (strncmp(arg, "LAYER", 5) == 0) {
+            extern float g_PsxFarLayerK;
+            const char* v = arg + 5;
+            while (*v == ' ') v++;
+            if (*v) g_PsxFarLayerK = (float)atof(v);
+            cprintf("whole map far layer bias: %.4f (0 = none; default 0.0625)", g_PsxFarLayerK);
+            return;
+        }
         if (strncmp(arg, "DEPTH", 5) == 0 || strncmp(arg, "depth", 5) == 0) {
             extern int g_PsxWholeMapFarDepth;
             const char* v = arg + 5;
