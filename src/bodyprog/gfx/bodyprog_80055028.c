@@ -3062,10 +3062,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r0);
+#endif
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_10] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_14] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
@@ -3079,10 +3081,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r1);
+#endif
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_11] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_15] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
@@ -3096,10 +3100,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r2);
+#endif
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_12] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_16] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
@@ -3113,10 +3119,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r3);
+#endif
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_13] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_17] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
@@ -3483,10 +3491,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r0);
+#endif
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
@@ -3499,10 +3509,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r1);
+#endif
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
@@ -3515,10 +3527,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r2);
+#endif
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
@@ -3531,10 +3545,12 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r3);
+#endif
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
