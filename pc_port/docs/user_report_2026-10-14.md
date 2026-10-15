@@ -12,11 +12,11 @@ KNOWN (previously investigated, no PC fault found yet), NEW (not yet investigate
 | 3 | Audio | Lisa encounter FMV has no music; audio odd at the start of every FMV | FIXED (start) / OPEN (music) |
 | 4 | Cutscene | Sewer fence drop before Twinfeeler: fence falls first, then Harry | FIXED |
 | 5 | Enemies | Rompers hop over things they should not, sometimes out of view | KNOWN |
-| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | OPEN (needs screenshot) |
+| 6 | Render | Sewer water: distracting flashlight reflection, Classic mode too | OPEN (screenshot received, cause not found yet) |
 | 7 | Render | Projected shadows vanish in menus, pickups, doors, examine | FIXED |
-| 8 | Cutscene | Original pauses between dialogue lines gone; wants a launcher option | FIXED |
+| 8 | Cutscene | Original pauses between dialogue lines gone; wants a launcher option | FIXED (reworked as seek delay) |
 | 9 | Render | Incubator to Incubus switch effect looks broken | DROPPED (effect shown from the wrong angle; user call) |
-| 10 | Render | After final boss: Harry runs on black floor; town shot has no road | OPEN (needs log) |
+| 10 | Render | After final boss: Harry runs on black floor; town shot has no road | FIXED |
 
 ## 1. Split Head melee does no damage (FIXED)
 
@@ -137,3 +137,35 @@ Candidates, in order:
 
 What settles it in one step: a SilentHill.log from a run through the ending (grep for
 `WOBJ`, `IPD-INIT` and `playing FMV`) plus a screenshot of the running segment.
+
+## 10, revisited (FIXED 2026-10-15, commit 2e239d3c4)
+
+The ending-session log settled it: cell (2,-4), the arena chunk that holds the run floor
+and the town road, sat in chunk slot 1, which still pointed into the shared PSX RAM slice
+under FS_BUFFER_18/20. The ending streams its DMS files there, so the chunk bytes became
+garbage, every reformat retry failed (`[IPDREF] HIT-MISMATCH` each frame, `isLoaded=0`),
+and the three world objects reported `find-fail`. Collision was gone too, which is why
+Harry seemed to run on nothing. Every chunk slot now owns a heap buffer.
+
+## 8, revisited (FIXED 2026-10-15, commit b8defebbb)
+
+The end-of-line hold was the wrong model: it moved the page advance, which is why it
+needed a caveat. The PSX pause is a CD seek at the START of each voice line: the subtitle
+appears, the voice begins a beat later, and the scene runs on its authored timers. The
+setting now delays only the start of playback; subtitle and scene timing are untouched.
+Launcher presets: Off / Short / Normal / Long = 0 / 150 / 300 / 600 ms, Normal default.
+
+## 6, revisited (OPEN)
+
+Screenshot received. The circular reflection is the water.c octagon: four prims with
+vertex colours of 4 to 24 out of 255, which on the PSX is almost invisible over black
+water (the user's PSX reference shows only the soft purple feedback patch). On the PC it
+renders as three flat concentric bands at roughly 60 to 80 brightness, so something in the
+PC path brightens untextured gouraud prims that carry view-space depth, or loses the
+gouraud gradient. Not resolved by reading; needs a rendered measurement (VOIDPROBE-style
+dump of that frame) before changing anything.
+
+## New: model flicker and Cybil shrinking for a frame in the ending
+
+Reported with the ending replay. No lines in the log point at it (no [COORD] guard hits).
+Not investigated yet.
