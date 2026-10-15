@@ -1,5 +1,16 @@
 # Silent Hill PC Port — Changelog
 
+## beta-2026.10.13.1 -- 2026-10-13
+- Mostly just fixes some issues with languages, including them not applying properly. This time the commit summaries are detailed enough that they should be self explanatory.
+
+Commit summaries:
+- Brightness screen: rows moved up so CLASSIC clears the reference bar
+- Language row: both Englishes named by release, item text cleared on every switch
+- Menus filter: Cyrillic glyphs stay point-sampled like kanji
+- Launcher: XA tool names its Englishes by release
+- Spanish (and every language) reaches dialog and examine text
+- Support for HD Cyrillic font at gamedata/load/1ST/FONT16_RU.png, with a template and guide
+
 ## beta-2026.10.12.1 -- 2026-10-12
 - Fixed the Konami and KCET logos fading in separately from their white backgrounds, they now fade in together like the original
 - All three versions of the game (USA, PAL, and Japanese) can now be played in any supported language. Pick it with the new Game Language option in the launcher, which is set to Automatic by default and uses the disc's own language. It can also be changed from the Language option in the options menu, which is now on every version and works mid-game on USA and Japanese discs

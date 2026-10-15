@@ -773,7 +773,7 @@ partial class Form1
             this.comboLineGap.Items.AddRange(new object[] {
             "Off",
             "Short",
-            "Medium",
+            "Normal",
             "Long"});
             this.comboLineGap.Location = new System.Drawing.Point(94, 575);
             this.comboLineGap.Name = "comboLineGap";

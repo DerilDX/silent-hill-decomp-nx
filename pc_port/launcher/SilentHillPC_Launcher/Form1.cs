@@ -857,10 +857,10 @@ public partial class Form1 : Form
         Set(comboFlash, flashTip);
 
         const string lineGapTip =
-            "Minimum pause after each spoken line in cutscenes.\n" +
-            "The PSX paused while the CD seeked to the next line; the PC loads instantly.\n" +
-            "Off runs lines together. Short is the default. Medium and Long are closer\n" +
-            "to the original pacing but can push voices late in tightly timed scenes.";
+            "Emulates the PlayStation's CD seek before each spoken line in cutscenes.\n" +
+            "On the console a voice line started a beat after its subtitle while the disc\n" +
+            "sought the clip; the PC loads instantly. Scene and subtitle timing are unchanged,\n" +
+            "only the voice starts later. Normal is the default.";
         Set(lblLineGap, lineGapTip);
         Set(comboLineGap, lineGapTip);
 
@@ -1559,14 +1559,15 @@ public partial class Form1 : Form
     // Dropdown index -> audio_output config id (matches the game's parser).
     private static readonly string[] AudioOutputIds = { "auto", "stereo", "quad", "51", "71", "hrtf" };
 
-    // Dialog Pause dropdown -> cutscene_line_gap_ms. 300 is the engine default.
-    private static readonly int[] LineGapValues = { 0, 300, 700, 1200 };
-    private int _lineGapLoadedIdx = 1;
+    // Dialog Pause dropdown -> cutscene_line_gap_ms (CD seek before each voice
+    // line). 300 is the engine default.
+    private static readonly int[] LineGapValues = { 0, 150, 300, 600 };
+    private int _lineGapLoadedIdx = 2;
     private static int LineGapIndexFor(int ms)
     {
         if (ms <= 0)   return 0;
-        if (ms <= 450) return 1;
-        if (ms <= 900) return 2;
+        if (ms <= 220) return 1;
+        if (ms <= 450) return 2;
         return 3;
     }
 

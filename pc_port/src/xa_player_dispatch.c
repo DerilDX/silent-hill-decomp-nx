@@ -9,7 +9,6 @@ void PcLegacyXa_Update(void);
 void PcLegacyXa_SetVolume(int16_t, int16_t);
 void PcLegacyXa_SetPauseHold(int);
 int PcLegacyXa_IsVoiceAudioDraining(void);
-int PcLegacyXa_VoiceGapHold(void);
 void PcLegacyXa_SetMasterVolume(float);
 int PcLegacyXa_PlayFile(const char*);
 void PcLegacyXa_StopFile(void);
@@ -21,7 +20,6 @@ void PcSoftwareXa_Update(void);
 void PcSoftwareXa_SetVolume(int16_t, int16_t);
 void PcSoftwareXa_SetPauseHold(int);
 int PcSoftwareXa_IsVoiceAudioDraining(void);
-int PcSoftwareXa_VoiceGapHold(void);
 void PcSoftwareXa_SetMasterVolume(float);
 int PcSoftwareXa_PlayFile(const char*);
 void PcSoftwareXa_StopFile(void);
@@ -60,11 +58,4 @@ int Xa_IsVoiceAudioDraining(void)
     return PcAudioConfig_UsesSoftwareSpu()
         ? PcSoftwareXa_IsVoiceAudioDraining()
         : PcLegacyXa_IsVoiceAudioDraining();
-}
-
-int Xa_VoiceGapHold(void)
-{
-    return PcAudioConfig_UsesSoftwareSpu()
-        ? PcSoftwareXa_VoiceGapHold()
-        : PcLegacyXa_VoiceGapHold();
 }

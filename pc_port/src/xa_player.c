@@ -30,23 +30,15 @@ static Uint32 s_xaPrevFireMs  = 0;
  * signal until the PSX watchdog moment (play start + (length+32)/60 s). */
 static Uint32 s_xaPadEndMs = 0;
 
-/* PSX CD-seek inter-line gap. The pause between cutscene voice lines came from
- * BOTH the authored ~J page timers (tuned longer than the voice) AND the CD
- * seek to the next clip. PC honors the ~J timers but loads instantly, so lines
- * whose ~J timer ~= the voice length run together ("talking over each other").
- * Hold the voiced page-advance an extra g_PcConfig.cutsceneLineGapMs past the
- * REAL audio end — set at Play (audio-end estimate + gap). Consumed only by the
- * cutscene page-advance gate (map_msg_display.c pcVoiceHold), and only as a
- * MINIMUM there (the page still requires mapMsgTimer==0), so a line that already
- * has an authored gap >= this is untouched — it does NOT reintroduce the
- * d9a34e548 blanket-pad Flauros desync (that pad extended EVERY line). */
-static Uint32 s_xaVoiceGapEndMs = 0;
-
-int Xa_VoiceGapHold(void)
-{
-    return g_PcConfig.cutsceneLineGapMs > 0 && s_xaVoiceGapEndMs != 0 &&
-           SDL_GetTicks() < s_xaVoiceGapEndMs;
-}
+/* PSX CD seek before a voice line. On the console every XA clip started only
+ * after the drive sought to it, so each voice began a beat after its subtitle
+ * while the scene kept running on its authored timers. The PC loads instantly
+ * and the voice landed on the subtitle, which is the "pauses between lines
+ * are gone" report. Hold the START of playback by cutscene_line_gap_ms; the
+ * page timers and the drain gate are untouched, so nothing shifts except where
+ * the voice sits inside its page. (The earlier end-of-line hold moved the page
+ * advance instead, which is why it could drift tightly timed scenes.) */
+static Uint32 s_xaSeekEndMs = 0;
 
 /* Console-freeze hold: the console zeroes game dt but OpenAL kept playing,
  * running the voice ahead of the frozen scene. While held, the source is
@@ -534,7 +526,7 @@ void XaPlayer_Play(uint16_t xaIdx) {
             s_xaPrevFireMs    = nowMs;
             s_xaPlayStartMs   = nowMs;
             s_xaPadEndMs      = nowMs + (((uint32_t)item->audioLength_8_bits + 32u) * 1000u) / 60u;
-            s_xaVoiceGapEndMs = nowMs + (wavMs > origMs ? wavMs : origMs) + (uint32_t)g_PcConfig.cutsceneLineGapMs;
+            s_xaSeekEndMs     = g_PcConfig.cutsceneLineGapMs > 0 ? nowMs + (Uint32)g_PcConfig.cutsceneLineGapMs : 0;
 
             SH_DBG("[XA] override xa_%04u.wav %s %dHz %ums (authored %ums)",
                    (unsigned)xaIdx, ovStereo ? "stereo" : "mono", ovRate, wavMs, origMs);
@@ -593,10 +585,7 @@ void XaPlayer_Play(uint16_t xaIdx) {
         s_xaPrevFireMs  = nowMs;
         s_xaPlayStartMs = nowMs;
         s_xaPadEndMs    = nowMs + (((uint32_t)item->audioLength_8_bits + 32u) * 1000u) / 60u;
-        /* Real audio end (sample-accurate expMs) + the configured inter-line gap;
-         * the cutscene page-advance holds until here so the next line's voice
-         * doesn't fire back-to-back. */
-        s_xaVoiceGapEndMs = nowMs + expMs + (uint32_t)g_PcConfig.cutsceneLineGapMs;
+        s_xaSeekEndMs   = g_PcConfig.cutsceneLineGapMs > 0 ? nowMs + (Uint32)g_PcConfig.cutsceneLineGapMs : 0;
     }
     SH_DBG("[XA] Play xaIdx=%u file=%u sector=%u sectors=%u %s %dHz filter=(%u,%u)",
            xaIdx, fileIdx, (uint32_t)item->sector_4_bits, numSectors,
@@ -687,7 +676,7 @@ int XaPlayer_PlayFile(const char* path)
     s_xaPrevFireMs    = nowMs;
     s_xaPlayStartMs   = nowMs;
     s_xaPadEndMs      = nowMs + wavMs;
-    s_xaVoiceGapEndMs = nowMs + wavMs + (uint32_t)g_PcConfig.cutsceneLineGapMs;
+    s_xaSeekEndMs     = g_PcConfig.cutsceneLineGapMs > 0 ? nowMs + (Uint32)g_PcConfig.cutsceneLineGapMs : 0;
 
     SH_DBG("[XA] file %s %s %dHz %ums", path, stereo ? "stereo" : "mono", rate, wavMs);
     XaPlayer_EnsureAlReady();
@@ -818,6 +807,16 @@ void XaPlayer_Update(void) {
     if (s_xaPauseHold) return;
     if (!g_XaPlayer.isPlaying) return;
 
+    if (g_XaPlayer.needsInitialFill && s_xaSeekEndMs != 0) {
+        Uint32 nowMs = SDL_GetTicks();
+        if ((Sint32)(nowMs - s_xaSeekEndMs) < 0) return;
+        /* The seek is over: the clocks were stamped at Play, so move them
+         * to the real start of audio. */
+        s_xaPadEndMs   += nowMs - s_xaPlayStartMs;
+        s_xaPlayStartMs = nowMs;
+        s_xaSeekEndMs   = 0;
+    }
+
     /* On first Update after Play: queue all buffers fresh (none are
      * processed because nothing has been queued or played yet). */
     if (g_XaPlayer.needsInitialFill) {
@@ -925,6 +924,7 @@ void XaPlayer_SetPauseHold(int hold) {
         s_xaPadEndMs    += heldMs;
         s_xaPlayStartMs += heldMs;
         s_xaPrevFireMs  += heldMs;
+        if (s_xaSeekEndMs != 0) s_xaSeekEndMs += heldMs;
         if (g_XaPlayer.isPlaying && g_XaPlayer.alSource) {
             ALint st = 0;
             alGetSourcei(g_XaPlayer.alSource, AL_SOURCE_STATE, &st);
