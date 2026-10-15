@@ -1,6 +1,31 @@
 # Whole-Map Far Projection — Task Spec (dedicated session)
 
-Status: **v4 DEPTH FIX 2026-07-16 (awaiting in-game test).**
+Status: **v5 FAR-BAND Z-BUFFER 2026-10-15 (console `wholemap`, awaiting in-game test).**
+
+## v5 (2026-10-15): why v4 still stacked blocks and trees
+
+v4 gave saturated far polys a real depth, but under PGXP opaque world geometry
+draws **GL_ALWAYS** (the coplanar painter, `g_PsxWorldDepthAlways`), so world
+depth was never compared: far world-vs-world order stayed submission order. Two
+drawers also never reported any SZ, so their prims took the last OT bucket's
+seed depth (~64u) and covered the whole far town: **billboards** (the "spammed
+trees") and **lit world models** (`func_8005AC50`).
+
+Fix (main 5b887aa22, PsyCross c011c70):
+- `PsyX_SetNextPrimSz` tags a FLAT prim **far** when `g_PsxWholeMapFar` and its
+  max SZ is at/past the last bucket (`2047 << (arg3+2)`). Far FLAT prims get
+  `SPLIT_DEPTH_WORLD_FAR`, which draws GL_LEQUAL on the per-vertex PGXP depth
+  (`_p1` path, linear over 2^18 SZ = 1024u). Near world keeps the painter;
+  the far bucket draws first, so near-over-far is ordinary painter order.
+- Billboards arm `PsyX_SetNextPrimDepthSz(true SZ)` (EXACT kind, unclamped).
+- Lit world models arm their per-vertex `screenZ_168` SZ inside the chunk loop
+  only (`SH_WHOLEMAP_LIT_SZ`), so characters keep stock depth.
+- Console `wholemap [0|1]`: live, unsaved; forces PGXP on while active (the
+  per-vertex depth only exists under PGXP) and restores it on off.
+
+Known residual: a near poly entirely inside the OT range can still paint over a
+far poly that straddles into the near band (ordinary PSX painter class).
+
 
 ## v4 (2026-07-16): the ACTUAL root cause, proven from the disc
 
