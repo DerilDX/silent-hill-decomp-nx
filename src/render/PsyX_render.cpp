@@ -2532,7 +2532,11 @@ int g_PsxFogToBlack = 0;
 	 * are byte-identical. */\
 	"		if (u_untextured > 0) flAlbedo = fragColor.rgb;\n"\
 	/* Two flashlight styles, chosen by the UNIFORM u_flStyle (uniform control flow, so derivative use inside the branch is well-defined). 1 = CLASSIC: PSX-calibrated orientation-independent overlay -- no face normals, func_80057658-derived falloff, eased wide cone, 0.49 base dim. 0 = MODERN: stylized spotlight -- per-fragment Lambert from a dFdx/dFdy-reconstructed face normal, linear falloff, hard 0.15 dark surround. */\
-	"		if (u_flashlightOn > 0) {\n"\
+	/* Additive/subtractive prims (u_fogToBlack) are light and effects -- the
+	 * sewer water caustic, glows, fire -- which the PSX never lights. Dimming
+	 * them to the beam's base and adding the beam back on top made the water
+	 * near Harry blow out in the per-pixel modes while Classic was clean. */\
+	"		if (u_flashlightOn > 0 && u_fogToBlack == 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
 	"				fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
