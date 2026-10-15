@@ -2673,6 +2673,9 @@ int g_PsxFogToBlack = 0;
 	"			fragColor.rgb *= clamp(g_tapCov / g_tapWt, 0.0, 1.0);\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
+	/* Additive blend is dst*alpha + src (GR_SetBlendMode): STP set (0.5 from
+	 * the LUT) adds, STP clear (1.0) draws solid, as the PSX does. */\
+	"		if (u_fogToBlack > 0) fragColor.a = (fragColor.a < 0.75) ? 1.0 : 0.0;\n"\
 	"	}\n"
 
 const char* gte_shader_4 =
@@ -2795,6 +2798,7 @@ const char* gte_shader_32_rgba =
 	"		fragColor.a *= v_color.a;\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
+	"		if (u_fogToBlack > 0) fragColor.a = 1.0;\n"\
 	"	}\n"
 	"#endif\n";
 
@@ -4324,6 +4328,121 @@ void GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height
 #endif
 }
 
+/* Re-stamp a rect of vram[] into both VRAM textures (no full re-upload). */
+static void GR_UploadVramRect(int x, int y, int w, int h)
+{
+#if USE_OPENGL
+	static unsigned short s_packed[64 * 64];
+	if (w <= 0 || h <= 0 || w * h > 64 * 64)
+		return;
+	for (int row = 0; row < h; row++)
+		memcpy(&s_packed[row * w], vram + (size_t)(y + row) * VRAM_WIDTH + x, w * sizeof(unsigned short));
+	for (int t = 0; t < 2; t++)
+	{
+		glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[t]);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, VRAM_FORMAT, GL_UNSIGNED_BYTE, s_packed);
+	}
+	glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
+#endif
+}
+
+/* The sewer water caustic (water.c func_8008E5B4) composites two scrolled
+ * copies of a 4bpp wave texture into a 32x32 VRAM tile that the water
+ * surface then samples back as a 4bpp texture through a DIFFERENT palette:
+ * every 16-bit colour word becomes four palette indices, so the pattern is
+ * only right if the words are bit-exact PSX GPU output. The GL offscreen
+ * round trip (shader modulation, filtering, dither, an RGBA8 readback and a
+ * repack whose STP bit was wrong) is not, and the water read as mid-grey
+ * noise with the flashlight's dark octagon showing through. Rasterize the
+ * axis-aligned 1:1 rect here with the GPU's own arithmetic: texel fetch
+ * through the CLUT, texel 0 transparent, the 4x4 ordered dither on modulated
+ * texels, 5-bit saturating semi-transparency per abr mode, and the texel's
+ * STP bit carried into bit 15. */
+extern "C" void PsyX_VramDrawTexturedRect(int dstX, int dstY, int w, int h, int tpage, int clut,
+                                          int u0, int v0, int semiTrans, int dither)
+{
+	static const int s_dither[4][4] = { { -4, 0, -3, 1 }, { 2, -2, 3, -1 }, { -3, 1, -4, 0 }, { 3, -1, 2, -2 } };
+	const int tpX   = (tpage & 0xF) * 64;
+	const int tpY   = ((tpage >> 4) & 1) * 256;
+	const int abr   = (tpage >> 5) & 3;
+	const int depth = (tpage >> 7) & 3;
+	const int clutX = (clut & 0x3F) * 16;
+	const int clutY = (clut >> 6) & 0x1FF;
+
+	if (w <= 0 || h <= 0 || dstX < 0 || dstY < 0 || dstX + w > VRAM_WIDTH || dstY + h > VRAM_HEIGHT)
+		return;
+
+	for (int y = 0; y < h; y++)
+	{
+		const int             v   = (v0 + y) & 255;
+		const unsigned short* row = vram + (size_t)((tpY + v) & (VRAM_HEIGHT - 1)) * VRAM_WIDTH;
+		unsigned short*       dst = vram + (size_t)(dstY + y) * VRAM_WIDTH + dstX;
+
+		for (int x = 0; x < w; x++)
+		{
+			const int      u = (u0 + x) & 255;
+			unsigned short texel;
+
+			if (depth == 0)
+			{
+				const unsigned short word = row[(tpX + (u >> 2)) & (VRAM_WIDTH - 1)];
+				texel = vram[(size_t)clutY * VRAM_WIDTH + ((clutX + ((word >> ((u & 3) * 4)) & 0xF)) & (VRAM_WIDTH - 1))];
+			}
+			else if (depth == 1)
+			{
+				const unsigned short word = row[(tpX + (u >> 1)) & (VRAM_WIDTH - 1)];
+				texel = vram[(size_t)clutY * VRAM_WIDTH + ((clutX + ((word >> ((u & 1) * 8)) & 0xFF)) & (VRAM_WIDTH - 1))];
+			}
+			else
+			{
+				texel = row[(tpX + u) & (VRAM_WIDTH - 1)];
+			}
+
+			if (texel == 0)
+				continue;
+
+			int       c[3] = { texel & 31, (texel >> 5) & 31, (texel >> 10) & 31 };
+			const int stp  = (texel >> 15) & 1;
+
+			if (dither)
+			{
+				const int d = s_dither[y & 3][x & 3];
+				for (int k = 0; k < 3; k++)
+				{
+					int e = (c[k] << 3) + d;
+					if (e < 0) e = 0;
+					if (e > 255) e = 255;
+					c[k] = e >> 3;
+				}
+			}
+
+			if (semiTrans && stp)
+			{
+				const unsigned short back = dst[x];
+				const int b[3] = { back & 31, (back >> 5) & 31, (back >> 10) & 31 };
+				for (int k = 0; k < 3; k++)
+				{
+					int e;
+					switch (abr)
+					{
+					case 0:  e = (b[k] + c[k]) >> 1; break;
+					case 1:  e = b[k] + c[k]; break;
+					case 2:  e = b[k] - c[k]; break;
+					default: e = b[k] + (c[k] >> 2); break;
+					}
+					if (e < 0) e = 0;
+					if (e > 31) e = 31;
+					c[k] = e;
+				}
+			}
+
+			dst[x] = (unsigned short)(c[0] | (c[1] << 5) | (c[2] << 10) | (stp << 15));
+		}
+	}
+
+	GR_UploadVramRect(dstX, dstY, w, h);
+}
+
 void GR_CopyRGBAFramebufferToVRAM(u_int* src, int x, int y, int w, int h, int update_vram, int flip_y)
 {
 	assert(x >= 0);
@@ -4346,7 +4465,7 @@ void GR_CopyRGBAFramebufferToVRAM(u_int* src, int x, int y, int w, int h, int up
 			u_char r = ((c >> 19) & 0x1F);
 			//u_char a = ((c >> 24) & 0x1F);
 
-			int a = r == g == b == 0 ? 0 : 1;
+			int a = (r | g | b) ? 1 : 0;
 
 			*data_dst++ = r | (g << 5) | (b << 10) | (a << 15);
 		}
@@ -4924,7 +5043,6 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			 * the packed region into BOTH double-buffered VRAM textures.
 			 * vram_need_update is NOT set — no 1MB full re-upload per frame. */
 			static u_int  s_scratchRGBA[64 * 64];
-			static ushort s_scratchPacked[64 * 64];
 			const int sw = g_PreviousOffscreen.w, sh = g_PreviousOffscreen.h;
 
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
@@ -4934,21 +5052,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			GR_CopyRGBAFramebufferToVRAM(s_scratchRGBA,
 				g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh, 0, 1);
 
-			{
-				const ushort* src = (const ushort*)vram +
-					VRAM_WIDTH * g_PreviousOffscreen.y + g_PreviousOffscreen.x;
-				for (int row = 0; row < sh; row++)
-					memcpy(&s_scratchPacked[row * sw], src + row * VRAM_WIDTH, sw * sizeof(ushort));
-
-				for (int t = 0; t < 2; t++)
-				{
-					glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[t]);
-					glTexSubImage2D(GL_TEXTURE_2D, 0,
-						g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh,
-						VRAM_FORMAT, GL_UNSIGNED_BYTE, s_scratchPacked);
-				}
-				glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
-			}
+			GR_UploadVramRect(g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh);
 		}
 		else
 		{
@@ -7243,6 +7347,16 @@ void GR_SetBlendMode(BlendMode blendMode)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		break;
 	case BM_ADD:
+		/* The texel's STP bit decides whether a semi-transparent prim blends
+		 * it or draws it solid (the sampler already maps clear -> 1.0, set ->
+		 * 0.5, which is what BM_AVERAGE's SRC_ALPHA blend relies on). The
+		 * shaders fold that into alpha = 1 (add) / 0 (solid) for additive
+		 * prims, so dst*alpha + src gives both cases. GL_ONE,GL_ONE added the
+		 * solid texels too: the sewer water surface, whose palette entries
+		 * are mostly STP-clear, let the flashlight's dark octagon show
+		 * through where the PSX covered it. */
+		glBlendFunc(GL_ONE, GL_SRC_ALPHA);
+		break;
 	case BM_SUBTRACT:
 		glBlendFunc(GL_ONE, GL_ONE);
 		break;

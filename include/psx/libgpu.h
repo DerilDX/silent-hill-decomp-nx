@@ -251,6 +251,13 @@ extern void PsyX_SetNextPrimAffine(void);
  * shadow but whose bright albedo would blow out under the beam (reflective sewer
  * water). No-op when PGXP is off. */
 extern void PsyX_SetNextPrimNoFlashlight(void);
+/* Software PSX-GPU rasterization of an axis-aligned, unscaled textured rect
+ * from one VRAM region into another (texel fetch through the CLUT, dither,
+ * 5-bit semi-transparency per the tpage abr, STP into bit 15), for render-to-
+ * VRAM scratches a later prim samples back as a texture. Updates vram[] and
+ * the VRAM textures. */
+extern void PsyX_VramDrawTexturedRect(int dstX, int dstY, int w, int h, int tpage, int clut,
+                                      int u0, int v0, int semiTrans, int dither);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 /* PGXP shadow propagation: after a drawer copies a vertex word from a GTE scratch
