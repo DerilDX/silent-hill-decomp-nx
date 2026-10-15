@@ -368,6 +368,8 @@ extern "C" { int g_PsxWholeMapFarDepth = 1; }
  * prims through backface, capture and parse, plus a few per-vertex samples.
  * 2 = armed, counts during the next frame; 1 = dump at the following tick. */
 extern "C" { int g_PsxWholeMapProbe = 0; }
+static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
+static int s_wmAffSamples;
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
 static int s_wmSamples;
@@ -420,15 +422,17 @@ extern "C" void PGXP_CoverageTick(void)
 	PGXP_BumpGen();
 	if (g_PsxWholeMapProbe == 1)
 	{
-		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d\n",
+		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u\n",
 			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
-			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp);
+			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp,
+			s_wmLastPrims, s_wmLastAffine, s_wmLastHit);
 		g_PsxWholeMapProbe = 0;
 	}
 	else if (g_PsxWholeMapProbe == 2)
 	{
 		s_wmBfCalls = s_wmBfFallback = s_wmBfCull = s_wmCaptured = s_wmParsed = s_wmAffineVerts = s_wmPreciseVerts = 0;
 		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
+		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0; s_wmAffSamples = 0;
 		g_PsxWholeMapProbe = 1;
 	}
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
@@ -838,7 +842,7 @@ int g_DrawPrimMode = 0;
  * WORLD -- and depthMode is part of the split merge key, so every miss forces
  * a NEW split. That is what exhausted MAX_DRAW_SPLITS. 15 bits = 32768 entries
  * (~1 MB) puts the load factor back under 20%. */
-#define SZ_TABLE_BITS 15
+#define SZ_TABLE_BITS 18
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
@@ -1257,6 +1261,24 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	if (g_PsxUsePgxp) s_dbgApplyCalls++;
 	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
+	if (g_PsxWholeMapProbe == 1 && s_otBucketAbs == g_currentOTBucketCount - 1)
+	{
+		const int n = isQuad ? 4 : 3;
+		int aff = 0;
+		uint32_t tsz[4];
+		for (int i = 0; i < n; i++) if (vertex[i].ppw <= 0.0f) aff = 1;
+		s_wmLastPrims++;
+		s_wmLastAffine += aff;
+		if (PsyX_LookupGteDepths(polyTag, tsz)) s_wmLastHit++;
+		if (aff && s_wmAffSamples < 6)
+		{
+			s_wmAffSamples++;
+			eprintinfo("[WMPROBE] affine lastBucket prim code=%02x v0=(%.1f,%.1f pp=%.1f,%.1f w=%.0f vsz=%.0f) v1=(%.1f,%.1f w=%.0f) v2=(%.1f,%.1f w=%.0f)%c",
+				(unsigned)polyTag->code, (double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy,
+				(double)vertex[0].ppw, (double)vertex[0].vsz, (double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppw,
+				(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppw, 10);
+		}
+	}
 	uint32_t sz[4];
 	unsigned char kind = SZ_KIND_NONE;
 	if (!PsyX_LookupGteDepths(polyTag, sz, &kind))
