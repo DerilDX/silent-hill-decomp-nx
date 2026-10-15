@@ -123,11 +123,24 @@ void func_80057228(MATRIX* mat, s32 alpha, SVECTOR* arg2, VECTOR3* arg3);
  * runs per poly in the drawers, and the gate is a cross-TU call. */
 #define SH_WHOLEMAP_FAR_POLY(depth, shift)                                      \
     ((depth) == ((ORDERING_TABLE_SIZE - 1) << ((shift) + 2)) && Pc_WholeMapDrawActive())
+extern int g_PsxWholeMapFar;
+/* Lit world models never report their SZ, so the depth capture hands a far
+ * poly the last OT bucket's seed and it paints over the depth-tested town.
+ * Only inside the whole-map chunk loop: characters drawn by the same code
+ * keep stock depth. */
+#define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift)                     \
+    do {                                                                        \
+        if (g_PsxWholeMapFar && SH_WHOLEMAP_FAR_POLY(depth, shift))             \
+            PsyX_SetNextPrimSz((u16)(sd)->screenZ_168[i0], (u16)(sd)->screenZ_168[i1], \
+                               (u16)(sd)->screenZ_168[i2], (u16)(sd)->screenZ_168[i3], \
+                               (shift));                                        \
+    } while (0)
 #else
 #define SH_CLAMP_OT_DEPTH(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FARCAP(cap) ((void)0)
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FAR_POLY(depth, shift) (0)
+#define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift) ((void)0)
 #endif
 
 #ifdef SH_PC_PORT
@@ -4613,6 +4626,8 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
              * affected. Delete with the rest of the feature. */
             if (g_PcCharaGhostDraw)
                 setSemiTrans(poly.gt3, 1);
+            SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
+                               scratchData->u.s_1.field_2, scratchData->u.s_1.field_2, temp_t4, arg3);
 #endif
             addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt3);
             poly.gt3++;
@@ -4729,6 +4744,8 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
              * affected. Delete with the rest of the feature. */
             if (g_PcCharaGhostDraw)
                 setSemiTrans(poly.gt4, 1);
+            SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
+                               scratchData->u.s_1.field_2, scratchData->u.s_1.field_3, temp_t4, arg3);
 #endif
             addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt4);
             poly.gt4++;
@@ -5143,6 +5160,9 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
     PACKET*           packet2;
     POLY_GT4*         poly_gt4;
     POLY_G4*          poly_g4;
+#ifdef SH_PC_PORT
+    s32               pcBillboardSz;
+#endif
 
     temp_fp = &D_800AE4DC[arg0];
     sp4A0   = temp_fp->field_A | (temp_fp->field_9 << 8);
@@ -5292,6 +5312,9 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
     {
         temp_v0_2 = RotTransPers((SVECTOR*)&curPtr->position.vx, &field_1C, &field_24, &field_24);
         temp_a0   = temp_v0_2 << 2;
+#ifdef SH_PC_PORT
+        pcBillboardSz = temp_a0;
+#endif
 
 #ifdef SH_PC_PORT
         /* Whole-town far billboards: beyond ~256u the GTE SZ3 register pegs at
@@ -5304,6 +5327,7 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
             extern int g_PsxWholeMapLastSz;
             if (g_PsxWholeMapLastSz > temp_a0)
                 temp_a0 = g_PsxWholeMapLastSz;
+            pcBillboardSz = temp_a0;
         }
 #endif
 
@@ -5366,6 +5390,10 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
                  * corners go affine, warping the quad ("tree-foliage spikes").
                  * Billboards are camera-facing flat quads, so affine is correct. */
                 PsyX_SetNextPrimAffine();
+                /* The far town is depth-tested; a billboard left on its OT
+                 * bucket seed would sit at ~64u and cover every far block. */
+                if (Pc_WholeMapDrawActive())
+                    PsyX_SetNextPrimDepthSz((unsigned int)pcBillboardSz);
                 addPrim(&ot_arg4->org[MIN(temp_v0_2 >> arg5, ORDERING_TABLE_SIZE - 1)], poly_gt4);
                 poly_gt4++;
             }

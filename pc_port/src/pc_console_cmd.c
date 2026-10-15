@@ -1778,6 +1778,31 @@ void Pc_ConsoleExec(const char* line)
             g_PcConfig.drawDistancePct = (v < 25) ? 25 : ((v > 200) ? 200 : v);
         }
         cprintf("draw distance: %d%% (25..200; config key draw_distance_pct)", g_PcConfig.drawDistancePct);
+    } else if (strcmp(cmd, "WHOLEMAP") == 0) {
+        /* Live, not saved. The far band is depth-tested on PGXP's per-vertex
+         * view depth, which only exists while PGXP runs, so the mode turns it on
+         * for its own lifetime and hands it back as it found it. */
+        extern int g_PsxUsePgxp;
+        extern int Pc_WholeMapDrawActive(void);
+        static int s_pgxpBefore = -1;
+        int on = g_PcConfig.wholeMapExteriors;
+        if (arg[0] == '1') on = 1;
+        else if (arg[0] == '0') on = 0;
+        else on = !on;
+        if (on && !g_PcConfig.wholeMapExteriors) {
+            s_pgxpBefore = g_PsxUsePgxp;
+            g_PsxUsePgxp = 1;
+        } else if (!on && g_PcConfig.wholeMapExteriors && s_pgxpBefore >= 0) {
+            g_PsxUsePgxp = s_pgxpBefore;
+            s_pgxpBefore = -1;
+        }
+        g_PcConfig.wholeMapExteriors = on;
+        cprintf("whole map: %s (engaged here: %s)%s", on ? "ON" : "OFF",
+                Pc_WholeMapDrawActive() ? "yes" : "no, outdoor exterior cells only",
+                (on && !(g_PcConfig.preloadChunks && g_PcConfig.residentTextures))
+                    ? " -- needs preload_chunks=1 and resident_textures=1" : "");
+        if (on)
+            cprintf("lower the fog to see it: fogstr 0.2");
     } else if (strcmp(cmd, "FOGDIST") == 0) {
         /* Push the fog planes out (or in). Indoors the fog is BLACK, so this is
          * also the "see further in the sewers" knob: the wall of black is the fog
