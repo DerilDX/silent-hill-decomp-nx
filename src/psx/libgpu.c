@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <SDL_timer.h>
 #include <assert.h>
 #include <ctype.h>
 
@@ -479,7 +480,26 @@ void DrawOTag(u_long* p)
 		//if (activeDrawEnv.isbg)
 		//	ClearImage(&activeDrawEnv.clip, activeDrawEnv.r0, activeDrawEnv.g0, activeDrawEnv.b0);
 
-		ParsePrimitivesLinkedList(p, 0);
+		{
+			extern int g_PsxWholeMapProbe;
+			extern double g_wmTParse, g_wmTDraw;
+			extern unsigned g_wmSplits, g_wmVerts, g_wmOtDraws;
+			extern int g_splitIndex, g_vertexIndex;
+			Uint64 t0 = (g_PsxWholeMapProbe == 1) ? SDL_GetPerformanceCounter() : 0;
+			ParsePrimitivesLinkedList(p, 0);
+			if (g_PsxWholeMapProbe == 1)
+			{
+				Uint64 t1 = SDL_GetPerformanceCounter();
+				const double f = 1000.0 / (double)SDL_GetPerformanceFrequency();
+				g_wmTParse += (double)(t1 - t0) * f;
+				g_wmSplits += (unsigned)g_splitIndex;
+				g_wmVerts += (unsigned)g_vertexIndex;
+				g_wmOtDraws++;
+				DrawAllSplits();
+				g_wmTDraw += (double)(SDL_GetPerformanceCounter() - t1) * f;
+				continue;
+			}
+		}
 
 		/* No glFinish here: the parse is CPU-side and the GL command stream is
 		 * ordered, so DrawAllSplits needs no completion barrier. The old

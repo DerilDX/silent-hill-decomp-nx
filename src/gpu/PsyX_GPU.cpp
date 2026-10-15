@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+#include <SDL_timer.h>
 
 #include "psx/gtereg.h"
 
@@ -375,6 +376,9 @@ extern "C" { int g_PsxWholeMapProbe = 0; }
 static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
 static unsigned s_wmDevPrims, s_wmPrecPrims;
 static int s_wmDevSamples;
+/* Probe-frame CPU time (ms) by stage, and batch volume. */
+extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
+static Uint64 s_wmFrameStart = 0;
 static int s_wmAffSamples;
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
@@ -428,6 +432,9 @@ extern "C" void PGXP_CoverageTick(void)
 	PGXP_BumpGen();
 	if (g_PsxWholeMapProbe == 1)
 	{
+		eprintinfo("[WMPROBE] time: frame=%.2fms chunkSubmit=%.2fms parse=%.2fms drawSplits=%.2fms | OT draws=%u splits=%u verts=%u\n",
+			(double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency(),
+			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmOtDraws, g_wmSplits, g_wmVerts);
 		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u | precise prims=%u offByOver2px=%u\n",
 			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
 			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp,
@@ -440,6 +447,8 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
 		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0; s_wmAffSamples = 0;
 		s_wmDevPrims = s_wmPrecPrims = 0; s_wmDevSamples = 0;
+		g_wmTParse = g_wmTDraw = g_wmTChunks = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
+		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
 	}
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
