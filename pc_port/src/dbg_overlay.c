@@ -119,6 +119,7 @@ int g_PcConsoleSwallowInput = 0;
 #define INPUT_BUF_CAP    (LINE_LEN - 4) /* room for "> " + "_" */
 static char          s_input_buf[INPUT_BUF_CAP];
 static int           s_input_len = 0;
+static int           s_input_cur = 0; /* caret, 0..s_input_len */
 
 /* Console command history: Up/Down recall recently entered commands. */
 #define CONSOLE_HIST_MAX 8
@@ -132,6 +133,7 @@ static void Console_LoadHist(int nav) {
     strncpy(s_input_buf, s_hist[idx], INPUT_BUF_CAP - 1);
     s_input_buf[INPUT_BUF_CAP - 1] = '\0';
     s_input_len = (int)strlen(s_input_buf);
+    s_input_cur = s_input_len;
 }
 static unsigned char s_prev_keys[128]; /* must cover arrow keys (scancodes 79-82) */
 
@@ -540,6 +542,37 @@ static void Console_CopySelection(void)
     SDL_SetClipboardText(out);
 }
 
+static void Console_InsertChar(char c)
+{
+    if (s_input_len >= INPUT_BUF_CAP - 1)
+        return;
+    memmove(&s_input_buf[s_input_cur + 1], &s_input_buf[s_input_cur], (size_t)(s_input_len - s_input_cur + 1));
+    s_input_buf[s_input_cur++] = c;
+    s_input_len++;
+    s_console_dirty = 1;
+}
+
+/* Press edge, then after a short delay a steady 25/sec while held -- the
+ * text-editor feel Backspace already had, shared by the caret keys. */
+static int Console_KeyRepeat(const Uint8* ks, const Uint8* prev, int sc, Uint32* press, Uint32* last)
+{
+    Uint32 now;
+
+    if (!ks[sc])
+        return 0;
+    now = SDL_GetTicks();
+    if (!prev[sc]) {
+        *press = now;
+        *last  = now;
+        return 1;
+    }
+    if (now - *press >= 350 && now - *last >= 40) {
+        *last = now;
+        return 1;
+    }
+    return 0;
+}
+
 static void Console_Paste(void)
 {
     char*       clip = SDL_GetClipboardText();
@@ -555,9 +588,8 @@ static void Console_Paste(void)
             continue;
         if (c >= 'a' && c <= 'z')
             c -= 32; /* commands arrive uppercase */
-        s_input_buf[s_input_len++] = (char)c;
+        Console_InsertChar((char)c);
     }
-    s_input_buf[s_input_len] = '\0';
     s_console_dirty = 1;
     SDL_free(clip);
 }
@@ -887,8 +919,19 @@ static void overlay_update_texture(void)
 
     {
         char prompt[LINE_LEN];
-        snprintf(prompt, LINE_LEN, "> %s_", s_input_buf);
+        int caretCol = 2 + s_input_cur;
+        int x, y;
+        snprintf(prompt, LINE_LEN, "> %s", s_input_buf);
         overlay_render_row(s_vis_rows, prompt);
+        if (caretCol < CON_COLS) {
+            for (y = GLYPH_H - 2; y < GLYPH_H; y++)
+                for (x = 0; x < GLYPH_W; x++) {
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][0] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][1] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][2] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][3] = 255;
+                }
+        }
     }
 
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, TEX_W, TEX_H,
@@ -1461,6 +1504,7 @@ void DbgOverlay_Update(void)
             if (s_console_open) {
                 g_PcConsoleInputActive = 1;
                 s_input_len            = 0;
+                s_input_cur            = 0;
                 s_input_buf[0]         = '\0';
                 s_scroll               = 0;
                 s_console_apply_until  = 0;
@@ -1613,20 +1657,14 @@ void DbgOverlay_Update(void)
                     c = '0';
                 else
                     c = (char)('1' + (sc - SDL_SCANCODE_1));
-                if (s_input_len < INPUT_BUF_CAP - 1) {
-                    s_input_buf[s_input_len++] = c;
-                    s_input_buf[s_input_len]   = '\0';
-                    s_console_dirty            = 1;
-                }
+                Console_InsertChar(c);
             }
         }
         /* Space separates command from argument; `-` types `_` (map and FMV
          * names use underscores, and the console has no shift handling). */
         if (ks[SDL_SCANCODE_SPACE] && !s_prev_keys[SDL_SCANCODE_SPACE] &&
-            s_input_len > 0 && s_input_len < INPUT_BUF_CAP - 1) {
-            s_input_buf[s_input_len++] = ' ';
-            s_input_buf[s_input_len]   = '\0';
-            s_console_dirty            = 1;
+            s_input_cur > 0) {
+            Console_InsertChar(' ');
         }
         /* Punctuation. Shift gives the upper glyph; there is no full shift
          * handling, just this table.
@@ -1656,12 +1694,8 @@ void DbgOverlay_Update(void)
             };
             int i;
             for (i = 0; i < (int)(sizeof(syms) / sizeof(syms[0])); i++) {
-                if (ks[syms[i].sc] && !s_prev_keys[syms[i].sc] &&
-                    s_input_len < INPUT_BUF_CAP - 1) {
-                    s_input_buf[s_input_len++] = shift ? syms[i].hi : syms[i].lo;
-                    s_input_buf[s_input_len]   = '\0';
-                    s_console_dirty            = 1;
-                }
+                if (ks[syms[i].sc] && !s_prev_keys[syms[i].sc])
+                    Console_InsertChar(shift ? syms[i].hi : syms[i].lo);
             }
         }
         /* Backspace hold-repeats like a text editor: one delete on the press
@@ -1669,22 +1703,35 @@ void DbgOverlay_Update(void)
          * than Dbg_HoldRepeat's 100ms floor, which felt sluggish for text). */
         {
             static Uint32 s_bsPress = 0, s_bsLast = 0;
-            int del = 0;
+            static Uint32 s_delPress = 0, s_delLast = 0;
+            static Uint32 s_lPress = 0, s_lLast = 0, s_rPress = 0, s_rLast = 0;
 
-            if (ks[SDL_SCANCODE_BACKSPACE]) {
-                Uint32 now = SDL_GetTicks();
-                if (!s_prev_keys[SDL_SCANCODE_BACKSPACE]) {
-                    s_bsPress = now;
-                    s_bsLast  = now;
-                    del       = 1;
-                } else if (now - s_bsPress >= 350 && now - s_bsLast >= 40) {
-                    s_bsLast = now;
-                    del      = 1;
-                }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_BACKSPACE, &s_bsPress, &s_bsLast) && s_input_cur > 0) {
+                memmove(&s_input_buf[s_input_cur - 1], &s_input_buf[s_input_cur], (size_t)(s_input_len - s_input_cur + 1));
+                s_input_cur--;
+                s_input_len--;
+                s_console_dirty = 1;
             }
-            if (del && s_input_len > 0) {
-                s_input_buf[--s_input_len] = '\0';
-                s_console_dirty            = 1;
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_DELETE, &s_delPress, &s_delLast) && s_input_cur < s_input_len) {
+                memmove(&s_input_buf[s_input_cur], &s_input_buf[s_input_cur + 1], (size_t)(s_input_len - s_input_cur));
+                s_input_len--;
+                s_console_dirty = 1;
+            }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_LEFT, &s_lPress, &s_lLast) && s_input_cur > 0) {
+                s_input_cur--;
+                s_console_dirty = 1;
+            }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_RIGHT, &s_rPress, &s_rLast) && s_input_cur < s_input_len) {
+                s_input_cur++;
+                s_console_dirty = 1;
+            }
+            if (ks[SDL_SCANCODE_HOME] && !s_prev_keys[SDL_SCANCODE_HOME]) {
+                s_input_cur = 0;
+                s_console_dirty = 1;
+            }
+            if (ks[SDL_SCANCODE_END] && !s_prev_keys[SDL_SCANCODE_END]) {
+                s_input_cur = s_input_len;
+                s_console_dirty = 1;
             }
         }
         /* Up / Down: recall recently entered commands (most-recent first). */
@@ -1703,6 +1750,7 @@ void DbgOverlay_Update(void)
                 strncpy(s_input_buf, s_hist_edit, INPUT_BUF_CAP - 1);
                 s_input_buf[INPUT_BUF_CAP - 1] = '\0';
                 s_input_len = (int)strlen(s_input_buf);
+                s_input_cur = s_input_len;
             }
             s_console_dirty = 1;
         }
@@ -1730,6 +1778,7 @@ void DbgOverlay_Update(void)
                  * at the top of the function). Lets the user run several
                  * commands without reopening. */
                 s_input_len    = 0;
+                s_input_cur    = 0;
                 s_input_buf[0] = '\0';
                 s_scroll       = 0;
                 g_PcConsoleInputActive  = 0;          /* unfreeze for the window */
