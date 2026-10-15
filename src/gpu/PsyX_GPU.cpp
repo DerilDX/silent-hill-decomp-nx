@@ -396,7 +396,7 @@ static unsigned s_wmGt4;
 static unsigned long long s_wmClsCyc[18];
 static unsigned s_wmClsN[18];
 static unsigned long long s_wmTscStart;
-extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0; }
+extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0; }
 #define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmClsCyc[i] += __rdtsc() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
 #define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
@@ -465,7 +465,7 @@ extern "C" void PGXP_CoverageTick(void)
 					c == 16 ? "far" : (c == 17 ? "flush" : "0x"), c >= 16 ? 0 : c * 16, s_wmClsN[c], (double)s_wmClsCyc[c] / cycPerMs);
 				if (len >= (int)sizeof(buf) - 64) break;
 			}
-			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmTGpu, 10);
+			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u farSplits=%u farFlushes=%u gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmFarSplits, g_wmFarFlushes, g_wmTGpu, 10);
 		}
 		if (s_wmGt4)
 			eprintinfo("[WMPROBE] GT4 cycles/prim over %u: begin=%llu drop=%llu hires=%llu split=%llu vert=%llu depth=%llu tex=%llu col=%llu emit=%llu\n",
@@ -485,7 +485,7 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmDevPrims = s_wmPrecPrims = 0;
 		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
 		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
-		g_wmTGpu = 0; g_wmFarQuads = 0; s_wmTscStart = __rdtsc();
+		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = 0; s_wmTscStart = __rdtsc();
 		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
 		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
@@ -4380,9 +4380,33 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 static PsyX_FarQuad s_farQuads[PSYX_FAR_QUAD_MAX];
 static int          s_farQuadCount = 0;
 
+/* Per-frame memo of the texture decisions for one tpage/clut: a whole-town
+ * frame draws ~90k far quads over a few hundred keys, and the per-prim CLUT
+ * check, glyph callback and hi-res lookup (a linear entry scan for non-pool
+ * textures) were repeated for every one. Keys that touch the framebuffer
+ * feedback or scene-scratch bands are never memoized (their per-prim side
+ * effects matter); they take EmitFarQuad. Valid for one frame only, so the
+ * hi-res LRU stamp and the lazy-compose demand signal still fire each frame. */
+struct FarTexMemo
+{
+	unsigned  key;
+	unsigned  gen;
+	unsigned char drop, glyph, special, _pad;
+	TextureID tex;
+	int       w, h, ox, oy, hw, hh;
+};
+#define FAR_TEX_MEMO_SIZE 2048
+static FarTexMemo s_farTexMemo[FAR_TEX_MEMO_SIZE];
+static unsigned   s_farTexGen = 1;
+
 extern "C" void PsyX_FarQuadsReset(void)
 {
 	s_farQuadCount = 0;
+	if (++s_farTexGen == 0)
+	{
+		memset(s_farTexMemo, 0, sizeof(s_farTexMemo));
+		s_farTexGen = 1;
+	}
 }
 
 extern "C" PsyX_FarQuad* PsyX_FarQuadAlloc(int* index)
@@ -4471,6 +4495,167 @@ static void EmitFarQuad(const PsyX_FarQuad* q)
 	g_vertexIndex += PgxpEmitPoly(v, 6);
 }
 
+static const FarTexMemo* FarTexLookup(unsigned short tpage, unsigned short clut)
+{
+	const unsigned key = ((unsigned)tpage << 16) | clut;
+	unsigned slot = (key * 2654435761u) >> 21;
+	for (int i = 0; i < 16; i++, slot = (slot + 1) & (FAR_TEX_MEMO_SIZE - 1))
+	{
+		FarTexMemo* m = &s_farTexMemo[slot];
+		if (m->gen == s_farTexGen && m->key == key)
+			return m;
+		if (m->gen != s_farTexGen)
+		{
+			m->key  = key;
+			m->gen  = s_farTexGen;
+			m->drop = ClutHasNoPalette(tpage, clut) ? 1 : 0;
+			s_curPrimIsFeedback = 0;
+			s_curPrimIsScratch  = 0;
+			ApplyHiresOverride(tpage, clut);
+			m->special = (s_curPrimIsFeedback || s_curPrimIsScratch) ? 1 : 0;
+			m->glyph   = (unsigned char)s_curPrimIsGlyph;
+			m->tex = overrideTexture;
+			m->w   = overrideTextureWidth;
+			m->h   = overrideTextureHeight;
+			m->ox  = overrideTextureOffsetX;
+			m->oy  = overrideTextureOffsetY;
+			m->hw  = overrideTextureHiresW;
+			m->hh  = overrideTextureHiresH;
+			return m;
+		}
+	}
+	return NULL;
+}
+
+/* The far-quad chain's hot loop: same output as EmitFarQuad (vertex fields,
+ * triangle order, split key) for PGXP-on world quads, built straight into the
+ * vertex buffer. EmitFarQuad's generic builders memset, copy for the
+ * triangulation and run the near clipper, none of which a quad 16u+ out needs. */
+static void EmitFarChain(int first)
+{
+	if (!g_PsxUsePgxp)
+	{
+		for (int i = first; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+			EmitFarQuad(&s_farQuads[i]);
+		return;
+	}
+
+	float ofsX, ofsY;
+	DrawEnvOffset(ofsX, ofsY);
+	const int ofsXi = (int)ofsX, ofsYi = (int)ofsY;
+	const int depthMode = g_PsxPgxpWorldDepth ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED;
+	const float farBias = (float)g_PsxPgxpWorldFarBias;
+	unsigned lastKey = 0xFFFFFFFFu;
+
+	s_curPrimSemiTrans = 0;
+	s_primAlphaPending = 255;
+
+	for (int i = first; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+	{
+		const PsyX_FarQuad* q = &s_farQuads[i];
+		const unsigned key = ((unsigned)q->tpage << 16) | q->clut;
+
+		if (g_PsxWholeMapProbe == 1) g_wmFarQuads++;
+
+		if (key != lastKey)
+		{
+			const FarTexMemo* m = FarTexLookup(q->tpage, q->clut);
+			if (m == NULL || m->special)
+			{
+				EmitFarQuad(q);
+				lastKey = 0xFFFFFFFFu;
+				continue;
+			}
+			if (m->drop)
+			{
+				lastKey = 0xFFFFFFFFu;
+				continue;
+			}
+			s_curPrimIsFeedback = 0;
+			s_curPrimIsScratch  = 0;
+			s_curPrimIsGlyph    = m->glyph;
+			overrideTexture        = m->tex;
+			overrideTextureWidth   = m->w;
+			overrideTextureHeight  = m->h;
+			overrideTextureOffsetX = m->ox;
+			overrideTextureOffsetY = m->oy;
+			overrideTextureHiresW  = m->hw;
+			overrideTextureHiresH  = m->hh;
+			activeDrawEnv.tpage = q->tpage;
+			if (g_PsxWholeMapProbe == 1)
+			{
+				const int before = g_splitIndex;
+				AddSplit(false, true, depthMode);
+				g_wmFarSplits += (unsigned)(g_splitIndex - before);
+			}
+			else
+				AddSplit(false, true, depthMode);
+			lastKey = key;
+		}
+
+		if (g_vertexIndex + 24 > MAX_VERTEX_BUFFER_SIZE)
+		{
+			GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
+			flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
+			if (g_PsxWholeMapProbe == 1) g_wmFarFlushes++;
+			DrawAllSplits();
+			AddSplit(false, true, depthMode);
+		}
+
+		GrVertex qv[4];
+		const unsigned char dither = (GET_TPAGE_DITHER(q->tpage) || activeDrawEnv.dtd) ? 1 : 0;
+		const short page = q->tpage & 0x1F;
+		unsigned char ulo = q->uv[0][0], uhi = ulo, vlo = q->uv[0][1], vhi = vlo;
+		for (int k = 1; k < 4; k++)
+		{
+			if (q->uv[k][0] < ulo) ulo = q->uv[k][0];
+			if (q->uv[k][0] > uhi) uhi = q->uv[k][0];
+			if (q->uv[k][1] < vlo) vlo = q->uv[k][1];
+			if (q->uv[k][1] > vhi) vhi = q->uv[k][1];
+		}
+		const float z = PgxpNdcFromViewZ((q->w[0] + q->w[1] + q->w[2] + q->w[3]) * 0.25f + farBias);
+		for (int k = 0; k < 4; k++)
+		{
+			GrVertex& v = qv[k];
+			const float fx = q->sx[k], fy = q->sy[k];
+			int ix = (int)(fx >= 0.0f ? fx + 0.5f : fx - 0.5f);
+			int iy = (int)(fy >= 0.0f ? fy + 0.5f : fy - 0.5f);
+			if (ix < -1024) ix = -1024; else if (ix > 1023) ix = 1023;
+			if (iy < -1024) iy = -1024; else if (iy > 1023) iy = 1023;
+			v.x = (short)(ix + ofsXi);
+			v.y = (short)(iy + ofsYi);
+			v.page = page;
+			v.clut = (short)q->clut;
+			v.z = z;
+			v.u = q->uv[k][0];
+			v.v = q->uv[k][1];
+			v.bright = 2;
+			v.dither = dither;
+			v.r = q->rgb[k][0];
+			v.g = q->rgb[k][1];
+			v.b = q->rgb[k][2];
+			v.a = 255;
+			v.tcx = 0;
+			v.tcy = 0;
+			v._p0 = (char)q->fog[k];
+			v._p1 = 1;
+			v.ppx = fx + ofsX;
+			v.ppy = fy + ofsY;
+			v.ppw = q->w[k];
+			v.nx = v.ny = v.nz = 0.0f;
+			v.vsx = v.vsy = v.vsz = 0.0f;
+			v.geom3d = 1.0f;
+			v.ulo = ulo; v.vlo = vlo; v.uhi = uhi; v.vhi = vhi;
+		}
+		/* PSX quad order 0,1,2,3 = TL,TR,BL,BR; TriangulateQuad's result is
+		 * (v0,v1,v2)(v1,v2,v3). */
+		GrVertex* out = &g_vertexBuffer[g_vertexIndex];
+		out[0] = qv[0]; out[1] = qv[1]; out[2] = qv[2];
+		out[3] = qv[1]; out[4] = qv[2]; out[5] = qv[3];
+		g_vertexIndex += 6;
+	}
+}
+
 static int ProcessPsyXPrims(P_TAG* polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
@@ -4507,11 +4692,7 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 	case 0x05:
 	{
 		const DR_PSYX_FARQUADS* fq = (const DR_PSYX_FARQUADS*)polyTag;
-		for (int i = (int)fq->code[1]; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
-		{
-			EmitFarQuad(&s_farQuads[i]);
-			if (g_PsxWholeMapProbe == 1) g_wmFarQuads++;
-		}
+		EmitFarChain((int)fq->code[1]);
 		return 2;
 	}
 	case 0x04:
