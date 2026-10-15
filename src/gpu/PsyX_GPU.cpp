@@ -373,6 +373,8 @@ extern "C" { int g_PsxWholeMapFarDepth = 0; }
  * 2 = armed, counts during the next frame; 1 = dump at the following tick. */
 extern "C" { int g_PsxWholeMapProbe = 0; }
 static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
+static unsigned s_wmDevPrims, s_wmPrecPrims;
+static int s_wmDevSamples;
 static int s_wmAffSamples;
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
@@ -426,10 +428,10 @@ extern "C" void PGXP_CoverageTick(void)
 	PGXP_BumpGen();
 	if (g_PsxWholeMapProbe == 1)
 	{
-		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u\n",
+		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u | precise prims=%u offByOver2px=%u\n",
 			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
 			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp,
-			s_wmLastPrims, s_wmLastAffine, s_wmLastHit);
+			s_wmLastPrims, s_wmLastAffine, s_wmLastHit, s_wmPrecPrims, s_wmDevPrims);
 		g_PsxWholeMapProbe = 0;
 	}
 	else if (g_PsxWholeMapProbe == 2)
@@ -437,6 +439,7 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmBfCalls = s_wmBfFallback = s_wmBfCull = s_wmCaptured = s_wmParsed = s_wmAffineVerts = s_wmPreciseVerts = 0;
 		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
 		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0; s_wmAffSamples = 0;
+		s_wmDevPrims = s_wmPrecPrims = 0; s_wmDevSamples = 0;
 		g_PsxWholeMapProbe = 1;
 	}
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
@@ -1273,6 +1276,39 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	if (g_PsxUsePgxp) s_dbgApplyCalls++;
 	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
+	if (g_PsxWholeMapProbe == 1)
+	{
+		const int n = isQuad ? 4 : 3;
+		float dev = 0.0f;
+		int prec = 0;
+		for (int i = 0; i < n; i++)
+		{
+			if (vertex[i].ppw <= 0.0f) continue;
+			float dx = vertex[i].ppx - vertex[i].x, dy = vertex[i].ppy - vertex[i].y;
+			if (dx < 0) dx = -dx;
+			if (dy < 0) dy = -dy;
+			if (dx > dev) dev = dx;
+			if (dy > dev) dev = dy;
+			prec = 1;
+		}
+		s_wmPrecPrims += prec;
+		if (dev > 2.0f)
+		{
+			s_wmDevPrims++;
+			if (s_wmDevSamples < 12)
+			{
+				s_wmDevSamples++;
+				eprintinfo("[WMPROBE] off-by %.1fpx code=%02x bucket=%d | v0 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v1 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v2 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f | v3 xy=(%.1f,%.1f) pp=(%.1f,%.1f) w=%.0f%c",
+					(double)dev, (unsigned)polyTag->code, s_otBucketAbs,
+					(double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy, (double)vertex[0].ppw,
+					(double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppx, (double)vertex[1].ppy, (double)vertex[1].ppw,
+					(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppx, (double)vertex[2].ppy, (double)vertex[2].ppw,
+					(double)(isQuad ? vertex[3].x : 0.0f), (double)(isQuad ? vertex[3].y : 0.0f),
+					(double)(isQuad ? vertex[3].ppx : 0.0f), (double)(isQuad ? vertex[3].ppy : 0.0f),
+					(double)(isQuad ? vertex[3].ppw : 0.0f), 10);
+			}
+		}
+	}
 	if (g_PsxWholeMapProbe == 1 && s_otBucketAbs == g_currentOTBucketCount - 1)
 	{
 		const int n = isQuad ? 4 : 3;
