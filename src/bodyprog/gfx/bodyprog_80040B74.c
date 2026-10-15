@@ -1020,6 +1020,18 @@ void Ipd_ActiveChunksClear(s_MapTerrain* map, s32 arg1) // 0x80042300
         else if (mf & MapFlag_TwoActiveChunks) sharedCount = 2;
         else                                   sharedCount = 4;
         step = (map->chunkBufferSize / sharedCount) & ~0x3;
+        /* No slot shares the PSX RAM buffer any more. The shared slices sit
+         * under FS_BUFFER_18/20, which the map7_s03 ending streams its DMS
+         * files into: the arena chunk (cell 2,-4) landed in slot 1, the DMS
+         * overwrote it, and every reformat retry then failed on the garbage
+         * (isLoaded stuck false, [IPDREF] HIT-MISMATCH each frame) -- no run
+         * floor, no town road, no collision. PSX survives because its chunk
+         * reload at step 9 re-reads into the clobbered slice; PC keeps the
+         * chunk on a buffer nothing else writes. The owned size is the whole
+         * buffer, so a single-chunk map's largest IPD fits without the
+         * oversize gate. */
+        sharedCount = 0;
+        (void)step;
     }
 
     /* Per-slot owned buffers for slots past the shared-slice count. A slot's
@@ -1063,7 +1075,8 @@ void Ipd_ActiveChunksClear(s_MapTerrain* map, s32 arg1) // 0x80042300
             }
             else
             {
-                s32 ownedSize = indivSize > 0 ? indivSize : 65536;
+                s32 ownedSize = map->chunkBufferSize > 0 ? map->chunkBufferSize : 0x2C000;
+                (void)indivSize;
                 if (s_pcSlotOwnedBuf[i] == NULL)
                 {
                     s_pcSlotOwnedBuf[i] = (s_IpdHeader*)calloc(1, ownedSize);
