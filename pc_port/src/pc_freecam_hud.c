@@ -23,7 +23,6 @@ extern int   g_DebugCamEnabled;
 extern int   g_PcFreeCamHudHidden;
 extern int   g_PcFreeCamSteady;
 extern int   g_PcFreeCamCruise;
-extern int   g_PcFreeCamFollow;
 extern float g_PcFreeCamSpeedMul;
 
 static GLuint s_prog, s_vao, s_vbo, s_texWhite, s_texText;
@@ -184,7 +183,7 @@ void Pc_FreeCamHud_Preload(void)
     SH_DBG("[FREECAMHUD] no usable font - controls panel disabled");
 }
 
-#define FCH_ROWS 11
+#define FCH_ROWS 9
 
 /* Rows are "key\tdescription"; the key column is right-aligned so the
  * descriptions line up. White glyphs, dark outline, straight alpha. */
@@ -324,7 +323,7 @@ void Pc_FreeCamHud_Draw(void)
     float      vpW, vpH, margin, pad, left, bottom;
     int        px, i;
     char       text[1024];
-    char       hdr[64], cruise[64], follow[64];
+    char       hdr[64], cruise[64];
     const char* rows[FCH_ROWS];
     GLint      prevProg = 0, prevVao = 0, prevBuf = 0, prevTex = 0, prevUnit = GL_TEXTURE0, prevAlign = 4;
     GLint      prevSrcRgb = GL_ONE, prevDstRgb = GL_ZERO, prevSrcA = GL_ONE, prevDstA = GL_ZERO;
@@ -366,7 +365,6 @@ void Pc_FreeCamHud_Draw(void)
     snprintf(hdr, sizeof(hdr), "FREE CAMERA      speed x%.2f%s", g_PcFreeCamSpeedMul,
              g_PcFreeCamSteady ? "   STEADY" : "");
     snprintf(cruise, sizeof(cruise), ",\tcruise control: %s", g_PcFreeCamCruise ? "ON" : "off");
-    snprintf(follow, sizeof(follow), "F\tHarry follows camera: %s", g_PcFreeCamFollow ? "ON" : "off");
     rows[0]  = hdr;
     rows[1]  = "W A S D\tmove";
     rows[2]  = "E / Q\tup / down";
@@ -375,9 +373,7 @@ void Pc_FreeCamHud_Draw(void)
     rows[5]  = "Shift / Ctrl\tfast / slow (hold)";
     rows[6]  = "Space\tsteady: straight line, slow and smooth (hold)";
     rows[7]  = cruise;
-    rows[8]  = "G\tbring Harry to the camera";
-    rows[9]  = follow;
-    rows[10] = "H\thide this panel";
+    rows[8]  = "H\thide this panel";
 
     px = (int)(0.022f * vpH);
     if (px < 12) px = 12;

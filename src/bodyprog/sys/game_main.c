@@ -1266,17 +1266,17 @@ static int Kf_HoldRepeat(int cur, int prev, Uint32* pressMs, Uint32* lastMs)
 
 /* ---- Free camera (Numpad * / quick options "Free camera") -------------
  * Photo-mode style: mouse look, W/A/S/D move, E/Q up/down, wheel speed,
- * Shift fast, Ctrl slow, Space steady, comma cruise, G brings Harry, F makes
- * him follow, H hides the controls panel (pc_freecam_hud.c). Harry stands
- * still by default (his pad input is swallowed while it is on, see the
- * pad-suppression block in MainLoop). Shared by the key and the quick options
+ * Shift fast, Ctrl slow, Space steady, comma cruise, H hides the controls
+ * panel (pc_freecam_hud.c). Harry stays where he is (his pad input is
+ * swallowed while it is on, see the pad-suppression block in MainLoop). Moving
+ * him is not offered: chunk streaming, texture claims and the whole-map
+ * outdoor gate all key off his cell, so relocating him mid-flight dropped
+ * large parts of the town. Shared by the key and the quick options
  * row, and applied on every early-return path of DebugCamera_Update so it also
  * works with debug keys off and holds its view while the quick options /
  * console are open. */
 #define FC_MOVE_SPEED  640  /* Q12 units per 60 fps frame at x1 (~9u/s) */
 #define FC_VERT_SPEED  384
-#define FC_HARRY_BEHIND Q12(2.0f)
-#define FC_HARRY_AHEAD  Q12(3.0f)
 #define FC_MOUSE_YAW   6    /* Q12 angle units per mouse pixel */
 #define FC_MOUSE_PITCH 4
 /* Controller look tuning for the free camera; mirrors the TPS cam's
@@ -1298,7 +1298,6 @@ static int Kf_HoldRepeat(int cur, int prev, Uint32* pressMs, Uint32* lastMs)
 int   g_PcFreeCamHudHidden = 0;
 int   g_PcFreeCamSteady    = 0;
 int   g_PcFreeCamCruise    = 0;
-int   g_PcFreeCamFollow    = 0;
 float g_PcFreeCamSpeedMul  = 1.0f;
 
 static float         s_fcVel[3];      /* Q12 units per second */
@@ -1306,7 +1305,7 @@ static float         s_fcCruiseVel[3];
 static float         s_fcYaw, s_fcPitch; /* fractional shadows of g_DebugCamAngleY/X */
 static float         s_fcLookVel[2];
 static float         s_fcTrackYaw, s_fcTrackPitch;
-static unsigned char s_fcKeyPrev[4];
+static unsigned char s_fcKeyPrev[2];
 
 void Pc_FreeCam_Set(int on)
 {
@@ -1355,19 +1354,6 @@ static int Pc_FreeCam_KeyEdge(const unsigned char* ks, int sc, int slot)
     return hit;
 }
 
-static void Pc_FreeCam_HarryHere(void)
-{
-    s32 sinY = Math_Sin(g_DebugCamAngleY);
-    s32 cosY = Math_Cos(g_DebugCamAngleY);
-
-    if (g_GameWork.gameState != GameState_InGame)
-        return;
-    /* A little ahead of the camera so he lands in shot; his height is left to
-     * the ground, as the follow mode does. */
-    g_SysWork.playerWork.player.position.vx = g_DebugCamPos.vx + (s32)((s64)FC_HARRY_AHEAD * sinY >> 12);
-    g_SysWork.playerWork.player.position.vz = g_DebugCamPos.vz + (s32)((s64)FC_HARRY_AHEAD * cosY >> 12);
-}
-
 static void Pc_FreeCam_Input(void)
 {
     extern int           g_PsyX_WheelNotches;
@@ -1390,10 +1376,6 @@ static void Pc_FreeCam_Input(void)
         g_PcFreeCamCruise ^= 1;
         memcpy(s_fcCruiseVel, s_fcVel, sizeof(s_fcVel));
     }
-    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_G, 2))
-        Pc_FreeCam_HarryHere();
-    if (Pc_FreeCam_KeyEdge(ks, SDL_SCANCODE_F, 3))
-        g_PcFreeCamFollow ^= 1;
 
     /* Steady locks the travel direction where it was when Space went down, so
      * a dolly stays on its line while the look pans. */
@@ -1520,15 +1502,6 @@ static void Pc_FreeCam_Apply(void)
     s32 sinY    = Math_Sin(g_DebugCamAngleY);
     s32 cosY    = Math_Cos(g_DebugCamAngleY);
     s32 forward = (s32)((s64)20480 * Math_Cos(g_DebugCamAngleX) >> 12);
-
-    /* Follow mode: Harry rides a little behind the camera (horizontally; his
-     * height stays the ground's), so the world streams and the whole-map near
-     * cells centre around where the camera is. */
-    if (g_PcFreeCamFollow && g_GameWork.gameState == GameState_InGame)
-    {
-        g_SysWork.playerWork.player.position.vx = g_DebugCamPos.vx - (s32)((s64)FC_HARRY_BEHIND * sinY >> 12);
-        g_SysWork.playerWork.player.position.vz = g_DebugCamPos.vz - (s32)((s64)FC_HARRY_BEHIND * cosY >> 12);
-    }
 
     g_DebugCamLookAt.vx = g_DebugCamPos.vx + (s32)((s64)forward * sinY >> 12);
     g_DebugCamLookAt.vy = g_DebugCamPos.vy + (s32)((s64)20480 * Math_Sin(g_DebugCamAngleX) >> 12);
