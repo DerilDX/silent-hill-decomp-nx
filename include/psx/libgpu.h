@@ -785,6 +785,39 @@ typedef struct {
 
 static_assert(sizeof(DR_PSYX_FBCAPTURE) / 4 - P_LEN == 2, "DR_PSYX_FBCAPTURE size must be 2 longs");
 
+/* 0xB5: whole-map fast far path. code[1] = index of the first PsyX_FarQuad of
+ * a chain (linked by .next, -1 ends it), drawn at this point in OT order as
+ * opaque textured world quads. The game projects them itself from cached
+ * world-space geometry, skipping the GTE, packet build and shadow tables. */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FARQUADS;
+
+static_assert(sizeof(DR_PSYX_FARQUADS) / 4 - P_LEN == 2, "DR_PSYX_FARQUADS size must be 2 longs");
+
+/* Vertices in PSX quad order (0,1,2,3 = TL,TR,BL,BR): screen coords without
+ * the draw-env offset, w = view depth in SZ units. rgb[k][3] is padding. */
+typedef struct PsyX_FarQuad {
+	float          sx[4], sy[4], w[4];
+	unsigned char  uv[4][2];
+	unsigned short tpage, clut;
+	unsigned char  rgb[4][4];
+	unsigned char  fog[4];
+	int            next;
+} PsyX_FarQuad;
+
+/* Frame-lifetime pool. Reset at the start of the frame's world submission;
+ * Alloc returns NULL once full (the caller drops the quad). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void          PsyX_FarQuadsReset(void);
+extern PsyX_FarQuad* PsyX_FarQuadAlloc(int* index);
+#ifdef __cplusplus
+}
+#endif
+
 typedef struct {
 	DECLARE_P_ADDR
 	u_int  code;

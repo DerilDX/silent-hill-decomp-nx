@@ -4382,6 +4382,101 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 	return processedLongs;
 }
 
+#define PSYX_FAR_QUAD_MAX (1 << 18)
+static PsyX_FarQuad s_farQuads[PSYX_FAR_QUAD_MAX];
+static int          s_farQuadCount = 0;
+
+extern "C" void PsyX_FarQuadsReset(void)
+{
+	s_farQuadCount = 0;
+}
+
+extern "C" PsyX_FarQuad* PsyX_FarQuadAlloc(int* index)
+{
+	if (s_farQuadCount >= PSYX_FAR_QUAD_MAX)
+		return NULL;
+	*index = s_farQuadCount;
+	return &s_farQuads[s_farQuadCount++];
+}
+
+/* Emit one prepared far quad exactly as the GT4 parse would emit a world quad:
+ * same split classification, hi-res lookup, vertex/texcoord/colour builders and
+ * fog, but from the game's own projection instead of the GTE and shadow tables. */
+static void EmitFarQuad(const PsyX_FarQuad* q)
+{
+	static const int ord[4] = { 0, 1, 3, 2 }; /* MakeVertexQuad's v0,v1,v3,v2 buffer order */
+	float ofsX, ofsY;
+	float wsum = 0.0f;
+
+	s_curPrimSemiTrans  = 0;
+	s_curPrimIsFeedback = 0;
+	s_curPrimIsScratch  = 0;
+	s_curPrimIsGlyph    = 0;
+	activeDrawEnv.tpage = q->tpage;
+	if (ClutHasNoPalette(q->tpage, q->clut))
+		return;
+	ApplyHiresOverride(q->tpage, q->clut);
+	AddSplit(false, true, (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED);
+
+	if (g_vertexIndex + 24 > MAX_VERTEX_BUFFER_SIZE)
+	{
+		GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
+		flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
+		DrawAllSplits();
+		AddSplit(false, true, (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED);
+	}
+
+	GrVertex* v = &g_vertexBuffer[g_vertexIndex];
+	DrawEnvOffset(ofsX, ofsY);
+	memset(v, 0, sizeof(GrVertex) * 4);
+	for (int k = 0; k < 4; k++)
+	{
+		const int   s  = ord[k];
+		const float fx = q->sx[s], fy = q->sy[s];
+		int ix = (int)(fx >= 0.0f ? fx + 0.5f : fx - 0.5f);
+		int iy = (int)(fy >= 0.0f ? fy + 0.5f : fy - 0.5f);
+		if (ix < -1024) ix = -1024; else if (ix > 1023) ix = 1023;
+		if (iy < -1024) iy = -1024; else if (iy > 1023) iy = 1023;
+		v[k].x = (short)(ix + (int)ofsX);
+		v[k].y = (short)(iy + (int)ofsY);
+		v[k].geom3d = 1.0f;
+		if (g_PsxUsePgxp)
+		{
+			v[k].ppx = fx + ofsX;
+			v[k].ppy = fy + ofsY;
+			v[k].ppw = q->w[s];
+		}
+		else
+		{
+			v[k].ppx = (float)v[k].x;
+			v[k].ppy = (float)v[k].y;
+		}
+		wsum += q->w[s];
+	}
+	if (g_PsxUsePgxp)
+	{
+		const float z = PgxpNdcFromViewZ(wsum * 0.25f + (float)g_PsxPgxpWorldFarBias);
+		for (int k = 0; k < 4; k++) { v[k].z = z; v[k]._p1 = 1; }
+	}
+	else
+	{
+		float z = 1.0f - 2.0f * (wsum * 0.25f) / (g_szMaxPrevFrame < 1 ? 1.0f : (float)g_szMaxPrevFrame);
+		if (z < -1.0f) z = -1.0f;
+		for (int k = 0; k < 4; k++) v[k].z = z;
+	}
+
+	MakeTexcoordQuad(v, (unsigned char*)q->uv[0], (unsigned char*)q->uv[1], (unsigned char*)q->uv[3], (unsigned char*)q->uv[2],
+	                 q->tpage, q->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+	MakeColourQuad(v, true, (unsigned char*)q->rgb[0], (unsigned char*)q->rgb[1], (unsigned char*)q->rgb[3], (unsigned char*)q->rgb[2]);
+	v[0]._p0 = (char)q->fog[0];
+	v[1]._p0 = (char)q->fog[1];
+	v[2]._p0 = (char)q->fog[3];
+	v[3]._p0 = (char)q->fog[2];
+
+	TriangulateQuad();
+	g_vertexIndex += PgxpEmitPoly(v, 6);
+}
+
 static int ProcessPsyXPrims(P_TAG* polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
@@ -4413,6 +4508,13 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 	{
 		DR_PSYX_MODERN_MESH* modern = (DR_PSYX_MODERN_MESH*)polyTag;
 		AddModernSplit(modern->code[1]);
+		return 2;
+	}
+	case 0x05:
+	{
+		const DR_PSYX_FARQUADS* fq = (const DR_PSYX_FARQUADS*)polyTag;
+		for (int i = (int)fq->code[1]; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+			EmitFarQuad(&s_farQuads[i]);
 		return 2;
 	}
 	case 0x04:
