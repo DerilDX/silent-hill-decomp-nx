@@ -3738,7 +3738,11 @@ void MainLoop(void) // 0x80032EE0
                  * valid chain pointers, otherwise the truncate-on-bad-
                  * cur path here erases the picked-up item. */
                 uintptr_t subLo = 0, subHi = 0;
+                uintptr_t farLo = 0, farHi = 0;
+                extern void Pc_FarOt_GetBounds(uintptr_t* lo, uintptr_t* hi);
                 GsSortOt_GetSubrootBounds(&subLo, &subHi);
+                /* Whole-map far list nodes, spliced into the last bucket. */
+                Pc_FarOt_GetBounds(&farLo, &farHi);
                 /* CRITICAL: validate `cur` BEFORE any field access — including
                  * the loop condition's isendprim(cur), which reads cur->addr
                  * (a 64-bit pointer load). If ot0->tag itself was corrupted
@@ -3776,7 +3780,8 @@ void MainLoop(void) // 0x80032EE0
                     uintptr_t curAddr = (uintptr_t)cur;
                     int curOk = ((curAddr >= pktLo && curAddr < pktHi) ||
                                  (curAddr >= otLo  && curAddr < otHi)  ||
-                                 (subLo && curAddr >= subLo && curAddr < subHi));
+                                 (subLo && curAddr >= subLo && curAddr < subHi) ||
+                                 (curAddr >= farLo && curAddr < farHi));
                     if (pmapTrace && w2 < 200) {
                         u8 dbgCode = curOk ? ((P_TAG*)cur)->code : 0xFF;
                         int dbgLen = curOk ? getlen(cur) : -1;

@@ -136,6 +136,91 @@ extern int g_PsxWholeMapFar;
  * poly the last OT bucket's seed and it paints over the depth-tested town.
  * Only inside the whole-map chunk loop: characters drawn by the same code
  * keep stock depth. */
+/* Whole-map far list. The OT spans ~64u; everything past it was clamped into
+ * one bucket, where order is submission order instead of distance. The streets
+ * are layered coplanar surfaces (a large base under the asphalt tiles) that the
+ * PSX keeps apart by their bucket depth, so in that bucket the base painted over
+ * the asphalt: a ring of broken road from the old draw distance outward. Far
+ * prims go into this depth-sorted list instead, spliced into the last bucket
+ * while the whole-map chunk loop runs. 4096 slots of 64 SZ (0.25u) from 64u
+ * out to ~1000u. */
+#define PC_FAR_OT_SIZE  4096
+#define PC_FAR_OT_SHIFT 6
+#define PC_FAR_OT_BASE  0x4000
+static OT_TAG s_pcFarOt[PC_FAR_OT_SIZE];
+static int    s_pcFarOtActive = 0;
+extern int g_PsxWholeMapChunkSz;
+
+void Pc_FarOt_GetBounds(uintptr_t* lo, uintptr_t* hi)
+{
+    *lo = (uintptr_t)&s_pcFarOt[0];
+    *hi = (uintptr_t)&s_pcFarOt[PC_FAR_OT_SIZE];
+}
+
+void Pc_FarOtBegin(GsOT* ot)
+{
+    extern uintptr_t g_PsxOtNoBucketLo, g_PsxOtNoBucketHi;
+    OT_TAG* last = (OT_TAG*)&ot->org[ORDERING_TABLE_SIZE - 1];
+    s32     i;
+
+    setaddr(&s_pcFarOt[0], getaddr(last));
+    setlen(&s_pcFarOt[0], 0);
+    for (i = 1; i < PC_FAR_OT_SIZE; i++)
+    {
+        setaddr(&s_pcFarOt[i], &s_pcFarOt[i - 1]);
+        setlen(&s_pcFarOt[i], 0);
+    }
+    setaddr(last, &s_pcFarOt[PC_FAR_OT_SIZE - 1]);
+    Pc_FarOt_GetBounds(&g_PsxOtNoBucketLo, &g_PsxOtNoBucketHi);
+    s_pcFarOtActive = 1;
+}
+
+void Pc_FarOtEnd(void)
+{
+    s_pcFarOtActive = 0;
+}
+
+static u32 Pc_FarKey(u16 z0, u16 z1, u16 z2, u16 z3)
+{
+    u32 k = z0;
+
+    if (z1 > k) k = z1;
+    if (z2 > k) k = z2;
+    if (z3 > k) k = z3;
+    /* 0xFFFF is the SZ clamp (~256u): past it only the chunk's true depth is known. */
+    if (k >= 0xFFFF && g_PsxWholeMapChunkSz > 0xFFFF)
+        k = (u32)g_PsxWholeMapChunkSz;
+    return k;
+}
+
+static void Pc_FarOtAdd(void* prim, u32 key)
+{
+    s32 idx = (key > PC_FAR_OT_BASE) ? (s32)((key - PC_FAR_OT_BASE) >> PC_FAR_OT_SHIFT) : 0;
+
+    if (idx >= PC_FAR_OT_SIZE)
+        idx = PC_FAR_OT_SIZE - 1;
+    addPrim(&s_pcFarOt[idx], prim);
+}
+
+#define SH_ADDPRIM_MESH(tag, sd, shift, prim)                                    \
+    do {                                                                        \
+        if (s_pcFarOtActive && (sd)->field_380.s_0.field_18 == SH_OT_LAST_DEPTH(shift)) \
+            Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->field_18C[(sd)->field_380.s_0.field_10], \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_11],              \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_12],              \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_13 == 0xFF        \
+                    ? (sd)->field_380.s_0.field_12 : (sd)->field_380.s_0.field_13])); \
+        else                                                                    \
+            addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim)); \
+    } while (0)
+#define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3)               \
+    do {                                                                        \
+        if (s_pcFarOtActive && (depth) == SH_OT_LAST_DEPTH(shift))              \
+            Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->screenZ_168[i0], (u16)(sd)->screenZ_168[i1], \
+                                          (u16)(sd)->screenZ_168[i2], (u16)(sd)->screenZ_168[i3])); \
+        else                                                                    \
+            addPrim(&(ot)[((depth) >> (shift)) >> 2], (prim));                  \
+    } while (0)
 #define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift)                     \
     do {                                                                        \
         if (g_PsxWholeMapFar && SH_WHOLEMAP_FAR_POLY(depth, shift))             \
@@ -149,6 +234,8 @@ extern int g_PsxWholeMapFar;
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FAR_POLY(depth, shift) (0)
 #define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift) ((void)0)
+#define SH_ADDPRIM_MESH(tag, sd, shift, prim) addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim))
+#define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3) addPrim(&(ot)[((depth) >> (shift)) >> 2], (prim))
 #endif
 
 #ifdef SH_PC_PORT
@@ -3022,7 +3109,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             /* PC: Skip fog overlay + SetPriority packets.
                              * Encode fog factor for shader fog blending. */
                             PC_FACE_FOG_VERTS(scratchData);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                             poly3 = (PACKET*)(poly1 + 1) + 0xC + 0xC;
                             poly1  = poly3 + 1;
@@ -3030,16 +3117,16 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             packet1 = poly1 + 1;
 
                             SetPriority(packet1, 0, 0);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, packet1);
 
                             setSemiTrans(poly1, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly1);
 
                             packet1 = (PACKET*)(poly1 + 1) + 0xC;
                             SetPriority(packet1, 1, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, packet1);
 
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                             poly3 = (PACKET*)(poly1 + 1) + 0xC + 0xC;
                             poly1  = poly3 + 1;
@@ -3051,11 +3138,11 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             /* PC: Render opaque, skip fog overlay.
                              * Encode per-vertex fog for shader blending. */
                             PC_FACE_FOG_VERTS(scratchData);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 #else
                             setSemiTrans(poly3, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly1);
 #endif
                             poly3 = poly1 + 1;
                             poly1  = poly3 + 1;
@@ -3221,7 +3308,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 #ifdef SH_PC_PORT
                     PC_FACE_FOG_VERTS(scratchData);
 #endif
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
                     poly3++;
                 }
             }
@@ -3439,7 +3526,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     /* PC: Skip fog overlay + SetPriority (no mask bit support).
                      * Encode fog factor in p1 for shader fog blending. */
                     PC_FACE_FOG_VERTS(scratchData);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                     poly3  = (PACKET*)(poly2 + 1) + 0xC + 0xC;
                     poly2 = poly3 + 1;
@@ -3448,14 +3535,14 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
                     SetPriority(packet0, 0, 0);
 
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet0);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, packet0);
                     setSemiTrans(poly2, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly2);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly2);
 
                     packet0 = (PACKET*)(poly2 + 1) + 0xC;
                     SetPriority(packet0, 1, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet0);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, packet0);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                     poly3  = (PACKET*)(poly2 + 1) + 0xC + 0xC;
                     poly2 = poly3 + 1;
@@ -3467,11 +3554,11 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     /* PC: Render opaque, skip fog overlay.
                      * Encode per-vertex fog for shader blending. */
                     PC_FACE_FOG_VERTS(scratchData);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 #else
                     setSemiTrans(poly3, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly2);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly2);
 #endif
                     poly3  = poly2 + 1;
                     poly2 = poly3 + 1;
@@ -3689,7 +3776,7 @@ __block1530:
 
             setlen(poly0, 12);
 
-            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly0);
+            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly0);
 #ifdef SH_PC_PORT
             _b1530Emitted++;
 #endif
@@ -3865,7 +3952,7 @@ __block19CC:
 
             setlen(poly4, 9);
 
-            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly4);
+            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly4);
 
             poly4++;
 #ifdef SH_PC_PORT
@@ -4640,7 +4727,8 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
                                scratchData->u.s_1.field_2, scratchData->u.s_1.field_2, temp_t4, arg3);
 #endif
-            addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt3);
+            SH_ADDPRIM_LIT(ot, temp_t4, arg3, poly.gt3, scratchData, scratchData->u.s_1.field_0,
+                           scratchData->u.s_1.field_1, scratchData->u.s_1.field_2, scratchData->u.s_1.field_2);
             poly.gt3++;
 #ifdef SH_PC_PORT
             _dbgPrimPass++;
@@ -4758,7 +4846,8 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
                                scratchData->u.s_1.field_2, scratchData->u.s_1.field_3, temp_t4, arg3);
 #endif
-            addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt4);
+            SH_ADDPRIM_LIT(ot, temp_t4, arg3, poly.gt4, scratchData, scratchData->u.s_1.field_0,
+                           scratchData->u.s_1.field_1, scratchData->u.s_1.field_2, scratchData->u.s_1.field_3);
             poly.gt4++;
 #ifdef SH_PC_PORT
             _dbgPrimPass++;
@@ -5405,7 +5494,10 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
                  * bucket seed would sit at ~64u and cover every far block. */
                 if (Pc_WholeMapDrawActive())
                     PsyX_SetNextPrimDepthSz((unsigned int)pcBillboardSz);
-                addPrim(&ot_arg4->org[MIN(temp_v0_2 >> arg5, ORDERING_TABLE_SIZE - 1)], poly_gt4);
+                if (s_pcFarOtActive && (temp_v0_2 >> arg5) >= ORDERING_TABLE_SIZE - 1)
+                    Pc_FarOtAdd(poly_gt4, (u32)pcBillboardSz);
+                else
+                    addPrim(&ot_arg4->org[MIN(temp_v0_2 >> arg5, ORDERING_TABLE_SIZE - 1)], poly_gt4);
                 poly_gt4++;
             }
 #else

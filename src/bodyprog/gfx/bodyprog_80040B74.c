@@ -2795,6 +2795,11 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
         s32      wmViewZ[PC_MAX_IPD_CHUNKS];
         s32      wmCount = 0;
         g_PsxWholeMapFar = wmFar;
+        if (wmFar)
+        {
+            extern void Pc_FarOtBegin(GsOT* ot);
+            Pc_FarOtBegin(ot);
+        }
 #endif
     for (; curChunk < &g_Map.activeChunks[g_Map.activeChunkCount]; curChunk++)
     {
@@ -2884,6 +2889,10 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
         }
     }
     g_PsxWholeMapFar = 0; /* far re-projection is world-geometry only */
+    {
+        extern void Pc_FarOtEnd(void);
+        Pc_FarOtEnd();
+    }
     g_PsxWholeMapChunkSz = 0;
 #endif
 #ifdef SH_PC_PORT
