@@ -225,6 +225,8 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
  * unit, which the 64-unit quantization in PsyX_SetNextPrimSz collapses into one
  * depth (the see-through bug). */
 extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3);
+/* One unclamped SZ for all four verts (whole-map billboards past the 0xFFFF clamp). */
+extern void PsyX_SetNextPrimDepthSz(unsigned int sz);
 extern float PsyX_GetItemDepthSzMax(void);
 /* Contribute an SZ to the frame maximum WITHOUT arming a one-shot payload for
  * the next addPrim. For a drawer that replaces a sort-time prim builder

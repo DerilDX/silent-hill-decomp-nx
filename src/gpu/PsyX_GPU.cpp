@@ -824,7 +824,11 @@ int g_DrawPrimMode = 0;
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
 enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2 };
-enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
+/* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
+ * bucket shares that one bucket, so painter order cannot sort the distant town
+ * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
+ * on their true per-vertex depth instead. */
+enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2, SPLIT_DEPTH_WORLD_FAR = 3 };
 
 /* sz widened u16 -> u32: the whole-town far-depth substitution below feeds true
  * cell-center view depths that exceed the 0xFFFF SZ clamp. u16 values still fit
@@ -834,7 +838,7 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
  * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
  * address from a previous frame must then read as a miss, exactly like the
  * s_shadow / s_affine tables already do). Inert while the memset still runs. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; unsigned char alpha; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; unsigned char alpha; unsigned char far; };
 
 /* Per-prim ALPHA (0..255, default 255 = opaque semantics unchanged), armed like
  * the SZ payload and carried in the same entry. BM_AVERAGE is real
@@ -941,10 +945,10 @@ extern "C" float PGXP_GetSzMax(void)
 static uint32_t g_primSzNext[4];
 static int g_primSzNextValid = 0;
 static unsigned char g_primSzNextKind = SZ_KIND_NONE; /* producer kind for the next captured prim */
+static unsigned char g_primSzNextFar = 0;
 
 extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
 {
-	(void)arg3;
 	uint32_t avg_q;
 	uint32_t mx;
 
@@ -973,6 +977,8 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 		if (s3 > mx) mx = s3;
 	}
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
+	g_primSzNextFar = (g_PsxWholeMapFar && arg3 >= 0 && arg3 <= 3 &&
+	                   mx >= (2047u << (arg3 + 2))) ? 1 : 0;
 	if (g_PsxUsePgxp) s_dbgArmF++;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
@@ -1007,10 +1013,22 @@ extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, un
 	g_primSzNextKind = SZ_KIND_EXACT; /* decals / inventory authored Z — NOT world painter */
 }
 
+/* True depth past the u16 SZ clamp, for whole-map billboards: their prims carry
+ * no SZ of their own, so the auto-capture would hand them the last OT bucket's
+ * seed and every distant tree would paint in front of the depth-tested town. */
+extern "C" void PsyX_SetNextPrimDepthSz(unsigned int sz)
+{
+	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
+	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = sz;
+	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_EXACT;
+}
+
 extern "C" void PsyX_CancelNextPrimSz(void)
 {
 	g_primSzNextValid = 0;
 	g_primSzNextKind = SZ_KIND_NONE;
+	g_primSzNextFar = 0;
 }
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
@@ -1028,13 +1046,16 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 
 	uint32_t s0, s1, s2, s3;
 	unsigned char kind;
+	unsigned char far = 0;
 	if (g_primSzNextValid) {
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
 		kind = g_primSzNextKind;
 		if (g_PsxUsePgxp && kind == SZ_KIND_FLAT) s_dbgCapF++;
+		far = g_primSzNextFar;
 		g_primSzNextValid = 0;
 		g_primSzNextKind = SZ_KIND_NONE;
+		g_primSzNextFar = 0;
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
@@ -1058,6 +1079,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			g_szTable[s].gen = s_pgxpGen;
 			g_szTable[s].kind = kind;
+			g_szTable[s].far = far;
 			g_szTable[s].alpha = (unsigned char)g_primAlphaNext;
 			g_primAlphaNext = 255;
 			return;
@@ -1072,6 +1094,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 	g_szTable[slot].gen = s_pgxpGen;
 	g_szTable[slot].kind = kind;
+	g_szTable[slot].far = far;
 }
 
 /* Depth mode for a prim's split: WORLD only for static-world-mesh (FLAT) opaque
@@ -1096,7 +1119,7 @@ static int SplitDepthForPrim(const void* prim)
 				s_dbgStaleRej++;
 				return SPLIT_DEPTH_DISABLED;
 			}
-			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return SPLIT_DEPTH_WORLD; }
+			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return g_szTable[s].far ? SPLIT_DEPTH_WORLD_FAR : SPLIT_DEPTH_WORLD; }
 			return SPLIT_DEPTH_DISABLED;
 		}
 		if (g_szTable[s].key == 0)
