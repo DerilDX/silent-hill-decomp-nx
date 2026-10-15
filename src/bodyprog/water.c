@@ -726,10 +726,27 @@ void func_8008E5B4(void) // 0x8008E5B4
     s32              temp_v0;
     s_func_8008E5B4* packet;
 
-    /* PC: this render-to-VRAM scratch (RECT 832,224 = the tile the water
-     * surface samples) works again — PsyX routes small x>=320 draw-areas
-     * through the offscreen FBO and packs the pixels back into VRAM
-     * (ProcessDrawEnv DR_AREA / GR_SetOffscreenState small-rect writeback). */
+#ifdef SH_PC_PORT
+    /* The water surface reads this tile back as a 4bpp texture through
+     * another palette, so each colour word must be bit-exact GPU output;
+     * the GL offscreen round trip was not. Rasterize the two 1:1 layers in
+     * software (PsyX_VramDrawTexturedRect) in the order DrawOTag drew them:
+     * the opaque base, then the additive copy; dtd is on (main.c). */
+    if (g_DeltaTime != Q12(0.0f))
+    {
+        D_800AFDAC++;
+    }
+
+    PsyX_VramDrawTexturedRect(D_800AFDA4.x, D_800AFDA4.y, D_800AFDA4.w, D_800AFDA4.h,
+                              45, 14, 0, (D_800AFDAC >> 1) & 0x1F, 0, 1);
+    PsyX_VramDrawTexturedRect(D_800AFDA4.x, D_800AFDA4.y, D_800AFDA4.w, D_800AFDA4.h,
+                              45, 14, ((D_800AFDAC + 1) >> 2) & 0x1F, 8, 1, 1);
+    (void)drawEnv;
+    (void)temp_v0;
+    (void)packet;
+    return;
+#endif
+
     GetDrawEnv(&drawEnv);
     packet         = GsOUT_PACKET_P;
     GsOUT_PACKET_P = &packet[1];
