@@ -362,6 +362,17 @@ extern "C" int PsyX_PGXP_TriBackface(const void* a0, const void* a1, const void*
 
 /* Quad = two triangles; the game culls only if BOTH are backfacing (n012<=0 AND
  * n312>=0, opposite winding on the 2nd). Same precise/integer fallback. */
+/* Console `wholemap depth 0|1`: A/B for the far-band depth test. */
+extern "C" { int g_PsxWholeMapFarDepth = 1; }
+/* [WMPROBE] one-shot (console `wholemap probe`): counts one frame of far-band
+ * prims through backface, capture and parse, plus a few per-vertex samples.
+ * 2 = armed, counts during the next frame; 1 = dump at the following tick. */
+extern "C" { int g_PsxWholeMapProbe = 0; }
+static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
+static float s_wmWMin, s_wmWMax;
+static int s_wmSamples;
+static unsigned char s_lastLookupFar;
+
 extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void* a2, const void* a3,
                                       int intN012, int intN312)
 {
@@ -371,9 +382,12 @@ extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void
 		    Pgxp_FetchXY(a2,&x2,&y2) && Pgxp_FetchXY(a3,&x3,&y3)) {
 			float n012 = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0);
 			float n312 = (x1-x3)*(y2-y3) - (x2-x3)*(y1-y3);
-			return (n012 <= 0.0f && n312 >= 0.0f) ? 1 : 0;
+			int cull = (n012 <= 0.0f && n312 >= 0.0f) ? 1 : 0;
+			if (g_PsxWholeMapProbe == 1) { s_wmBfCalls++; s_wmBfCull += cull; }
+			return cull;
 		}
 	}
+	if (g_PsxWholeMapProbe == 1) { s_wmBfCalls++; s_wmBfFallback++; s_wmBfCull += (intN012 <= 0 && intN312 >= 0); }
 	return (intN012 <= 0 && intN312 >= 0) ? 1 : 0;
 }
 
@@ -404,6 +418,19 @@ extern "C" { int g_PsxPgxpDepthStats = 0; }
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
+	if (g_PsxWholeMapProbe == 1)
+	{
+		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d\n",
+			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
+			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp);
+		g_PsxWholeMapProbe = 0;
+	}
+	else if (g_PsxWholeMapProbe == 2)
+	{
+		s_wmBfCalls = s_wmBfFallback = s_wmBfCull = s_wmCaptured = s_wmParsed = s_wmAffineVerts = s_wmPreciseVerts = 0;
+		s_wmWMin = s_wmWMax = 0.0f; s_wmSamples = 0;
+		g_PsxWholeMapProbe = 1;
+	}
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
@@ -977,7 +1004,7 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 		if (s3 > mx) mx = s3;
 	}
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
-	g_primSzNextFar = (g_PsxWholeMapFar && arg3 >= 0 && arg3 <= 3 &&
+	g_primSzNextFar = (g_PsxWholeMapFar && g_PsxWholeMapFarDepth && arg3 >= 0 && arg3 <= 3 &&
 	                   mx >= (2047u << (arg3 + 2))) ? 1 : 0;
 	if (g_PsxUsePgxp) s_dbgArmF++;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
@@ -1053,6 +1080,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		kind = g_primSzNextKind;
 		if (g_PsxUsePgxp && kind == SZ_KIND_FLAT) s_dbgCapF++;
 		far = g_primSzNextFar;
+		if (far && g_PsxWholeMapProbe == 1) s_wmCaptured++;
 		g_primSzNextValid = 0;
 		g_primSzNextKind = SZ_KIND_NONE;
 		g_primSzNextFar = 0;
@@ -1206,6 +1234,7 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
 			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
 			if (kindOut) *kindOut = g_szTable[s].kind;
+			s_lastLookupFar = g_szTable[s].far;
 			return true;
 		}
 		if (g_szTable[s].key == 0) break;
@@ -1329,6 +1358,30 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		{
 			vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = 1;
 			if (isQuad) vertex[3]._p1 = 1;
+		}
+		if (g_PsxWholeMapProbe == 1 && kind == SZ_KIND_FLAT && s_lastLookupFar)
+		{
+			const int n = isQuad ? 4 : 3;
+			s_wmParsed++;
+			for (int i = 0; i < n; i++)
+			{
+				if (vertex[i].ppw > 0.0f) {
+					s_wmPreciseVerts++;
+					if (s_wmWMin == 0.0f || vertex[i].ppw < s_wmWMin) s_wmWMin = vertex[i].ppw;
+					if (vertex[i].ppw > s_wmWMax) s_wmWMax = vertex[i].ppw;
+				} else s_wmAffineVerts++;
+			}
+			if (s_wmSamples < 8 && (s_wmParsed % 97) == 1)
+			{
+				s_wmSamples++;
+				eprintinfo("[WMPROBE] prim code=%02x flatz=%.4f sz=%u,%u,%u,%u | v0=(%.1f,%.1f pp=%.1f,%.1f w=%.0f p1=%d) v1=(%.1f,%.1f pp=%.1f,%.1f w=%.0f) v2=(%.1f,%.1f pp=%.1f,%.1f w=%.0f) v3=(%.1f,%.1f pp=%.1f,%.1f w=%.0f)\n",
+					(unsigned)polyTag->code, (double)vertex[0].z, (unsigned)sz[0], (unsigned)sz[1], (unsigned)sz[2], (unsigned)sz[3],
+					(double)vertex[0].x, (double)vertex[0].y, (double)vertex[0].ppx, (double)vertex[0].ppy, (double)vertex[0].ppw, (int)vertex[0]._p1,
+					(double)vertex[1].x, (double)vertex[1].y, (double)vertex[1].ppx, (double)vertex[1].ppy, (double)vertex[1].ppw,
+					(double)vertex[2].x, (double)vertex[2].y, (double)vertex[2].ppx, (double)vertex[2].ppy, (double)vertex[2].ppw,
+					(double)(isQuad ? vertex[3].x : 0.0f), (double)(isQuad ? vertex[3].y : 0.0f), (double)(isQuad ? vertex[3].ppx : 0.0f),
+					(double)(isQuad ? vertex[3].ppy : 0.0f), (double)(isQuad ? vertex[3].ppw : 0.0f));
+			}
 		}
 		return;
 	}
