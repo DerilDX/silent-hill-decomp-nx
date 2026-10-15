@@ -89,8 +89,16 @@ struct ShadowEntry { uintptr_t key; unsigned gen; unsigned value; float x, y, w;
 #define SHADOW_MASK (SHADOW_SIZE - 1u)
 static ShadowEntry s_shadow[SHADOW_SIZE];
 
+/* Address-ordered, not scattered: the keys are vertex words in the scratch
+ * area and the packet arena, written and read in address order, so neighbours
+ * land in neighbouring slots and a lookup streams through cache. The golden-
+ * ratio scatter put every access of these 64 MB / 112 MB tables on a random
+ * page -- a cache and TLB miss per vertex word, several per vertex on both the
+ * submit and the parse side, which was most of the whole-map frame (~1 us per
+ * polygon). Distinct words within an 8 MB span get distinct slots; the
+ * gen-stamped linear probe covers the rest. */
 static inline unsigned ShadowHash(uintptr_t k) {
-	return (unsigned)((k >> 2) * 2654435761u) & SHADOW_MASK;
+	return (unsigned)(k >> 2) & SHADOW_MASK;
 }
 
 static void Shadow_Put(void* addr, float x, float y, float w, unsigned value) {
