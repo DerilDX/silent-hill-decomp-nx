@@ -1786,6 +1786,20 @@ void Pc_ConsoleExec(const char* line)
         extern int Pc_WholeMapDrawActive(void);
         static int s_pgxpBefore = -1;
         int on = g_PcConfig.wholeMapExteriors;
+        if (strncmp(arg, "PROBE", 5) == 0 || strncmp(arg, "probe", 5) == 0) {
+            extern int g_PsxWholeMapProbe;
+            g_PsxWholeMapProbe = 2;
+            cprintf("whole map: one-frame [WMPROBE] queued (see the log)");
+            return;
+        }
+        if (strncmp(arg, "DEPTH", 5) == 0 || strncmp(arg, "depth", 5) == 0) {
+            extern int g_PsxWholeMapFarDepth;
+            const char* v = arg + 5;
+            while (*v == ' ') v++;
+            g_PsxWholeMapFarDepth = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PsxWholeMapFarDepth);
+            cprintf("whole map far depth test: %s", g_PsxWholeMapFarDepth ? "ON" : "OFF (painter order)");
+            return;
+        }
         if (arg[0] == '1') on = 1;
         else if (arg[0] == '0') on = 0;
         else on = !on;
