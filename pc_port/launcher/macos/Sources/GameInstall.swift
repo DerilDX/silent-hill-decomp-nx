@@ -72,15 +72,20 @@ enum GameInstall {
         }
     }
 
-    /// Links left behind by an older app version, or by a previous launch from
-    /// a translocated path that no longer exists.
+    /// Links left behind by a previous launch from a translocated path that no
+    /// longer exists, or into another copy of the app (an older version still
+    /// sitting in Downloads) whose files this version may not ship.
     private static func pruneDanglingLinks() {
         let fm = FileManager.default
+        let ours = bundleGameDir.path + "/"
         guard let e = fm.enumerator(at: dataDir, includingPropertiesForKeys: [.isSymbolicLinkKey]) else { return }
         for case let url as URL in e {
             guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true,
-                  !fm.fileExists(atPath: url.path) else { continue }
-            try? fm.removeItem(at: url)
+                  let dest = try? fm.destinationOfSymbolicLink(atPath: url.path) else { continue }
+            let foreignBundle = dest.contains(".app/Contents/Resources/game/") && !dest.hasPrefix(ours)
+            if foreignBundle || !fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
         }
     }
 }
