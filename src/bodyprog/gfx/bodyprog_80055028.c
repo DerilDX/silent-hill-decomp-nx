@@ -5665,6 +5665,13 @@ static const void* s_pcFarMapKey;
 /* Console `wholemap fast 0|1`. */
 int g_PcWholeMapFast = 1;
 
+/* [WMPROBE] far-path tallies for the probe frame: where the far prims go, and
+ * which models the cache refuses (those stay on the PSX path every frame). */
+extern int g_PsxWholeMapProbe;
+static u32 s_pcFarPrbChunks, s_pcFarPrbUnbuilt, s_pcFarPrbBuilds, s_pcFarPrbCached;
+static u32 s_pcFarPrbClip, s_pcFarPrbBack, s_pcFarPrbEmit;
+static u32 s_pcFarPrbLit, s_pcFarPrbWide, s_pcFarPrbB4[4];
+
 extern MATRIX D_800C3868;
 extern MATRIX VbWvsMatrix;
 
@@ -5986,6 +5993,40 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
     {
         s_pcFarBuildBudget--;
         Pc_FarChunkBuild(fc, ipd);
+        if (g_PsxWholeMapProbe == 1)
+            s_pcFarPrbBuilds++;
+    }
+    if (g_PsxWholeMapProbe == 1)
+    {
+        s32 b;
+        s_pcFarPrbChunks++;
+        if (fc->ipd != ipd)
+            s_pcFarPrbUnbuilt++;
+        else
+            s_pcFarPrbCached += fc->count;
+        for (b = 0; b < ipd->modelBufferCount; b++)
+        {
+            const s_IpdModelBuffer*   buf = &ipd->modelBuffers[b];
+            const s_IpdModelInstance* inst;
+            for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+            {
+                const s_ModelHeader* mh = inst->modelHdr;
+                const s_MeshHeader*  mesh;
+                u32                  prims = 0;
+                s32                  b4;
+                if (mh == NULL || mh->meshHdrs == NULL || Pc_FarModelEligible(mh))
+                    continue;
+                for (mesh = mh->meshHdrs; mesh < &mh->meshHdrs[mh->meshCount]; mesh++)
+                    prims += mesh->primitiveCount;
+                b4 = mh->field_B_4;
+                if (Pc_WideLm_IsWide(mh))
+                    s_pcFarPrbWide += prims;
+                else if ((b4 & 0xFF) && b4 >= 0 && b4 < 4)
+                    s_pcFarPrbB4[b4] += prims;
+                else
+                    s_pcFarPrbLit += prims;
+            }
+        }
     }
     if (fc->ipd != ipd)
         return 0;
@@ -6024,7 +6065,11 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
                 below++;
         }
         if (k < 4 || !anyIn || above == 4 || below == 4)
+        {
+            if (g_PsxWholeMapProbe == 1)
+                s_pcFarPrbClip++;
             continue;
+        }
 
         {
             const float n012 = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
@@ -6032,7 +6077,11 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
             {
                 const float n312 = (sx[1] - sx[3]) * (sy[2] - sy[3]) - (sx[2] - sx[3]) * (sy[1] - sy[3]);
                 if (n312 >= 0.0f)
+                {
+                    if (g_PsxWholeMapProbe == 1)
+                        s_pcFarPrbBack++;
                     continue;
+                }
             }
         }
 
@@ -6077,6 +6126,8 @@ int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
             q->tpage    = p->field_6.bits.field_6_0;
             q->next     = *head;
             *head       = qi;
+            if (g_PsxWholeMapProbe == 1)
+                s_pcFarPrbEmit++;
         }
     }
     return 1;
@@ -6090,6 +6141,19 @@ int Pc_FarModelHandled(const s_ModelHeader* modelHdr)
 void Pc_FarFrameEnd(GsOT* ot)
 {
     s32 i;
+
+    if (g_PsxWholeMapProbe == 1)
+    {
+        SH_DBG("[WMPROBE] far path: chunks=%u unbuilt=%u builds=%u cachedPrims=%u clipped=%u backface=%u emitted=%u | "
+               "refused prims: lit(B_0)=%u wide=%u B_4[1]=%u B_4[2]=%u B_4[3]=%u",
+               s_pcFarPrbChunks, s_pcFarPrbUnbuilt, s_pcFarPrbBuilds, s_pcFarPrbCached, s_pcFarPrbClip,
+               s_pcFarPrbBack, s_pcFarPrbEmit, s_pcFarPrbLit, s_pcFarPrbWide,
+               s_pcFarPrbB4[1], s_pcFarPrbB4[2], s_pcFarPrbB4[3]);
+    }
+    s_pcFarPrbChunks = s_pcFarPrbUnbuilt = s_pcFarPrbBuilds = s_pcFarPrbCached = 0;
+    s_pcFarPrbClip = s_pcFarPrbBack = s_pcFarPrbEmit = 0;
+    s_pcFarPrbLit = s_pcFarPrbWide = 0;
+    s_pcFarPrbB4[0] = s_pcFarPrbB4[1] = s_pcFarPrbB4[2] = s_pcFarPrbB4[3] = 0;
 
     for (i = 0; i < ORDERING_TABLE_SIZE; i++)
     {
