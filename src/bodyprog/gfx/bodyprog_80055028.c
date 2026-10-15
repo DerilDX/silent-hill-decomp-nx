@@ -132,6 +132,14 @@ static s32 s_pcOtTagBase = 0;
 #define SH_WHOLEMAP_FAR_POLY(depth, shift)                                      \
     ((depth) == SH_OT_LAST_DEPTH(shift) && Pc_WholeMapDrawActive())
 extern int g_PsxWholeMapFar;
+extern int g_PsxUsePgxp;
+/* Backface on the PGXP float projection whenever PGXP draws the result. The
+ * integer test sees a distant ground tile under a pixel tall as zero area and
+ * drops it; with integer coords its neighbours snap over the gap, but PGXP
+ * draws them where they really are, so the dropped tile was a sky-coloured
+ * hole -- rows of them in the ground from ~50u out, PGXP only. PGXP off falls
+ * back to the integer sign inside PsyX_PGXP_QuadBackface: same test as stock. */
+#define SH_PRECISE_NCLIP(depth, shift) (g_PsxUsePgxp || SH_WHOLEMAP_FAR_POLY(depth, shift))
 /* Lit world models never report their SZ, so the depth capture hands a far
  * poly the last OT bucket's seed and it paints over the depth-tested town.
  * Only inside the whole-map chunk loop: characters drawn by the same code
@@ -233,6 +241,7 @@ static void Pc_FarOtAdd(void* prim, u32 key)
 #define SH_WHOLEMAP_FARCAP(cap) ((void)0)
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FAR_POLY(depth, shift) (0)
+#define SH_PRECISE_NCLIP(depth, shift) (0)
 #define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift) ((void)0)
 #define SH_ADDPRIM_MESH(tag, sd, shift, prim) addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim))
 #define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3) addPrim(&(ot)[((depth) >> (shift)) >> 2], (prim))
@@ -2957,7 +2966,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     }
 
 #ifdef SH_PC_PORT
-                    if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+                    if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
                     {
                         /* Far poly: integer NCLIP collapses sub-pixel-tall distant
                          * ground to zero area and culls it. Re-test on the PGXP
@@ -3207,7 +3216,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                 }
 
 #ifdef SH_PC_PORT
-                if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+                if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
                 {
                     /* Far poly: precise backface re-test (see loop A). */
                     s32 _n012 = 0, _n312 = 0;
@@ -3378,7 +3387,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
             }
 
 #ifdef SH_PC_PORT
-            if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+            if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
             {
                 /* Far poly: precise backface re-test (see loop A). */
                 s32 _n012 = 0, _n312 = 0;
@@ -3643,7 +3652,7 @@ __block1530:
         }
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+        if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
         {
             /* Far poly: precise backface re-test (see loop A). */
             s32 _n012 = 0, _n312 = 0;
@@ -3876,7 +3885,7 @@ __block19CC:
 #endif
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+        if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
         {
             /* Far poly: precise backface re-test (see loop A). */
             s32 _n012 = 0, _n312 = 0;
@@ -4086,7 +4095,7 @@ void func_80059E34(u32 arg0, s_MeshHeader* meshHdr, s_GteScratchData* scratchDat
         SH_CLAMP_OT_DEPTH(var_t2, arg3);
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(var_t2, arg3))
+        if (SH_PRECISE_NCLIP(var_t2, arg3))
         {
             /* Far poly: precise backface re-test (see Gfx_MeshDraw loop A). */
             s32 _n012 = 0, _n312 = 0;
