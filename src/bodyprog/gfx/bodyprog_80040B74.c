@@ -2758,6 +2758,11 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
     s32         queueState;
     s_Chunk* curChunk;
 
+#ifdef SH_PC_PORT
+    extern int    g_PsxWholeMapProbe;
+    extern double g_wmTChunks;
+    Uint64        pcProbeT0 = (g_PsxWholeMapProbe == 1) ? SDL_GetPerformanceCounter() : 0;
+#endif
     queueState = Fs_QueueEntryLoadStatusGet(g_Map.globalLm.queueIdx);
 
     if (queueState == ChunkLoadState_Unloaded)
@@ -2889,6 +2894,8 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
         }
     }
     g_PsxWholeMapFar = 0; /* far re-projection is world-geometry only */
+    if (g_PsxWholeMapProbe == 1)
+        g_wmTChunks += (double)(SDL_GetPerformanceCounter() - pcProbeT0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
     {
         extern void Pc_FarOtEnd(void);
         Pc_FarOtEnd();
