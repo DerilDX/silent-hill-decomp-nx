@@ -585,9 +585,15 @@ static void WeldVertex(float* x, float* y, float* w)
  * vertex's prim-field address. ppw>0 selects the shader's perspective path;
  * ppw=0 is affine. addr = the field pointer (MakeVertex has it); rawX/rawY = the
  * integer coord in that field. */
+/* Console PGXPDBG bitmask (diagnostic, remove once the PGXP-only far ground
+ * holes are found): turns one PGXP subsystem off while PGXP itself stays on.
+ * 1 = no precise vertices (all affine), 2 = legacy depth instead of the PGXP
+ * depth channel, 4 = per-prim alpha forced opaque, 8 = no world split mode. */
+extern "C" { int g_PsxPgxpDbg = 0; }
+
 static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY)
 {
-	if (s_curPgxpAffine) {
+	if (s_curPgxpAffine || (g_PsxPgxpDbg & 1)) {
 		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++; return;
 	}
 	float ox, oy, ow;
@@ -1139,7 +1145,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
  * never consulted and split classification/batching is byte-identical to today. */
 static int SplitDepthForPrim(const void* prim)
 {
-	if (!g_PsxUsePgxp || !g_PsxPgxpWorldDepth)
+	if (!g_PsxUsePgxp || !g_PsxPgxpWorldDepth || (g_PsxPgxpDbg & 8))
 		return SPLIT_DEPTH_DISABLED;
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -1261,7 +1267,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	/* Depth channel (PGXP on, outside the inventory item pass): flat per-prim
 	 * depth on the shared constant linear scale — no prev-frame normalizer
 	 * needed. Everything else keeps the legacy self-normalized behavior. */
-	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth;
+	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth && !(g_PsxPgxpDbg & 2);
 	if (g_PsxUsePgxp) s_dbgApplyCalls++;
 	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
@@ -1303,7 +1309,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	 * function, and every one of them writes a = 255, which silently stomped
 	 * the first version of this. Stashed instead; the colour builders consume
 	 * it (s_primAlphaPending) and reset it to 255. */
-	s_primAlphaPending = PsyX_LookupGteAlpha(polyTag);
+	s_primAlphaPending = (g_PsxPgxpDbg & 4) ? 255 : PsyX_LookupGteAlpha(polyTag);
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
