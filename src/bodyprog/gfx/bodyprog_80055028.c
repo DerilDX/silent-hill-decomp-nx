@@ -50,6 +50,7 @@ static s16 Pc_OverlayQuadHalfW(void)
 #include "main/rng.h"
 #ifdef SH_PC_PORT
 #include <stdio.h>
+#include <stdlib.h>
 #include "sh_log.h"
 #include <SDL_timer.h>
 #include "pc_config.h"
@@ -5614,3 +5615,505 @@ s32 WorldEnv_LightRotationAndIntensityGet(SVECTOR* rot)
     *rot = g_WorldEnvWork.field_58;
     return g_WorldEnvWork.field_54;
 }
+
+#ifdef SH_PC_PORT
+/* ========================================================================
+ * Whole-map fast far path.
+ *
+ * A whole-town frame pushed ~100k world quads through the PSX pipeline:
+ * emulated GTE transform and colour, packet build, OT walk and the PGXP
+ * shadow tables, about 1 us per quad. Distant chunks are static, so their
+ * geometry is cached once in world space (with the colours the mesh drawer
+ * would compute, by the same GTE steps) and each frame only projects, culls
+ * and buckets it in float. The quads reach PsyCross as DR_PSYX_FARQUADS
+ * packets in the same OT buckets / far list the PSX path uses, so draw order,
+ * texturing, hi-res packs and fog are unchanged. Only plain unlit-chain models
+ * (the Gfx_MeshDraw path) are cached; lit, chained, wide-LM models and
+ * billboards still take the PSX path.
+ * ====================================================================== */
+
+typedef struct
+{
+    const s_Primitive* prim;
+    float              wx[4], wy[4], wz[4];
+    u8                 rgb[4][4];
+    u8                 otBase; /* func_800571D0(field_B_1): the model's OT bucket offset */
+} PcFarPrim;
+
+typedef struct
+{
+    const s_IpdHeader* ipd;
+    PcFarPrim*         prims;
+    s32                count;
+    u32                lightKey;
+} PcFarChunk;
+
+#define PC_FAR_CHUNK_MAX      256
+#define PC_FAR_BUILDS_PER_FRM 6
+
+static PcFarChunk s_pcFarChunks[PC_FAR_CHUNK_MAX];
+static s32        s_pcFarChunkCount;
+static s32        s_pcFarBuildBudget;
+static s32        s_pcFarArg;
+static s32        s_pcFarNearHead[ORDERING_TABLE_SIZE];
+static s32        s_pcFarListHead[PC_FAR_OT_SIZE];
+static float      s_pcFarR[9], s_pcFarT[3], s_pcFarCam[3];
+static float      s_pcFarOfx, s_pcFarOfy, s_pcFarH, s_pcFarHalfW, s_pcFarHalfH;
+static float      s_pcWorldSlot[256][3];
+static const void* s_pcFarMapKey;
+
+/* Console `wholemap fast 0|1`. */
+int g_PcWholeMapFast = 1;
+
+extern MATRIX D_800C3868;
+extern MATRIX VbWvsMatrix;
+
+static u32 Pc_FarLightKey(void)
+{
+    u32 h = 2166136261u;
+#define PC_FAR_MIX(v) (h = (h ^ (u32)(v)) * 16777619u)
+    PC_FAR_MIX(g_WorldEnvWork.field_0);
+    PC_FAR_MIX(g_WorldEnvWork.isFogEnabled);
+    PC_FAR_MIX(g_WorldEnvWork.field_3);
+    PC_FAR_MIX(g_WorldEnvWork.field_20);
+    PC_FAR_MIX(*(u32*)&g_WorldEnvWork.worldTintColor & 0xFFFFFF);
+    PC_FAR_MIX(g_WorldEnvWork.field_4C);
+    if (g_WorldEnvWork.field_0 != 0)
+    {
+        /* The point light follows the player; its effect on geometry this far
+         * away is flat, so 16u of travel is plenty of resolution. */
+        PC_FAR_MIX(g_WorldEnvWork.field_54);
+        PC_FAR_MIX(*(u32*)&g_WorldEnvWork.field_58.vx);
+        PC_FAR_MIX(g_WorldEnvWork.field_58.vz);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vx >> 16);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vy >> 16);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vz >> 16);
+    }
+#undef PC_FAR_MIX
+    return h;
+}
+
+static int Pc_FarModelEligible(const s_ModelHeader* modelHdr)
+{
+    s32 b4;
+
+    if (modelHdr == NULL || modelHdr->meshHdrs == NULL || modelHdr->field_B_0)
+        return 0;
+    if (Pc_WideLm_IsWide(modelHdr))
+        return 0;
+    b4 = modelHdr->field_B_4;
+    if ((b4 & 0xFF) && b4 >= 0 && b4 < 4)
+        return 0;
+    return 1;
+}
+
+/* The mesh drawer's per-vertex colour, by its four loops (Gfx_MeshDraw): lit
+ * with fog (dpcl by intensity), lit without fog (dpcs, black below 8), unlit
+ * with fog (dpcs at 0 = the tint), unlit without fog (the flat tint). */
+static void Pc_FarVertexColor(const CVECTOR* tint, u8 inten, u8* out)
+{
+    CVECTOR c;
+
+    if (g_WorldEnvWork.field_0 != 0 && g_WorldEnvWork.isFogEnabled)
+    {
+        gte_lddp(0);
+        gte_ldsv_(inten << 5);
+        gte_ldrgb(tint);
+        gte_dpcl();
+        gte_strgb(&c);
+    }
+    else if (g_WorldEnvWork.field_0 != 0)
+    {
+        if (inten >= 8)
+        {
+            gte_lddp(0x1000 - (inten << 5));
+            gte_ldrgb(tint);
+            gte_dpcs();
+            gte_strgb(&c);
+        }
+        else
+        {
+            *(s32*)&c = 0;
+        }
+    }
+    else if (g_WorldEnvWork.isFogEnabled)
+    {
+        gte_lddp(0);
+        gte_ldrgb(tint);
+        gte_dpcs();
+        gte_strgb(&c);
+    }
+    else
+    {
+        c = *tint;
+    }
+    out[0] = c.r;
+    out[1] = c.g;
+    out[2] = c.b;
+    out[3] = 0;
+}
+
+static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
+{
+    s_GteScratchData*   sd = PSX_SCRATCH_ADDR(0);
+    GsCOORDINATE2       modelCoord;
+    MATRIX              worldMat;
+    MATRIX              viewMat;
+    CVECTOR             tint;
+    s32                 cellBoundX = ipd->cellX * Q12_TO_Q8(CHUNK_CELL_SIZE);
+    s32                 cellBoundZ = ipd->cellZ * Q12_TO_Q8(CHUNK_CELL_SIZE);
+    s32                 total      = 0;
+    s32                 n          = 0;
+    s32                 b;
+    s_IpdModelInstance* inst;
+    s_MeshHeader*       mesh;
+    s_Primitive*        prim;
+
+    for (b = 0; b < ipd->modelBufferCount; b++)
+    {
+        s_IpdModelBuffer* buf = &ipd->modelBuffers[b];
+        for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+        {
+            if (!Pc_FarModelEligible(inst->modelHdr))
+                continue;
+            for (mesh = inst->modelHdr->meshHdrs; mesh < &inst->modelHdr->meshHdrs[inst->modelHdr->meshCount]; mesh++)
+                total += mesh->primitiveCount;
+        }
+    }
+
+    free(fc->prims);
+    fc->prims    = (total > 0) ? (PcFarPrim*)malloc(sizeof(PcFarPrim) * total) : NULL;
+    fc->count    = 0;
+    fc->ipd      = ipd;
+    fc->lightKey = Pc_FarLightKey();
+    if (fc->prims == NULL)
+        return;
+
+    tint    = g_WorldEnvWork.worldTintColor;
+    tint.cd = 0x3C;
+    if (g_WorldEnvWork.field_0 == 0)
+    {
+        gte_lddp(0x1000 - g_WorldEnvWork.field_20);
+        gte_ldrgb(&tint);
+        gte_dpcs();
+        gte_strgb(&tint);
+    }
+    SetBackColor(0, 0, 0);
+
+    modelCoord.flg   = true;
+    modelCoord.super = NULL;
+
+    for (b = 0; b < ipd->modelBufferCount; b++)
+    {
+        s_IpdModelBuffer* buf = &ipd->modelBuffers[b];
+        for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+        {
+            s_ModelHeader* modelHdr = inst->modelHdr;
+            u32            vertOffset;
+            u32            normalOffset;
+
+            u8             otBase;
+
+            if (!Pc_FarModelEligible(modelHdr))
+                continue;
+            otBase = (u8)func_800571D0(modelHdr->field_B_1);
+
+            modelCoord.workm       = inst->mat;
+            modelCoord.workm.t[0] += cellBoundX;
+            modelCoord.workm.t[2] += cellBoundZ;
+            Vw_CoordToWorldAndViewMatrices(&modelCoord, &worldMat, &viewMat);
+            if (g_WorldEnvWork.field_0 != 0)
+                func_80057228(&worldMat, g_WorldEnvWork.field_54, &g_WorldEnvWork.field_58, &g_WorldEnvWork.field_60);
+
+            vertOffset   = modelHdr->vertexOffset;
+            normalOffset = modelHdr->normalOffset;
+            gte_lddqa(g_WorldEnvWork.field_4C);
+            gte_lddqb_0();
+
+            for (mesh = modelHdr->meshHdrs; mesh < &modelHdr->meshHdrs[modelHdr->meshCount]; mesh++)
+            {
+                s32 i;
+
+                if (vertOffset != 0 || normalOffset != 0)
+                    func_8005759C(mesh, sd, vertOffset, normalOffset);
+                else
+                    func_800574D4(mesh, sd);
+
+                switch (g_WorldEnvWork.field_0)
+                {
+                    case 1:
+                        func_80057658(mesh, normalOffset, sd, &g_WorldEnvWork.field_74, &g_WorldEnvWork.field_7C);
+                        break;
+                    case 2:
+                        func_80057A3C(mesh, normalOffset, sd, &g_WorldEnvWork.field_74);
+                        break;
+                }
+
+                for (i = vertOffset; i < (s32)(vertOffset + mesh->vertexCount) && i < 256; i++)
+                {
+                    const float lx = (float)sd->screenXy_0[i].vx;
+                    const float ly = (float)sd->screenXy_0[i].vy;
+                    const float lz = (float)sd->field_18C[i];
+                    s_pcWorldSlot[i][0] = (worldMat.m[0][0] * lx + worldMat.m[0][1] * ly + worldMat.m[0][2] * lz) / 4096.0f + (float)worldMat.t[0];
+                    s_pcWorldSlot[i][1] = (worldMat.m[1][0] * lx + worldMat.m[1][1] * ly + worldMat.m[1][2] * lz) / 4096.0f + (float)worldMat.t[1];
+                    s_pcWorldSlot[i][2] = (worldMat.m[2][0] * lx + worldMat.m[2][1] * ly + worldMat.m[2][2] * lz) / 4096.0f + (float)worldMat.t[2];
+                }
+
+                for (prim = mesh->primitives; prim < &mesh->primitives[mesh->primitiveCount] && n < total; prim++)
+                {
+                    PcFarPrim* fp = &fc->prims[n++];
+                    s32        k;
+
+                    fp->prim   = prim;
+                    fp->otBase = otBase;
+                    for (k = 0; k < 4; k++)
+                    {
+                        u8 vi = prim->field_C[k];
+                        if (vi == 0xFF)
+                            vi = prim->field_C[2];
+                        fp->wx[k] = s_pcWorldSlot[vi][0];
+                        fp->wy[k] = s_pcWorldSlot[vi][1];
+                        fp->wz[k] = s_pcWorldSlot[vi][2];
+                        Pc_FarVertexColor(&tint, sd->field_2B8[prim->field_10[k]], fp->rgb[k]);
+                    }
+                }
+            }
+        }
+    }
+    fc->count = n;
+}
+
+static PcFarChunk* Pc_FarChunkFind(const s_IpdHeader* ipd)
+{
+    s32 i;
+
+    for (i = 0; i < s_pcFarChunkCount; i++)
+    {
+        if (s_pcFarChunks[i].ipd == ipd)
+            return &s_pcFarChunks[i];
+    }
+    if (s_pcFarChunkCount >= PC_FAR_CHUNK_MAX)
+        return NULL;
+    s_pcFarChunks[s_pcFarChunkCount].ipd      = NULL;
+    s_pcFarChunks[s_pcFarChunkCount].prims    = NULL;
+    s_pcFarChunks[s_pcFarChunkCount].count    = 0;
+    s_pcFarChunks[s_pcFarChunkCount].lightKey = 0;
+    return &s_pcFarChunks[s_pcFarChunkCount++];
+}
+
+void Pc_FarFrameBegin(s32 arg, const void* mapKey)
+{
+    s32 ofx;
+    s32 ofy;
+    s32 i;
+
+    /* A new map reuses the chunk buffers for other geometry. */
+    if (s_pcFarMapKey != mapKey)
+    {
+        for (i = 0; i < s_pcFarChunkCount; i++)
+            free(s_pcFarChunks[i].prims);
+        s_pcFarChunkCount = 0;
+        s_pcFarMapKey     = mapKey;
+    }
+
+    PsyX_FarQuadsReset();
+    for (i = 0; i < ORDERING_TABLE_SIZE; i++)
+        s_pcFarNearHead[i] = -1;
+    for (i = 0; i < PC_FAR_OT_SIZE; i++)
+        s_pcFarListHead[i] = -1;
+    s_pcFarArg         = arg;
+    s_pcFarBuildBudget = PC_FAR_BUILDS_PER_FRM;
+
+    for (i = 0; i < 9; i++)
+        s_pcFarR[i] = (float)VbWvsMatrix.m[i / 3][i % 3] / 4096.0f;
+    for (i = 0; i < 3; i++)
+    {
+        s_pcFarT[i]   = (float)VbWvsMatrix.t[i];
+        s_pcFarCam[i] = (float)D_800C3868.t[i];
+    }
+    ReadGeomOffset(&ofx, &ofy);
+    s_pcFarOfx = (float)ofx;
+    s_pcFarOfy = (float)ofy;
+    s_pcFarH   = (float)ReadGeomScreen();
+    {
+        const float psxHalfW     = (float)(g_GameWork.gsScreenWidth >> 1);
+        const float visibleHalfW = ((g_PcConfig.windowHeight > 0)
+            ? ((float)g_GameWork.gsScreenHeight * (float)g_PcConfig.windowWidth /
+               (2.0f * (float)g_PcConfig.windowHeight)) * GR_LivePixelAspect()
+            : psxHalfW) / (g_PsxWorldHScale > 0.01f ? g_PsxWorldHScale : 1.0f);
+        s_pcFarHalfW = visibleHalfW + 64.0f;
+        if (s_pcFarHalfW < psxHalfW)
+            s_pcFarHalfW = psxHalfW;
+        s_pcFarHalfH = (float)(g_GameWork.gsScreenHeight >> 1) + 64.0f;
+    }
+}
+
+static u8 Pc_FarFog(float z)
+{
+    u32 zi;
+    s32 fb;
+    s32 fa;
+
+    if (!g_WorldEnvWork.isFogEnabled)
+        return 0;
+    zi = (z <= 0.0f) ? 0u : (z >= 4.0e9f ? 0xFFFFFFFFu : (u32)z);
+    if (zi < (1u << g_WorldEnvWork.fog.depthShift))
+        fb = g_WorldEnvWork.fogRamp[(zi << 7) >> g_WorldEnvWork.fog.depthShift];
+    else
+        fb = 0xFF;
+    fa = fb * 16 + g_WorldEnvWork.fog.intensity;
+    if (fa > 0x1000) fa = 0x1000;
+    if (fa < 0) fa = 0;
+    return (u8)((fa * 127 + 2048) >> 12);
+}
+
+/* Returns 1 when the chunk's cacheable models were submitted here (the caller
+ * then draws only the rest through the PSX path), 0 to draw it all the old way. */
+int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
+{
+    PcFarChunk* fc;
+    s32         i;
+    const u32   key = Pc_FarLightKey();
+
+    if (!g_PcWholeMapFast || !s_pcFarOtActive)
+        return 0;
+    fc = Pc_FarChunkFind(ipd);
+    if (fc == NULL)
+        return 0;
+    /* Rebuilds are budgeted per frame: an unbuilt chunk takes the PSX path,
+     * a built one keeps its old colours until its turn (a frame or two). */
+    if ((fc->ipd != ipd || fc->lightKey != key) && s_pcFarBuildBudget > 0)
+    {
+        s_pcFarBuildBudget--;
+        Pc_FarChunkBuild(fc, ipd);
+    }
+    if (fc->ipd != ipd)
+        return 0;
+
+    for (i = 0; i < fc->count; i++)
+    {
+        const PcFarPrim* fp = &fc->prims[i];
+        float            sx[4], sy[4], vz[4];
+        float            maxz = 0.0f;
+        s32              k;
+        s32              anyIn = 0, above = 0, below = 0;
+
+        for (k = 0; k < 4; k++)
+        {
+            const float dx = fp->wx[k] - s_pcFarCam[0];
+            const float dy = fp->wy[k] - s_pcFarCam[1];
+            const float dz = fp->wz[k] - s_pcFarCam[2];
+            const float vx = s_pcFarR[0] * dx + s_pcFarR[1] * dy + s_pcFarR[2] * dz + s_pcFarT[0];
+            const float vy = s_pcFarR[3] * dx + s_pcFarR[4] * dy + s_pcFarR[5] * dz + s_pcFarT[1];
+            const float z  = s_pcFarR[6] * dx + s_pcFarR[7] * dy + s_pcFarR[8] * dz + s_pcFarT[2];
+            float       r;
+
+            if (z < 256.0f)
+                break;
+            r     = s_pcFarH / z;
+            sx[k] = s_pcFarOfx + vx * r;
+            sy[k] = s_pcFarOfy + vy * r;
+            vz[k] = z;
+            if (z > maxz)
+                maxz = z;
+            if (sx[k] + s_pcFarHalfW >= 0.0f && sx[k] < s_pcFarHalfW)
+                anyIn = 1;
+            if (sy[k] < -s_pcFarHalfH)
+                above++;
+            if (sy[k] > s_pcFarHalfH)
+                below++;
+        }
+        if (k < 4 || !anyIn || above == 4 || below == 4)
+            continue;
+
+        {
+            const float n012 = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+            if (n012 <= 0.0f)
+            {
+                const float n312 = (sx[1] - sx[3]) * (sy[2] - sy[3]) - (sx[2] - sx[3]) * (sy[1] - sy[3]);
+                if (n312 >= 0.0f)
+                    continue;
+            }
+        }
+
+        {
+            PsyX_FarQuad*      q;
+            s32                qi;
+            s32*               head;
+            const s_Primitive* p = fp->prim;
+            const u32          mz = (maxz >= 4.0e9f) ? 0xFFFFFFFFu : (u32)maxz;
+            const u32          ob = (mz >> s_pcFarArg) >> 2;
+
+            if (ob + fp->otBase < ORDERING_TABLE_SIZE - 1)
+                head = &s_pcFarNearHead[ob + fp->otBase];
+            else
+            {
+                s32 fi = (mz > PC_FAR_OT_BASE) ? (s32)((mz - PC_FAR_OT_BASE) >> PC_FAR_OT_SHIFT) : 0;
+                if (fi >= PC_FAR_OT_SIZE)
+                    fi = PC_FAR_OT_SIZE - 1;
+                head = &s_pcFarListHead[fi];
+            }
+
+            q = PsyX_FarQuadAlloc(&qi);
+            if (q == NULL)
+                return 1;
+            for (k = 0; k < 4; k++)
+            {
+                q->sx[k] = sx[k];
+                q->sy[k] = sy[k];
+                q->w[k]  = vz[k];
+                q->fog[k] = Pc_FarFog(vz[k]);
+                *(u32*)q->rgb[k] = *(const u32*)fp->rgb[k];
+            }
+            q->uv[0][0] = ((const u8*)&p->field_0)[0];
+            q->uv[0][1] = ((const u8*)&p->field_0)[1];
+            q->uv[1][0] = ((const u8*)&p->field_4)[0];
+            q->uv[1][1] = ((const u8*)&p->field_4)[1];
+            q->uv[2][0] = ((const u8*)&p->field_8)[0];
+            q->uv[2][1] = ((const u8*)&p->field_8)[1];
+            q->uv[3][0] = ((const u8*)&p->field_A)[0];
+            q->uv[3][1] = ((const u8*)&p->field_A)[1];
+            q->clut     = p->field_2;
+            q->tpage    = p->field_6.bits.field_6_0;
+            q->next     = *head;
+            *head       = qi;
+        }
+    }
+    return 1;
+}
+
+int Pc_FarModelHandled(const s_ModelHeader* modelHdr)
+{
+    return g_PcWholeMapFast && s_pcFarOtActive && Pc_FarModelEligible(modelHdr);
+}
+
+void Pc_FarFrameEnd(GsOT* ot)
+{
+    s32 i;
+
+    for (i = 0; i < ORDERING_TABLE_SIZE; i++)
+    {
+        if (s_pcFarNearHead[i] >= 0)
+        {
+            DR_PSYX_FARQUADS* fq = (DR_PSYX_FARQUADS*)GsOUT_PACKET_P;
+            setlen(fq, 2);
+            fq->code[0] = 0xB5000000;
+            fq->code[1] = (u_int)s_pcFarNearHead[i];
+            addPrim(&ot->org[i], fq);
+            GsOUT_PACKET_P = (PACKET*)(fq + 1);
+        }
+    }
+    for (i = 0; i < PC_FAR_OT_SIZE; i++)
+    {
+        if (s_pcFarListHead[i] >= 0)
+        {
+            DR_PSYX_FARQUADS* fq = (DR_PSYX_FARQUADS*)GsOUT_PACKET_P;
+            setlen(fq, 2);
+            fq->code[0] = 0xB5000000;
+            fq->code[1] = (u_int)s_pcFarListHead[i];
+            addPrim(&s_pcFarOt[i], fq);
+            GsOUT_PACKET_P = (PACKET*)(fq + 1);
+        }
+    }
+}
+#endif

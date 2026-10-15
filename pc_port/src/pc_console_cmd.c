@@ -1792,6 +1792,14 @@ void Pc_ConsoleExec(const char* line)
             cprintf("whole map: one-frame [WMPROBE] queued (see the log)");
             return;
         }
+        if (strncmp(arg, "FAST", 4) == 0) {
+            extern int g_PcWholeMapFast;
+            const char* v = arg + 4;
+            while (*v == ' ') v++;
+            g_PcWholeMapFast = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PcWholeMapFast);
+            cprintf("whole map fast far path: %s", g_PcWholeMapFast ? "ON" : "OFF (all chunks through the PSX path)");
+            return;
+        }
         if (strncmp(arg, "DEPTH", 5) == 0 || strncmp(arg, "depth", 5) == 0) {
             extern int g_PsxWholeMapFarDepth;
             const char* v = arg + 5;

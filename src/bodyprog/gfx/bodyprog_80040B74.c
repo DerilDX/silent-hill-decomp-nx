@@ -771,6 +771,10 @@ void Map_CollisionDataInit(void) // 0x80041E98
 
 #ifdef SH_PC_PORT
 static void Pc_ParkedCellRecord(s32 cellX, s32 cellZ); /* defined near Pc_WholeMapDrawActive */
+/* Set around a far chunk's Ipd_ChunkDraw when the fast far path took its
+ * cacheable models (bodyprog_80055028.c Pc_FarChunkSubmit). */
+static s32 s_pcFarSkipEligible = 0;
+extern int Pc_FarModelHandled(const s_ModelHeader* modelHdr);
 #endif
 
 void Map_PlaceIpdAtCell(s16 ipdFileIdx, s32 cellX, s32 cellZ) // 0x80041ED0
@@ -2803,7 +2807,9 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
         if (wmFar)
         {
             extern void Pc_FarOtBegin(GsOT* ot);
+            extern void Pc_FarFrameBegin(s32 arg, const void* mapKey);
             Pc_FarOtBegin(ot);
+            Pc_FarFrameBegin(arg1, g_Map.chunkGridCenter);
         }
 #endif
     for (; curChunk < &g_Map.activeChunks[g_Map.activeChunkCount]; curChunk++)
@@ -2889,9 +2895,27 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
              * plane (cells are 40u-confined, so per-chunk depth is exact enough
              * for block-vs-block ordering). SZ units == Q8 view units. */
             g_PsxWholeMapChunkSz = wmViewZ[i] > 0 ? wmViewZ[i] : 0;
+            /* The 3x3 cells around the player keep the full PSX path (PGXP
+             * near clip, flashlight, exact behaviour); farther chunks send
+             * their cacheable models through the fast far path. */
+            {
+                extern int Pc_FarChunkSubmit(const s_IpdHeader* ipd);
+                s32 pcx = FLOOR_TO_STEP(Q12_TO_Q8(g_SysWork.playerWork.player.position.vx), Q12_TO_Q8(CHUNK_CELL_SIZE));
+                s32 pcz = FLOOR_TO_STEP(Q12_TO_Q8(g_SysWork.playerWork.player.position.vz), Q12_TO_Q8(CHUNK_CELL_SIZE));
+                s32 dx  = wmChunks[i]->cellX - pcx;
+                s32 dz  = wmChunks[i]->cellZ - pcz;
+                s_pcFarSkipEligible = (dx < -1 || dx > 1 || dz < -1 || dz > 1) &&
+                                      Pc_FarChunkSubmit(wmChunks[i]->ipdHdr);
+            }
             Ipd_ChunkDraw(wmChunks[i]->ipdHdr, g_Map.positionX, g_Map.positionZ, ot, arg1);
+            s_pcFarSkipEligible = 0;
             if (++drawCount >= drawLimit) break;
         }
+    }
+    if (g_PsxWholeMapFar)
+    {
+        extern void Pc_FarFrameEnd(GsOT* ot);
+        Pc_FarFrameEnd(ot);
     }
     g_PsxWholeMapFar = 0; /* far re-projection is world-geometry only */
     if (g_PsxWholeMapProbe == 1)
@@ -3462,7 +3486,8 @@ void Ipd_ChunkDraw(s_IpdHeader* ipdHdr, q19_12 posX, q19_12 posZ, GsOT* ot, bool
                 for (curBufC = ipdModelBuf->modelInstances; curBufC < &ipdModelBuf->modelInstances[ipdModelBuf->modelInstanceCount]; curBufC++)
                 {
                     modelInfo.modelHdr = curBufC->modelHdr;
-                    if (modelInfo.modelHdr != NULL)
+                    if (modelInfo.modelHdr != NULL &&
+                        !(s_pcFarSkipEligible && Pc_FarModelHandled(modelInfo.modelHdr)))
                     {
                         modelCoord.workm       = curBufC->mat;
                         modelCoord.workm.t[0] += cellBoundX;
