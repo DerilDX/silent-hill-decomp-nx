@@ -256,6 +256,7 @@ extern void PsyX_SetNextPrimNoFlashlight(void);
  * 5-bit semi-transparency per the tpage abr, STP into bit 15), for render-to-
  * VRAM scratches a later prim samples back as a texture. Updates vram[] and
  * the VRAM textures. */
+extern unsigned short PsyX_VramRead(int x, int y);
 extern void PsyX_VramDrawTexturedRect(int dstX, int dstY, int w, int h, int tpage, int clut,
                                       int u0, int v0, int semiTrans, int dither);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */

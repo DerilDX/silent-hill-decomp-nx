@@ -7304,6 +7304,16 @@ void GR_SetStencilMode(int drawPrim)
 #endif
 }
 
+/* Console ADDSTP: 1 = additive prims honour the texel STP bit, 0 = add every
+ * texel (the pre-2026-10-15 behaviour). A/B for the sewer water reflection. */
+extern "C" { int g_PsxAddStp = 1; }
+
+extern "C" unsigned short PsyX_VramRead(int x, int y)
+{
+	if (x < 0 || y < 0 || x >= VRAM_WIDTH || y >= VRAM_HEIGHT) return 0;
+	return vram[(size_t)y * VRAM_WIDTH + x];
+}
+
 void GR_SetBlendMode(BlendMode blendMode)
 {
 	if (g_PreviousBlendMode == blendMode)
@@ -7365,7 +7375,7 @@ void GR_SetBlendMode(BlendMode blendMode)
 		 * solid texels too: the sewer water surface, whose palette entries
 		 * are mostly STP-clear, let the flashlight's dark octagon show
 		 * through where the PSX covered it. */
-		glBlendFunc(GL_ONE, GL_SRC_ALPHA);
+		glBlendFunc(GL_ONE, g_PsxAddStp ? GL_SRC_ALPHA : GL_ONE);
 		break;
 	case BM_SUBTRACT:
 		glBlendFunc(GL_ONE, GL_ONE);
