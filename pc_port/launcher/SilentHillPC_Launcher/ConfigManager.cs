@@ -41,8 +41,31 @@ public class ConfigManager
 
     public void Set(string key, string value)
     {
+        // An unchanged value is not an edit. Forms push every field they show on
+        // Save, so marking those dirty rewrote keys the user never touched with
+        // the values read when the form opened -- undoing binds changed in game
+        // in the meantime.
+        string old;
+        if (_values.TryGetValue(key, out old) && old == value)
+            return;
         _values[key] = value;
         _dirty.Add(key);
+    }
+
+    /// <summary>Re-read values from disk, keeping pending launcher edits. Call
+    /// before a form snapshots values it will later write back.</summary>
+    public void RefreshFromDisk()
+    {
+        if (!File.Exists(_path))
+            return;
+        try
+        {
+            _lines = File.ReadAllLines(_path).ToList();
+            ParseInto(_lines, _values, _dirty);
+        }
+        catch (IOException)
+        {
+        }
     }
 
     public void Load()
@@ -150,5 +173,7 @@ public class ConfigManager
         }
 
         File.WriteAllLines(_path, _lines);
+        // Written; a later Save must not re-assert these over newer disk edits.
+        _dirty.Clear();
     }
 }

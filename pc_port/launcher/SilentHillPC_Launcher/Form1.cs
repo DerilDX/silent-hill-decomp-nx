@@ -1677,7 +1677,14 @@ public partial class Form1 : Form
 
         try
         {
-            var p = Process.Start(exePath);
+            // The game opens config.cfg relative to its working directory; a
+            // shortcut with another "Start in" folder made it read (and write
+            // binds to) a different file than the one this launcher edits.
+            var p = Process.Start(new ProcessStartInfo(exePath)
+            {
+                WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                UseShellExecute  = false,
+            });
             if (p != null)
             {
                 /* THE stale-settings bug. The launcher loads config.cfg once at

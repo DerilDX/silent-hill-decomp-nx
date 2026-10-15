@@ -1603,17 +1603,71 @@ void PcConfig_LogEffective(const char* path)
     SH_DBG("[CFG] ---- %d setting(s) ----", n);
 }
 
+/* The whole file, one malloc'd string per line (newline kept). No line cap: a
+ * fixed array silently dropped every line past it on each save, and the
+ * launcher appends its new keys at the end, so those were the first lost. */
+static char** PcConfig_ReadLines(int* outCount)
+{
+    FILE*  f = fopen(s_configPath, "r");
+    char** lines = NULL;
+    int    n = 0, cap = 0;
+    char   chunk[512];
+    char*  cur = NULL;
+    size_t curLen = 0;
+
+    *outCount = 0;
+    if (!f)
+        return NULL;
+    while (fgets(chunk, sizeof(chunk), f))
+    {
+        size_t cl    = strlen(chunk);
+        char*  grown = (char*)realloc(cur, curLen + cl + 1);
+        if (!grown)
+            break;
+        cur = grown;
+        memcpy(cur + curLen, chunk, cl + 1);
+        curLen += cl;
+        if (cl > 0 && chunk[cl - 1] != '\n' && !feof(f))
+            continue;
+        if (n == cap)
+        {
+            int    ncap = cap ? cap * 2 : 1024;
+            char** more = (char**)realloc(lines, sizeof(char*) * (size_t)ncap);
+            if (!more)
+                break;
+            lines = more;
+            cap   = ncap;
+        }
+        lines[n++] = cur;
+        cur        = NULL;
+        curLen     = 0;
+    }
+    if (cur && n < cap)
+        lines[n++] = cur;
+    else
+        free(cur);
+    fclose(f);
+    if (lines == NULL)
+        lines = (char**)malloc(sizeof(char*));
+    *outCount = n;
+    return lines;
+}
+
+static void PcConfig_FreeLines(char** lines, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        free(lines[i]);
+    free(lines);
+}
+
 void PcConfig_SaveKeyValues(const char* const* keys, const char* const* values, int count)
 {
-    /* Big enough to hold the whole config with headroom: the file grows as new
-     * settings are toggled (each unknown key appends a line), and any line past
-     * this cap would be dropped on the next save — silently resetting those keys
-     * to their defaults. The full keybind config is ~380 lines already. */
-    static char lines[1024][256];
     static char found[256];
-    int   n = 0;
-    int   i, k;
-    FILE* f;
+    char**      lines;
+    int         n = 0;
+    int         i, k;
+    FILE*       f;
 
     if (keys == NULL || values == NULL || count <= 0)
         return;
@@ -1621,13 +1675,9 @@ void PcConfig_SaveKeyValues(const char* const* keys, const char* const* values, 
         count = (int)sizeof(found);
     memset(found, 0, (size_t)count);
 
-    f = fopen(s_configPath, "r");
-    if (!f)
+    lines = PcConfig_ReadLines(&n);
+    if (!lines)
         return;
-    while (n < (int)(sizeof(lines) / sizeof(lines[0])) &&
-           fgets(lines[n], sizeof(lines[n]), f))
-        n++;
-    fclose(f);
 
     for (i = 0; i < n; i++)
     {
@@ -1644,11 +1694,20 @@ void PcConfig_SaveKeyValues(const char* const* keys, const char* const* values, 
         strncpy(key, p, kl);
         key[kl] = '\0';
         TrimWhitespace(key);
+        /* Every copy of a duplicated key is rewritten: the loader keeps the
+         * LAST one, so updating only the first lost the edit. */
         for (k = 0; k < count; k++)
         {
-            if (!found[k] && keys[k] != NULL && values[k] != NULL && strcmp(key, keys[k]) == 0)
+            if (keys[k] != NULL && values[k] != NULL && strcmp(key, keys[k]) == 0)
             {
-                snprintf(lines[i], sizeof(lines[i]), "%s = %s\n", keys[k], values[k]);
+                size_t need = strlen(keys[k]) + strlen(values[k]) + 5;
+                char*  line = (char*)malloc(need);
+                if (line)
+                {
+                    snprintf(line, need, "%s = %s\n", keys[k], values[k]);
+                    free(lines[i]);
+                    lines[i] = line;
+                }
                 found[k] = 1;
                 break;
             }
@@ -1656,16 +1715,18 @@ void PcConfig_SaveKeyValues(const char* const* keys, const char* const* values, 
     }
 
     f = fopen(s_configPath, "w");
-    if (!f)
-        return;
-    for (i = 0; i < n; i++)
-        fputs(lines[i], f);
-    for (k = 0; k < count; k++)
+    if (f)
     {
-        if (!found[k] && keys[k] != NULL && keys[k][0] != '\0' && values[k] != NULL)
-            fprintf(f, "%s = %s\n", keys[k], values[k]);
+        for (i = 0; i < n; i++)
+            fputs(lines[i], f);
+        for (k = 0; k < count; k++)
+        {
+            if (!found[k] && keys[k] != NULL && keys[k][0] != '\0' && values[k] != NULL)
+                fprintf(f, "%s = %s\n", keys[k], values[k]);
+        }
+        fclose(f);
     }
-    fclose(f);
+    PcConfig_FreeLines(lines, n);
 }
 
 /* Custom key binds are not key = value lines, so they get their own writer:
@@ -1674,25 +1735,27 @@ void PcConfig_SaveKeyValues(const char* const* keys, const char* const* values, 
  * file, pasted into a message, and pasted back. */
 void PcConfig_SaveBindLines(const char* const* lines, int count)
 {
-    static char buf[1024][256];
-    int   n = 0;
-    int   i;
-    FILE* f;
+    char** buf;
+    int    total = 0;
+    int    n = 0;
+    int    i;
+    FILE*  f;
 
-    f = fopen(s_configPath, "r");
-    if (!f)
+    buf = PcConfig_ReadLines(&total);
+    if (!buf)
         return;
-    while (n < (int)(sizeof(buf) / sizeof(buf[0])) && fgets(buf[n], sizeof(buf[n]), f))
+    for (i = 0; i < total; i++)
     {
-        char* p = buf[n];
+        char* p = buf[i];
         while (*p == 0x20 || *p == 0x09) p++;
-        if (strncmp(p, "bind ", 5) == 0 || strncmp(p, "BIND ", 5) == 0)
+        if (strncmp(p, "bind ", 5) == 0 || strncmp(p, "BIND ", 5) == 0 ||
+            strncmp(p, "# --- Custom key binds", 22) == 0)
+        {
+            free(buf[i]);
             continue;
-        if (strncmp(p, "# --- Custom key binds", 22) == 0)
-            continue;
-        n++;
+        }
+        buf[n++] = buf[i];
     }
-    fclose(f);
 
     /* Trim trailing blank lines so the section does not drift down the file
      * every time it is rewritten. */
@@ -1702,12 +1765,15 @@ void PcConfig_SaveBindLines(const char* const* lines, int count)
         while (*p == 0x20 || *p == 0x09 || *p == 0x0D || *p == 0x0A) p++;
         if (*p != 0)
             break;
-        n--;
+        free(buf[--n]);
     }
 
     f = fopen(s_configPath, "w");
     if (!f)
+    {
+        PcConfig_FreeLines(buf, n);
         return;
+    }
     for (i = 0; i < n; i++)
         fputs(buf[i], f);
     if (count > 0)
@@ -1720,6 +1786,7 @@ void PcConfig_SaveBindLines(const char* const* lines, int count)
         }
     }
     fclose(f);
+    PcConfig_FreeLines(buf, n);
 }
 
 void PcConfig_SaveKeyValue(const char* cfgKey, const char* cfgValue)

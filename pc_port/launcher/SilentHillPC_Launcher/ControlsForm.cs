@@ -1136,6 +1136,10 @@ public class ControlsForm : Form
         if (cb != null)
         {
             int idx = cb.Items.IndexOf(val);
+            // A value this list does not offer (set in game or by hand) is kept
+            // rather than replaced by the first entry on the next Save.
+            if (idx < 0 && !string.IsNullOrEmpty(val) && val != "NONE")
+                idx = cb.Items.Add(val);
             if (idx < 0) idx = cb.Items.IndexOf(fallback);
             cb.SelectedIndex = idx >= 0 ? idx : 0;
         }
@@ -1157,6 +1161,10 @@ public class ControlsForm : Form
 
     private void LoadValues()
     {
+        // The game's in-game Controls panel writes config.cfg too; show what is on
+        // disk now, not the launcher's startup snapshot.
+        config.RefreshFromDisk();
+
         // Per-scheme binds: classic from the base key, altcam from base + "_altcam".
         foreach (string key in SchemeKeys)
         {
@@ -1174,9 +1182,13 @@ public class ControlsForm : Form
             SetControlValue(kv.Value, config.Get(kv.Key, def), def);
         }
 
-        activeScheme = 0;
-        chkAltCamControls.Checked = false;
-        PopulateUiFromScheme(0);
+        // Open on the scheme the game will actually use: with any alternate
+        // camera style the classic binds only drive menus, so editing them (the
+        // old fixed default page) looked like the launcher not saving.
+        activeScheme = config.Get("control_style", "classic") != "classic" ? 1 : 0;
+        chkAltCamControls.Checked = activeScheme == 1;
+        foreach (Control c in rearLookControls) c.Enabled = activeScheme == 1;
+        PopulateUiFromScheme(activeScheme);
 
         PopulateControlStyles();
 
