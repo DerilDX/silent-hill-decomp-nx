@@ -2102,6 +2102,11 @@ void Pc_ConsoleExec(const char* line)
         g_PcConfig.usePgxp = g_PsxUsePgxp ? 1 : 0;
         PcConfig_SaveKeyValue("use_pgxp", g_PsxUsePgxp ? "1" : "0");
         cprintf("PGXP %s (perspective-correct, WIP)", g_PsxUsePgxp ? "ON" : "OFF");
+    } else if (strcmp(cmd, "PGXPDBG") == 0) {
+        /* Diagnostic: switch off one PGXP subsystem at a time with PGXP still on. */
+        extern int g_PsxPgxpDbg;
+        if (arg[0]) g_PsxPgxpDbg = atoi(arg);
+        cprintf("pgxpdbg %d: 1=no precise verts 2=legacy depth 4=opaque alpha 8=no world split", g_PsxPgxpDbg);
     } else if (strcmp(cmd, "WORLDDEPTH") == 0) {
         /* worlddepth 0|1 -- depth function for static opaque world under PGXP.
          * 1 = GL_ALWAYS (paint order alone decides), 0 = GL_LEQUAL (a nearer
