@@ -362,8 +362,12 @@ extern "C" int PsyX_PGXP_TriBackface(const void* a0, const void* a1, const void*
 
 /* Quad = two triangles; the game culls only if BOTH are backfacing (n012<=0 AND
  * n312>=0, opposite winding on the 2nd). Same precise/integer fallback. */
-/* Console `wholemap depth 0|1`: A/B for the far-band depth test. */
-extern "C" { int g_PsxWholeMapFarDepth = 1; }
+/* Console `wholemap depth 0|1`. Off by default: the town's streets are coplanar
+ * layers (asphalt over a lighter base) that only the painter order stacks
+ * correctly, and per-vertex depth interpolation picks a different winner per
+ * tile, which tiled the far road white. Painter order is right within a chunk,
+ * and the chunks themselves are submitted far-to-near. */
+extern "C" { int g_PsxWholeMapFarDepth = 0; }
 /* [WMPROBE] one-shot (console `wholemap probe`): counts one frame of far-band
  * prims through backface, capture and parse, plus a few per-vertex samples.
  * 2 = armed, counts during the next frame; 1 = dump at the following tick. */
