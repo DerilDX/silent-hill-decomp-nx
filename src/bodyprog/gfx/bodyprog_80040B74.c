@@ -3359,6 +3359,36 @@ void func_80044044(s_IpdHeader* ipd, s32 cellX, s32 cellZ) // 0x80044044
     ipd->collisionData.positionZ += (cellZ - prevCellZ) * Q12_TO_Q8(CHUNK_CELL_SIZE);
 }
 
+#ifdef SH_PC_PORT
+extern MATRIX D_800C3868;
+extern MATRIX VbWvsMatrix;
+
+/* Vw_CoordToWorldAndViewMatrices rotates the camera-relative model origin with
+ * gte_ldlvl + rtirtr, which loads it into the 16-bit IR registers. Past 128u
+ * from the camera it wraps by 256u, so every model in a far chunk was drawn at
+ * a wrapped spot near the player: the floating beams, trunkless tree crowns and
+ * buildings popping in on a turn that whole-map mode showed. Redo the
+ * translation in 64-bit. Origins inside +-128u give the identical result, so
+ * only the previously wrapped ones change. */
+static void Pc_WholeMapViewTransFix(const MATRIX* worldMat, MATRIX* viewMat)
+{
+    s32 rx = worldMat->t[0] - D_800C3868.t[0];
+    s32 ry = worldMat->t[1] - D_800C3868.t[1];
+    s32 rz = worldMat->t[2] - D_800C3868.t[2];
+    s32 i;
+
+    if (rx >= -0x8000 && rx < 0x8000 && ry >= -0x8000 && ry < 0x8000 && rz >= -0x8000 && rz < 0x8000)
+        return;
+
+    for (i = 0; i < 3; i++)
+    {
+        viewMat->t[i] = VbWvsMatrix.t[i] +
+            (s32)(((s64)VbWvsMatrix.m[i][0] * rx + (s64)VbWvsMatrix.m[i][1] * ry +
+                   (s64)VbWvsMatrix.m[i][2] * rz) >> 12);
+    }
+}
+#endif
+
 void Ipd_ChunkDraw(s_IpdHeader* ipdHdr, q19_12 posX, q19_12 posZ, GsOT* ot, bool arg4) // 0x80044090
 {
     #define CHUNK_SUBCELL_SIZE Q8(8.0f)
@@ -3422,6 +3452,7 @@ void Ipd_ChunkDraw(s_IpdHeader* ipdHdr, q19_12 posX, q19_12 posZ, GsOT* ot, bool
                         modelCoord.workm.t[0] += cellBoundX;
                         modelCoord.workm.t[2] += cellBoundZ;
                         Vw_CoordToWorldAndViewMatrices(&modelCoord, &worldMat, &viewMat);
+                        Pc_WholeMapViewTransFix(&worldMat, &viewMat);
                         func_80057090(&modelInfo, ot, arg4, &viewMat, &worldMat, 0);
                     }
                 }
