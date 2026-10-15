@@ -2026,6 +2026,22 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
+/* View-space data feeds two consumers only: the per-pixel flashlight (a few
+ * metres of reach) and the near-plane clipper (vsz < g_PgxpNearZ). A prim whose
+ * every vertex projected precisely past 64u needs neither, and its four view-
+ * space lookups were half the per-prim parse cost of a whole-town frame -- the
+ * OT walk visits prims in depth order, so each is a cache miss. Callers fill
+ * PGXP first so ppw is known here. */
+static inline bool PgxpAllBeyondViewSpace(const GrVertex* v, int n)
+{
+	if (!g_PsxUsePgxp)
+		return false;
+	for (int i = 0; i < n; i++)
+		if (!(v[i].ppw > 16384.0f))
+			return false;
+	return true;
+}
+
 void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, ushort gteidx)
 {
 	assert(p0);
@@ -2060,11 +2076,19 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth && !OtBucketIsUi2d())
 		vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
 
-	/* Before the PGXP block: the near-clip eligibility test below reads the
-	 * view-space data these fill. Skipped for the isolated item model — it must
-	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
-	 * so losing near-clip eligibility is harmless). */
-	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
+	/* Precise projection first, so the view-space fill can be skipped for prims
+	 * wholly past its consumers' reach; the near-clip test after it reads that
+	 * data. The isolated item model skips view space: it must not join the
+	 * world's per-pixel flashlight (it doesn't cross the near plane, so losing
+	 * near-clip eligibility is harmless). */
+	if (g_PsxUsePgxp)
+	{
+		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
+	}
+
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth && !PgxpAllBeyondViewSpace(vertex, 3))
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
@@ -2081,9 +2105,6 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
 		/* Per-poly consistency: if ANY vertex fell to affine (ppw<=0 — at/behind the
 		 * near plane, where there's no valid perspective projection), drop the WHOLE
 		 * poly to affine. A poly with some verts perspective and some affine shears at
@@ -2131,10 +2152,19 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		vertex[2].geom3d = vertex[3].geom3d = 1.0f;
 	}
 
-	/* Before the PGXP block: near-clip eligibility reads the view-space data.
-	 * Skipped for the isolated item model so it stays out of the world's per-pixel
-	 * flashlight (see MakeVertexTriangle). */
-	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
+	/* Precise projection first, so the view-space fill can be skipped for prims
+	 * wholly past its consumers' reach; the near-clip test after it reads that
+	 * data. The isolated item model skips view space so it stays out of the
+	 * world's per-pixel flashlight (see MakeVertexTriangle). */
+	if (g_PsxUsePgxp)
+	{
+		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
+	}
+
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth && !PgxpAllBeyondViewSpace(vertex, 4))
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
@@ -2152,10 +2182,6 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
 		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
