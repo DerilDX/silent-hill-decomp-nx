@@ -879,23 +879,6 @@ void func_8008E794(VECTOR3* posXz, q3_12 angle, q19_12 posY) // 0x8008E794
     sp30.t[2] += GsWSMATRIX.t[2];
     SetTransMatrix(&sp30);
 
-#ifdef SH_PC_PORT
-    /* [WATERREFL] sampled (6 lines, every 60th call): the reflection sprite's
-     * depth gate, the light-to-camera angle and the colour it produces. */
-    {
-        static int s_reflCalls = 0, s_reflLogs = 0;
-        s32        otz = RotTransPers(&svec0, &sp20, &sp50, &sp50);
-        q19_12     a0  = angle - Q12_ANGLE(40.0f);
-        if (a0 > Q12_ANGLE(90.0f)) a0 = Q12_ANGLE(90.0f);
-        if ((++s_reflCalls % 60) == 0 && s_reflLogs < 6)
-        {
-            s_reflLogs++;
-            SH_DBG("[WATERREFL] otz*4=%d (need >=128) screen=(%d,%d) angle=%d sin=%d r0=%d posY=%d harryY=%d",
-                   otz * 4, (s16)sp20.vx, (s16)((u32)sp20.vx >> 16), (int)angle, (int)Math_Sin(a0),
-                   (Math_Sin(a0) > 0 ? Math_Sin(a0) : 0) >> 6, (int)posY, (int)posXz->vy);
-        }
-    }
-#endif
     if ((RotTransPers(&svec0, &sp20, &sp50, &sp50) * 4) >= 128)
     {
         poly = GsOUT_PACKET_P;

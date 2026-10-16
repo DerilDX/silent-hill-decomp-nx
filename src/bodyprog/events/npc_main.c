@@ -978,22 +978,6 @@ void Game_NpcUpdate(void) // 0x80038354
 
     for (l = 0; l < ARRAY_SIZE(D_800BCDA8); l++)
     {
-#ifdef SH_PC_PORT
-        /* One-shot per-slot keyon diagnostic so we can verify the radio
-         * voice actually starts when an enemy first enters range. */
-        static s8 _radioKeyonLogged[2] = { 0, 0 };
-        if (l < 2 && !_radioKeyonLogged[l] &&
-            D_800BCDA8[l].field_0 == NO_VALUE && D_800BCDA8[l].field_1 >= 0) {
-            _radioKeyonLogged[l] = 1;
-        }
-        /* Throttled state-snapshot â€” every ~1s log the actual D_800BCDA8 values
-         * so we can confirm whether field_0 is stuck at non-NO_VALUE. */
-        {
-            static u32 _radStateTickCnt = 0;
-            if (l == 0 && (++_radStateTickCnt % 60) == 0) {
-            }
-        }
-#endif
         if (D_800BCDA8[l].field_0 == NO_VALUE)
         {
             if (D_800BCDA8[l].field_1 >= 0)

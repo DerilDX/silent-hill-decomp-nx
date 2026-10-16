@@ -431,13 +431,6 @@ void Ipd_CloseRangeChunksInit(void) // 0x8003C3AC
         pos1.vz = CLAMP(pos1.vz, temp_a2 + 1, temp_a2 + (Q12(2.5f) - 1));
     }
 
-#ifdef SH_PC_PORT
-    {
-        static s32 closeRangeLogCD = 0;
-        if ((closeRangeLogCD++ % 300) == 0) {
-        }
-    }
-#endif
     Ipd_ChunkInit(pos0.vx, pos0.vz, pos1.vx, pos1.vz);
 }
 

@@ -1448,14 +1448,6 @@ void Ipd_ChunkInit(q19_12 posX0, q19_12 posZ0, q19_12 posX1, q19_12 posZ1) // 0x
     s32         fullPageTexCount;
     s_Chunk* curChunk;
 
-#ifdef SH_PC_PORT
-    {
-        static s32 chunkInitCallCount = 0;
-        if (chunkInitCallCount < 20 || (chunkInitCallCount % 300) == 0) {
-        }
-        chunkInitCallCount++;
-    }
-#endif
 
     g_Map.positionX = posX1;
     g_Map.positionZ = posZ1;
@@ -1646,9 +1638,6 @@ q19_12 Ipd_DistanceToEdgeGet(q19_12 posX, q19_12 posZ, s32 cellX, s32 cellZ) // 
     return Vc_VectorMagnitudeCalc(x, 0, z);
 }
 
-#ifdef SH_PC_PORT
-static bool s_chunkScanShouldLog = false;
-#endif
 
 s32 Map_ChunkLoad(s_MapTerrain* map, q19_12 posX0, q19_12 posZ0, q19_12 posX1, q19_12 posZ1) // 0x80042EBC
 {
@@ -1676,24 +1665,6 @@ s32 Map_ChunkLoad(s_MapTerrain* map, q19_12 posX0, q19_12 posZ0, q19_12 posX1, q
     map->cellX = cellX1;
     map->cellZ = cellZ1;
 
-#ifdef SH_PC_PORT
-    {
-        static int chunkLoadCallsSinceCellChange = 0;
-        static int prevCellX = 999, prevCellZ = 999;
-        static int totalCalls = 0;
-        bool cellChanged = (cellX0 != prevCellX || cellZ0 != prevCellZ);
-        s_chunkScanShouldLog = cellChanged || (chunkLoadCallsSinceCellChange < 10) || ((totalCalls % 300) == 0);
-        totalCalls++;
-        if (cellChanged) {
-            chunkLoadCallsSinceCellChange = 0;
-            prevCellX = cellX0;
-            prevCellZ = cellZ0;
-        }
-        chunkLoadCallsSinceCellChange++;
-        if (s_chunkScanShouldLog) {
-        }
-    }
-#endif
 
     Ipd_ActiveChunksSample(map, posX0, posZ0, posX1, posZ1, map->isExterior);
     Ipd_ChunkMaterialsApply(map);
@@ -2862,7 +2833,6 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
          * player stands in, which is the empty free-cam view. Room visibility
          * below now does the selecting instead, so the 16 are the RIGHT 16. */
         int drawLimit = (g_DebugCamEnabled && !Pc_WholeMapDrawActive()) ? 16 : PC_MAX_IPD_CHUNKS;
-        int totalChunks = 0, loadedChunks = 0, cellMatchChunks = 0, culledChunks = 0;
         /* Whole-town mode: unclamp the GTE projection for far world vertices (see
          * PsyX_GTE.cpp). Scoped to this world-chunk loop so only the map geometry
          * takes the far path — characters/particles/HUD keep the exact PSX path. */
@@ -2882,14 +2852,9 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
 #endif
     for (; curChunk < &g_Map.activeChunks[g_Map.activeChunkCount]; curChunk++)
     {
-#ifdef SH_PC_PORT
-        totalChunks++;
-        if (IpdHeader_LoadStateGet(curChunk) >= StaticModelLoadState_Loaded) loadedChunks++;
-#endif
         if (IpdHeader_LoadStateGet(curChunk) >= StaticModelLoadState_Loaded && Ipd_CellPositionMatchCheck(curChunk, &g_Map))
         {
 #ifdef SH_PC_PORT
-            cellMatchChunks++;
             /* Whole-town draw set = outdoor cells only (streets/alleys; hosted
              * interior islands and parked cells excluded — they'd float in the
              * flyover view and bleed through house rooms), bounded to what is
@@ -2903,7 +2868,6 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
                     (!Pc_WholeMapCellOutdoor(curChunk->cellX, curChunk->cellZ) ||
                      Pc_WholeMapChunkCulled(curChunk->cellX, curChunk->cellZ, wmConeSlope)))
                 {
-                    culledChunks++;
                     continue;
                 }
                 /* Collect for sorted submission instead of drawing inline. */
@@ -2955,7 +2919,6 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
         {
             if ((u8*)GsOUT_PACKET_P - wmPktBase > PC_WM_PACKET_BUDGET)
             {
-                culledChunks += wmCount - i;
                 break;
             }
             /* Feed this chunk's true cell-center view depth so its saturated
@@ -2995,67 +2958,6 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
     g_PsxWholeMapChunkSz = 0;
 #endif
 #ifdef SH_PC_PORT
-    /* TEMP [WHOLEMAP] probe (remove when the whole-town report closes): with
-     * the mode active, confirm every chunk actually submits — separates a
-     * residual chunk gate from the GTE far-projection limit. */
-    if (g_Map.isExterior && Pc_WholeMapEnabled())
-    {
-        static u32 s_wmLogMs = 0;
-        if ((SDL_GetTicks() - s_wmLogMs) > 2000)
-        {
-            s_wmLogMs = SDL_GetTicks();
-            SH_DBG("[WHOLEMAP] active=%d preload=%d resident=%d fog=%d roomIdx=%d total=%d loaded=%d drawn=%d culled=%d",
-                   Pc_WholeMapDrawActive(), g_PcConfig.preloadChunks, g_PcConfig.residentTextures,
-                   (int)g_WorldEnvWork.isFogEnabled, (int)g_SavegamePtr->mapRoomIdx,
-                   totalChunks, loadedChunks, drawCount, culledChunks);
-        }
-    }
-
-    /* Once/sec while the world is void (black-void diagnosis): fires when
-     * NOTHING draws OR when the player's own cell specifically isn't among
-     * the drawn chunks (a "room missing, neighbor visible" void would
-     * otherwise stay silent). Dumps which stage failed per slot. */
-    {
-        static u32 s_lastDrawLogMs = 0;
-        int playerCellDrawn = 0;
-        if (!g_Map.isExterior)
-        {
-            s_Chunk* pc;
-            for (pc = &g_Map.activeChunks[0]; pc < &g_Map.activeChunks[g_Map.activeChunkCount]; pc++)
-            {
-                if (pc->queueIdx != NO_VALUE &&
-                    pc->cellX == g_Map.cellX && pc->cellZ == g_Map.cellZ &&
-                    IpdHeader_LoadStateGet(pc) >= StaticModelLoadState_Loaded)
-                {
-                    playerCellDrawn = 1;
-                    break;
-                }
-            }
-        }
-        else
-        {
-            playerCellDrawn = (cellMatchChunks != 0);
-        }
-        if ((cellMatchChunks == 0 || !playerCellDrawn) && (SDL_GetTicks() - s_lastDrawLogMs) > 1000)
-        {
-            s_lastDrawLogMs = SDL_GetTicks();
-            SH_DBG("[IPD-DRAW] VOID playerCellDrawn=%d total=%d loaded=%d cellMatch=%d mapCell=(%d,%d) tag=%s",
-                   playerCellDrawn, totalChunks, loadedChunks, cellMatchChunks,
-                   (int)g_Map.cellX, (int)g_Map.cellZ, g_Map.mapTag);
-            {
-                s_Chunk* c;
-                for (c = &g_Map.activeChunks[0]; c < &g_Map.activeChunks[g_Map.activeChunkCount]; c++)
-                {
-                    if (c->queueIdx == NO_VALUE) continue;
-                    SH_DBG("[IPD-DRAW]   slot=%d cell=(%d,%d) loadState=%d qState=%d isLoaded=%d",
-                           (int)(c - g_Map.activeChunks), (int)c->cellX, (int)c->cellZ,
-                           (int)IpdHeader_LoadStateGet(c),
-                           (int)Fs_QueueEntryLoadStatusGet(c->queueIdx),
-                           (c->ipdHdr != NULL) ? (int)c->ipdHdr->isLoaded : -1);
-                }
-            }
-        }
-    }
     }
 #endif
 }
@@ -3181,11 +3083,22 @@ void IpdHeader_FixOffsets(s_IpdHeader* ipdHdr, s_LmHeader** lmHdrs, s32 lmHdrCou
 
         /* [IPDREF] every reformat with its registry verdict: hit-mismatch means
          * this buffer was reformatted before and its lmHdr bytes changed (fresh
-         * read = expected; anything else = the double-fixup entry). */
-        SH_DBG("[IPDREF] hdr=%p registry=%s lmBytes=%p",
-               (void*)ipdHdr,
-               (slot < 0) ? "MISS" : "HIT-MISMATCH",
-               (void*)ipdHdr->lmHdr);
+         * read = expected; anything else = the double-fixup entry). A buffer
+         * that fails the reformat is retried every frame, so repeats of the
+         * same (hdr, lmHdr) pair are not logged again. */
+        {
+            static void* s_ipdrefHdr = NULL;
+            static void* s_ipdrefLm  = NULL;
+            if (s_ipdrefHdr != (void*)ipdHdr || s_ipdrefLm != (void*)ipdHdr->lmHdr)
+            {
+                s_ipdrefHdr = (void*)ipdHdr;
+                s_ipdrefLm  = (void*)ipdHdr->lmHdr;
+                SH_DBG("[IPDREF] hdr=%p registry=%s lmBytes=%p",
+                       (void*)ipdHdr,
+                       (slot < 0) ? "MISS" : "HIT-MISMATCH",
+                       (void*)ipdHdr->lmHdr);
+            }
+        }
 
         extern bool IpdHeader_FixOffsets_PC(s_IpdHeader* ipdHdr);
         if (!IpdHeader_FixOffsets_PC(ipdHdr)) {

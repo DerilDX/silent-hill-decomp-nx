@@ -140,25 +140,6 @@ void vcMoveAndSetCamera(bool in_connect_f, bool change_debug_mode, bool for_f, b
             hero_top_y    = hr_p->position.vy + Q12(-1.7f);
             hero_bottom_y = hr_p->position.vy + Q12_MULT(g_WorldGfxWork.vcCameraInternalInfo.ev_cam_rate, Q12(-0.5f));
 
-#ifdef SH_PC_PORT
-            /* Cam-Y root-cause trace. Logs once per 60-frame window so
-             * the log captures one sample per ~1 sec of walking. Tag
-             * line so you can grep [CAMTRACE]. Fields:
-             *   harryVy    — hr_p->position.vy (raw, before any offset)
-             *   topY       — hero_top_y (= harry.vy + Q12(-1.7))
-             *   bottomY    — hero_bottom_y
-             *   grndY      — grnd_y (Collision_SurfaceGet output or origin-sub)
-             *   collGround — coll.groundHeight (pre-sentinel-skip)
-             *   chunk      — IPD cell collision sentinel == Q12(8.0f)
-             * Compare to ideal_pos.vy and final cam.vy in the
-             * BAD/GOOD log to tell whether the formula or the inputs
-             * are producing the wrong cam height. */
-            {
-                static int __camTraceTick = 0;
-                if ((++__camTraceTick % 60) == 0) {
-                }
-            }
-#endif
 
             if (g_WorldGfxWork.vcCameraInternalInfo.ev_cam_rate > Q12(0.0f))
             {

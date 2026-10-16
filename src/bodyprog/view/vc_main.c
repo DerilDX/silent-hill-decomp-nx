@@ -1278,13 +1278,6 @@ void vcSetNearRoadAryByCharaPos(VC_WORK* w_p, VC_ROAD_DATA* road_ary_list, q19_1
 
         road_data_ptr++;
     }
-#ifdef SH_PC_PORT
-    {
-        static int _roadLog = 0;
-        if (++_roadLog <= 5 || (_roadLog % 300) == 0) {
-        }
-    }
-#endif
 }
 
 s32 vcRetRoadUsePriority(VC_ROAD_TYPE rd_type, s32 unused) // 0x8008227C
@@ -2293,19 +2286,6 @@ void vcMakeIdealCamPosForFixAngCam(VECTOR3* ideal_pos, VC_WORK* w_p) // 0x80083A
                     Q12_MULT(offset_dist, Math_Cos(cam_angle_vec.vy + Q12_ANGLE(180.0f)));
     ideal_pos->vy = w_p->chara_pos.vy;
 
-#ifdef SH_PC_PORT
-    /* FIX_ANG cam diagnosis: alley3 "getting darker" shot frames Harry ~2.4m
-     * off. angle/FOV/height match PSX; only ideal_pos.xz differs, driven by
-     * offset_dist (from Harry's distance to cur_near_road.rd box). Log every
-     * input so we can compare which one diverges vs PSX. */
-    {
-        static int __faTick = 0;
-        if ((++__faTick % 30) == 0) {
-            VC_NEAR_ROAD_DATA* nr = &w_p->cur_near_road;
-            VC_LIMIT_AREA* la = limit_area; /* road_p->lim_rd — what the PSX XZ clamp uses */
-        }
-    }
-#endif
 
     /* Clamp the fixed-angle cam's XZ into the road's limit area (as PSX does).
      * This was previously #ifndef'd out on PC — a leftover band-aid — which let
