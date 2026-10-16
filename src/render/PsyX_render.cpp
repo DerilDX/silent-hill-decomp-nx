@@ -4180,55 +4180,6 @@ void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, 
  * diverge. Fires once per arm; costs nothing otherwise. */
 extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = { 0, 0, 0 }; }
 
-/* [GREYFRAME] -- the whole-screen grey flash: a presented frame that is exactly
- * the clear colour everywhere, while the world WAS submitted (the old
- * [GREYFLASH] vertex tally stayed normal through a recorded run of them, so the
- * geometry is drawn and lost, not missing). This watches the symptom itself:
- * three rows of the image actually presented are read back asynchronously each
- * swap, and a frame whose rows are one flat colour equal to its clear is
- * logged with the state it drew under. Silent otherwise; capped. */
-typedef struct
-{
-	unsigned frame;
-	int draws, tris, clears, clearsAfterDraw, clearFbo, offscreen, glerr;
-	int firstFbo, firstVp[4], firstSc, firstBox[4], firstMask[4], firstDTest, firstDFunc, firstProg, firstBlend;
-	int endFbo, endVp[4], endSc;
-	unsigned char clearRGB[3];
-	int tag[6];
-	int probe[6];   /* [PANELMISS] active, window x, y, expected rgb */
-	int pstate[16]; /* [PANELMISS] the panel's GL state at its draw */
-} GreyFrameSnap;
-
-static GreyFrameSnap s_gf;
-extern "C" { int g_PsxGreyTag[6] = { 0, 0, 0, 0, 0, 0 }; }
-/* [PANELMISS] armed each frame by an overlay that wants its presence checked in
- * the presented image (pc_bind_panel.c); consumed at the swap. */
-extern "C" { int g_PsxPanelProbe[6] = { 0 }; int g_PsxPanelState[16] = { 0 }; }
-/* Off by default: the probe's glGet queries and per-swap glReadPixels serialise
- * the driver's command thread, which costs real frame time on weak machines. */
-extern "C" { int g_PsxGreyProbe = 0; }
-
-static void GreyFrame_FirstDraw(void)
-{
-#if USE_OPENGL
-	GLboolean m[4] = { 1, 1, 1, 1 };
-	GLint     iv = 0;
-
-	if (!g_PsxGreyProbe)
-		return;
-	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &iv); s_gf.firstFbo = iv;
-	glGetIntegerv(GL_VIEWPORT, s_gf.firstVp);
-	s_gf.firstSc = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
-	glGetIntegerv(GL_SCISSOR_BOX, s_gf.firstBox);
-	glGetBooleanv(GL_COLOR_WRITEMASK, m);
-	s_gf.firstMask[0] = m[0]; s_gf.firstMask[1] = m[1]; s_gf.firstMask[2] = m[2]; s_gf.firstMask[3] = m[3];
-	s_gf.firstDTest = glIsEnabled(GL_DEPTH_TEST) ? 1 : 0;
-	glGetIntegerv(GL_DEPTH_FUNC, &iv); s_gf.firstDFunc = iv;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &iv); s_gf.firstProg = iv;
-	s_gf.firstBlend = glIsEnabled(GL_BLEND) ? 1 : 0;
-#endif
-}
-
 static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 {
 	/* Full frame to disk (PPM, bottom-up rows flipped) so the pixel POSITIONS can
@@ -4317,19 +4268,6 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 {
 	framebuffer_need_update = 1;
 	g_PsxLastClearRGB[0] = r; g_PsxLastClearRGB[1] = g; g_PsxLastClearRGB[2] = b;
-
-	s_gf.clears++;
-	if (s_gf.draws > 0)
-		s_gf.clearsAfterDraw++;
-	s_gf.clearRGB[0] = r; s_gf.clearRGB[1] = g; s_gf.clearRGB[2] = b;
-#if USE_OPENGL
-	if (g_PsxGreyProbe)
-	{
-		GLint fbo = 0;
-		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
-		s_gf.clearFbo = fbo;
-	}
-#endif
 
 #if USE_OPENGL
 	/* PC port: when pillarboxing (4:3 content centered in a wider window), keep
@@ -5125,8 +5063,6 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		return;
 
 	g_PreviousOffscreenState = enable;
-	if (enable)
-		s_gf.offscreen++;
 
 #if USE_OPENGL
 	if (enable)
@@ -7084,140 +7020,6 @@ void GR_DiagGLError(const char* where)
 		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
 }
 
-/* [GREYFRAME] per-swap half, run on the window framebuffer right before the
- * swap, i.e. on exactly the image that is presented. Four pack buffers in a
- * ring: each swap queues this frame's rows and inspects the slot it is about to
- * reuse, four presents old, which has long finished -- no stall. */
-static void GreyFrame_Present(int w, int h)
-{
-#if USE_OPENGL
-	static GLuint        s_pbo[4];
-	static int           s_pboW[4];
-	static GreyFrameSnap s_ring[4];
-	static int           s_idx = 0, s_filled = 0, s_logs = 0, s_plogs = 0;
-	static unsigned      s_frame = 0;
-	GLint                prevRead = 0, prevPack = 0, fbo = 0;
-	const int            slot = s_idx;
-
-	if (!g_PsxGreyProbe)
-	{
-		/* A re-armed probe must not judge ring slots filled before it was off. */
-		s_filled = 0;
-		memset(&s_gf, 0, sizeof(s_gf));
-		return;
-	}
-	if (g_grIsGLES || w <= 0 || h <= 0)
-		return;
-
-	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
-	s_gf.endFbo = fbo;
-	glGetIntegerv(GL_VIEWPORT, s_gf.endVp);
-	s_gf.endSc  = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
-	s_gf.glerr  = (int)glGetError();
-	s_gf.frame  = ++s_frame;
-	memcpy(s_gf.tag, g_PsxGreyTag, sizeof(s_gf.tag));
-	memcpy(s_gf.probe, g_PsxPanelProbe, sizeof(s_gf.probe));
-	memcpy(s_gf.pstate, g_PsxPanelState, sizeof(s_gf.pstate));
-	g_PsxPanelProbe[0] = 0;
-
-	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
-	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prevPack);
-
-	if (s_pbo[0] == 0)
-		glGenBuffers(4, s_pbo);
-
-	/* The slot about to be reused holds the frame presented four swaps ago. */
-	if (s_filled >= 4 && (s_logs < 40 || s_plogs < 40))
-	{
-		const GreyFrameSnap* g = &s_ring[slot];
-		const int            n = s_pboW[slot] * 3;
-		const unsigned char* px;
-
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
-		px = (const unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, n * 4 + 4, GL_MAP_READ_BIT);
-		if (px)
-		{
-			int i, flat = 1;
-
-			/* [PANELMISS] the overlay's own title-band pixel, in the image that
-			 * was presented. */
-			if (g->probe[0] && s_plogs < 40)
-			{
-				const unsigned char* q = px + n * 4;
-
-				/* One line proving the check is live, so a session with no
-				 * misses reads as "every frame had the panel", not "the probe
-				 * never ran". */
-				{
-					static int s_live = 0;
-					if (!s_live)
-					{
-						s_live = 1;
-						eprintinfo("[PANELMISS] check live: frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d)\n",
-							g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2],
-							g->probe[3], g->probe[4], g->probe[5]);
-					}
-				}
-				const int dr = (int)q[0] - g->probe[3], dg = (int)q[1] - g->probe[4], db = (int)q[2] - g->probe[5];
-				if (dr * dr + dg * dg + db * db > 3 * 10 * 10)
-				{
-					const int* st = g->pstate;
-					s_plogs++;
-					eprintinfo("[PANELMISS] frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d) | draw fbo=%d sc=%d box=%d,%d,%d,%d stencil=%d func=0x%x ref=%d mask=0x%x vp=%dx%d prog=%d tex=%d glerr=0x%x phase=%d | end fbo=%d vp=%d,%d,%d,%d sc=%d glerr=0x%x | game=%d sys=%d vbl=%d world=%d freeze=%d\n",
-						g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2], g->probe[3], g->probe[4], g->probe[5],
-						st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11],
-						st[12], st[13], st[14], st[15],
-						g->endFbo, g->endVp[0], g->endVp[1], g->endVp[2], g->endVp[3], g->endSc, g->glerr,
-						g->tag[0], g->tag[1], g->tag[2], g->tag[3], g->tag[5]);
-				}
-			}
-			for (i = 1; i < n && flat; i++)
-				flat = px[i * 4] == px[0] && px[i * 4 + 1] == px[1] && px[i * 4 + 2] == px[2];
-
-			/* Black is every fade and loading gap; only a flat NON-black frame
-			 * that is exactly its own clear is the flash. */
-			if (s_logs < 40 && flat && (px[0] | px[1] | px[2]) > 8 &&
-			    px[0] == g->clearRGB[0] && px[1] == g->clearRGB[1] && px[2] == g->clearRGB[2])
-			{
-				s_logs++;
-				eprintinfo("[GREYFRAME] frame=%u rgb=(%d,%d,%d) draws=%d tris=%d clears=%d clearsAfterDraw=%d clearFbo=%d offscreen=%d glerr=0x%x | first fbo=%d vp=%d,%d,%d,%d sc=%d box=%d,%d,%d,%d mask=%d%d%d%d dtest=%d dfunc=0x%x prog=%d blend=%d | end fbo=%d vp=%d,%d,%d,%d sc=%d | game=%d sys=%d vbl=%d world=%d dt=%d freeze=%d\n",
-					g->frame, px[0], px[1], px[2], g->draws, g->tris, g->clears, g->clearsAfterDraw, g->clearFbo,
-					g->offscreen, g->glerr,
-					g->firstFbo, g->firstVp[0], g->firstVp[1], g->firstVp[2], g->firstVp[3],
-					g->firstSc, g->firstBox[0], g->firstBox[1], g->firstBox[2], g->firstBox[3],
-					g->firstMask[0], g->firstMask[1], g->firstMask[2], g->firstMask[3],
-					g->firstDTest, g->firstDFunc, g->firstProg, g->firstBlend,
-					g->endFbo, g->endVp[0], g->endVp[1], g->endVp[2], g->endVp[3], g->endSc,
-					g->tag[0], g->tag[1], g->tag[2], g->tag[3], g->tag[4], g->tag[5]);
-			}
-			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		}
-	}
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
-	if (s_pboW[slot] != w)
-	{
-		glBufferData(GL_PIXEL_PACK_BUFFER, w * 3 * 4 + 4, NULL, GL_STREAM_READ);
-		s_pboW[slot] = w;
-	}
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glReadPixels(0, h / 4,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)0);
-	glReadPixels(0, h / 2,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 4));
-	glReadPixels(0, h * 3 / 4, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 8));
-	if (s_gf.probe[0])
-		glReadPixels(s_gf.probe[1], s_gf.probe[2], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 12));
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prevPack);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
-
-	s_ring[slot] = s_gf;
-	s_idx = (slot + 1) & 3;
-	if (s_filled < 4)
-		s_filled++;
-#endif
-	memset(&s_gf, 0, sizeof(s_gf));
-}
-
 void GR_SwapWindow()
 {
 	{
@@ -7285,8 +7087,6 @@ void GR_SwapWindow()
 		PsyX_Angle_Swap();
 	else
 	{
-		GreyFrame_Present(g_internalFBO ? g_presentWidth : g_windowWidth,
-		                  g_internalFBO ? g_presentHeight : g_windowHeight);
 		/* Swap with the window framebuffer bound. macOS 26's GL-on-Metal
 		 * presents nothing (a black window) when an FBO is still bound at
 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
@@ -7787,9 +7587,6 @@ extern "C" void GR_FarMeshDraw(unsigned handle, const float base[3], const float
 	glUniform3fv(s_farMeshCur->base, 1, base);
 	glUniform3fv(s_farMeshCur->eye, 1, eye);
 	glBindVertexArray(s_farMeshGL[handle - 1].vao);
-	if (s_gf.draws++ == 0)
-		GreyFrame_FirstDraw();
-	s_gf.tris += indexCount / 3;
 	glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, (const void*)((uintptr_t)firstIndex * sizeof(unsigned)));
 }
 
@@ -7862,9 +7659,6 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 void GR_DrawTriangles(int start_vertex, int triangles)
 {
 #if USE_OPENGL
-	if (s_gf.draws++ == 0)
-		GreyFrame_FirstDraw();
-	s_gf.tris += triangles;
 	glDrawArrays(GL_TRIANGLES, start_vertex, triangles * 3);
 #else
 #error

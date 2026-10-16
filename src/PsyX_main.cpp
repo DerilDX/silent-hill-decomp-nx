@@ -221,140 +221,57 @@ int PsyX_Sys_GetVBlankCount()
 	return g_psxSysCounters[PsxCounter_VBLANK];
 }
 
-#ifdef _WIN32
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
-#elif defined(__linux__) || defined(__APPLE__)
-#include <time.h>
-#endif
-
-/* Sleeps for about `seconds`. Returns 0 where no sub-millisecond sleep exists
- * (Windows before 10 1803, consoles), and the caller keeps spinning instead:
- * a coarse 15 ms Sleep would drop vblanks and slow the RCnt2 music clock. */
-static int IntrPreciseSleep(double seconds)
-{
-#ifdef _WIN32
-	static HANDLE s_timer = NULL;
-	static int    s_tried = 0;
-	LARGE_INTEGER due;
-
-	if (!s_tried)
-	{
-		s_tried = 1;
-		s_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-	}
-	if (s_timer == NULL)
-		return 0;
-	due.QuadPart = -(LONGLONG)(seconds * 1e7);
-	if (!SetWaitableTimer(s_timer, &due, 0, NULL, NULL, FALSE))
-		return 0;
-	WaitForSingleObject(s_timer, INFINITE);
-	return 1;
-#elif defined(__linux__) || defined(__APPLE__)
-	struct timespec ts;
-	ts.tv_sec  = 0;
-	ts.tv_nsec = (long)(seconds * 1e9);
-	nanosleep(&ts, NULL);
-	return 1;
-#else
-	(void)seconds;
-	return 0;
-#endif
-}
-
-static inline void IntrCpuRelax(void)
-{
-#ifdef _WIN32
-	YieldProcessor();
-#endif
-}
-
-/* Events run on absolute deadlines and the thread sleeps between them. It used
- * to spin flat out and re-arm each timer at its fire time, holding a whole core
- * for the session, which weak dual/quad-core machines feel as frame time. A
- * deadline that has fallen more than a period behind (a stall) re-arms from
- * now, so a stall still yields one event, not a burst. */
 int intrThreadMain(void* data)
 {
+	timerCtx_t rcnt2Timer;
+	Util_InitHPCTimer(&g_vblTimer);
+	Util_InitHPCTimer(&rcnt2Timer);
+
 	/* PSX RCnt2 = system clock / 8 = 4233600 Hz.
 	 * Target 7328 → fires at 4233600/7328 ≈ 577.8 Hz → ~1.73ms period */
 	const double rcnt2Period = 1.0 / 577.8;
-	const double freq        = (double)SDL_GetPerformanceFrequency();
-	const Uint64 t0          = SDL_GetPerformanceCounter();
-	double       nextVbl     = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
-	double       nextRcnt2   = 0.0;
-	int          rcnt2Armed  = 0;
-
-	Util_InitHPCTimer(&g_vblTimer);
 
 	while (!g_stopIntrThread)
 	{
-		const double timestep = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
-		double       now      = (double)(SDL_GetPerformanceCounter() - t0) / freq;
-		double       wake;
-
-		if (now >= nextVbl)
+		// step counters
 		{
-			SDL_LockMutex(g_intrMutex);
+			const double timestep = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
+			const double vblDelta = Util_GetHPCTime(&g_vblTimer, 0);
 
-			if (vsync_callback)
-				vsync_callback();
-
-			SDL_UnlockMutex(g_intrMutex);
-
-			// do vblank events
-			g_psxSysCounters[PsxCounter_VBLANK]++;
-
-			nextVbl += timestep;
-			if (nextVbl <= now)
-				nextVbl = now + timestep;
-		}
-
-		/* Pump RCnt2 timer for BGM/MIDI sequencer */
-		if (g_rcnt2_timer_active)
-		{
-			if (!rcnt2Armed)
-			{
-				rcnt2Armed = 1;
-				nextRcnt2  = now;
-			}
-			if (now >= nextRcnt2)
+			if (vblDelta > timestep)
 			{
 				SDL_LockMutex(g_intrMutex);
-				PsyX_PumpRCnt2Timer();
+
+				if (vsync_callback)
+					vsync_callback();
+
 				SDL_UnlockMutex(g_intrMutex);
 
-				nextRcnt2 += rcnt2Period;
-				if (nextRcnt2 <= now)
-					nextRcnt2 = now + rcnt2Period;
+				// do vblank events
+				g_psxSysCounters[PsxCounter_VBLANK]++;
+
+				Util_GetHPCTime(&g_vblTimer, 1);
+			}
+
+			/* Pump RCnt2 timer for BGM/MIDI sequencer */
+			if (g_rcnt2_timer_active)
+			{
+				const double rcnt2Delta = Util_GetHPCTime(&rcnt2Timer, 0);
+				if (rcnt2Delta > rcnt2Period)
+				{
+					SDL_LockMutex(g_intrMutex);
+					PsyX_PumpRCnt2Timer();
+					SDL_UnlockMutex(g_intrMutex);
+					Util_GetHPCTime(&rcnt2Timer, 1);
+				}
 			}
 		}
-		else
-			rcnt2Armed = 0;
 
 		/* Advance SPU ADSR envelopes on the audio-timing thread, NOT from the
 		 * render thread (PsyX_EndScene) — that placement deadlocked. Takes only
 		 * g_SpuMutex (never nested under g_intrMutex), throttles on the
 		 * SDL_GetTicks ms delta, no-op unless `adsr 1`. */
 		PsyX_SPUAL_Update();
-
-		/* Wake at least every 2 ms so the ms-throttled SPU update keeps its
-		 * cadence while RCnt2 is idle. Sleep short of the deadline and spin the
-		 * last half millisecond: the high-resolution timer can overshoot that. */
-		wake = nextVbl;
-		if (rcnt2Armed && nextRcnt2 < wake)
-			wake = nextRcnt2;
-		if (now + 0.002 < wake)
-			wake = now + 0.002;
-		now = (double)(SDL_GetPerformanceCounter() - t0) / freq;
-		if (wake - now > 0.0007)
-		{
-			if (!IntrPreciseSleep(wake - now - 0.0005))
-				IntrCpuRelax();
-		}
-		else
-			IntrCpuRelax();
 	}
 
 	return 0;
@@ -1429,7 +1346,6 @@ void PsyX_WaitForTimestep(int count)
 #ifdef __EMSCRIPTEN__
 			emscripten_sleep(0);
 #endif
-			IntrCpuRelax();
 			vbl = PsyX_Sys_GetVBlankCount();
 		}
 		while (vbl - swapLastVbl < count);
