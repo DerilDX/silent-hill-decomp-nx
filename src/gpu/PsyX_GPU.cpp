@@ -90,36 +90,60 @@ struct ShadowEntry { uintptr_t key; unsigned gen; unsigned value; float x, y, w;
 #define SHADOW_MASK (SHADOW_SIZE - 1u)
 static ShadowEntry s_shadow[SHADOW_SIZE];
 
-/* Scattered, never address-ordered. Ordered slots (k >> 2) were tried for cache
- * locality, but the scratch area and the packet arenas alias modulo the table
- * span, so whole runs of consecutive words land on the same slots. A linear
- * probe cannot step past a run longer than 16, the overflow evicts live
- * entries, and those vertices drop to integer coordinates: strips of sidewalk
- * and wall shifting against their neighbours while the camera moves. */
-static inline unsigned ShadowHash(uintptr_t k) {
-	return (unsigned)((k >> 2) * 2654435761u) & SHADOW_MASK;
+/* Blocked scatter. A fully address-ordered slot (k >> 2) streamed through
+ * cache, but the scratch area and the packet arenas alias modulo the table
+ * span: whole runs of consecutive words piled onto the same slots, the 16-step
+ * linear probe overflowed, live entries were evicted, and those vertices fell
+ * to integer coordinates (sidewalk and wall strips splitting while the camera
+ * moved). A plain per-word scatter is correct but puts every access on a
+ * random page, which made the whole-map OT parse CPU-bound.
+ *
+ * So: each 64-byte block of addresses (16 words) owns one 16-slot bucket at a
+ * scattered position, and its words sit in that bucket in address order. A
+ * probe steps a whole bucket, so two blocks either share a bucket or never
+ * touch -- runs cannot overlap part-way. Neighbouring words stay on one or two
+ * cache lines; distinct blocks still scatter like the per-word hash. */
+#define SHADOW_BLOCK_SHIFT 4
+#define SHADOW_BUCKETS_BITS (SHADOW_BITS - SHADOW_BLOCK_SHIFT)
+static inline unsigned ShadowBucket(uintptr_t k) {
+	unsigned b = (unsigned)((k >> 6) ^ ((uint64_t)k >> 38));
+	return ((b * 2654435761u) >> (32 - SHADOW_BUCKETS_BITS)) << SHADOW_BLOCK_SHIFT;
+}
+static inline unsigned ShadowSlot(uintptr_t k, unsigned bucket, int probe) {
+	return (bucket + ((unsigned)probe << SHADOW_BLOCK_SHIFT) + (unsigned)((k >> 2) & 15u)) & SHADOW_MASK;
+}
+
+/* One-shot: a full probe means an entry was evicted, i.e. a vertex lost its
+ * precise position. Should never print; if it does, seams are back. */
+static int s_shadowOverflowWarned = 0;
+static void Shadow_WarnOverflow(const char* table) {
+	if (!s_shadowOverflowWarned) {
+		s_shadowOverflowWarned = 1;
+		eprintwarn("[PGXP] %s shadow table probe exhausted; precise vertices are being evicted\n", table);
+	}
 }
 
 static void Shadow_Put(void* addr, float x, float y, float w, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		ShadowEntry* e = &s_shadow[ShadowSlot(k, b, i)];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = k; e->gen = s_pgxpGen; e->value = value;
 			e->x = x; e->y = y; e->w = w; return;
 		}
 	}
-	ShadowEntry* e = &s_shadow[s];   /* probe exhausted: overwrite base */
+	Shadow_WarnOverflow("position");
+	ShadowEntry* e = &s_shadow[ShadowSlot(k, b, 0)];   /* probe exhausted: overwrite base */
 	e->key = k; e->gen = s_pgxpGen; e->value = value;
 	e->x = x; e->y = y; e->w = w;
 }
 
 static const ShadowEntry* Shadow_Get(const void* addr) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		const ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		const ShadowEntry* e = &s_shadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen) ? e : nullptr;
 		if (e->key == 0) return nullptr;
 	}
@@ -171,24 +195,25 @@ static VsEntry s_vshadow[SHADOW_SIZE];
 static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value,
                    float ofx, float ofy, float h, float fade = 0.0f) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
+		VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
 			e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h; return;
 		}
 	}
-	VsEntry* e = &s_vshadow[s];
+	Shadow_WarnOverflow("view-space");
+	VsEntry* e = &s_vshadow[ShadowSlot(k, b, 0)];
 	e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
 	e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h;
 }
 
 static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		const VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
+		const VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen && e->value == value) ? e : nullptr;
 		if (e->key == 0) return nullptr;
 	}
