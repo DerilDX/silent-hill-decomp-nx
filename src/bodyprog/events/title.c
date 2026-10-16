@@ -580,7 +580,15 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
 
                 if (g_MainMenu_SelectedEntry == MainMenuEntry_Start)
                 {
+#ifdef SH_PC_PORT
+                    /* A New Game started straight on map2_s00 (map = config):
+                     * its point 0 is a parking spot outside the town, which the
+                     * PSX never uses because Harry always arrives through the
+                     * cafe door, point 1. */
+                    Chara_PositionSet(&g_MapOverlayHdr.mapPoints[g_SavegamePtr->mapIdx == MapIdx_MAP2_S00 ? 1 : 0]);
+#else
                     Chara_PositionSet(&g_MapOverlayHdr.mapPoints[0]);
+#endif
                 }
 
 #ifdef SH_PC_PORT
