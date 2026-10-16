@@ -126,13 +126,12 @@ public partial class Form1 : Form
 
         btnLang = new Button
         {
-            /* Right edge of the Level row (Level is in the left column there),
-             * clear of the fog slider above. progUpdate ends at x 416 in the
-             * band above and only shows during a download. Created in code
+            /* Bottom-right corner, on the Help/Reset/Report Bug row;
+             * lblUpdateStatus was narrowed to end before it. Created in code
              * rather than the designer (the flag is custom-painted), so it
              * cannot be nudged from the design surface; re-check this against
              * Form1.Designer.cs after any layout change. */
-            Location = new System.Drawing.Point(418, 574),
+            Location = new System.Drawing.Point(420, 616),
             Size = new System.Drawing.Size(30, 22),
             Text = "",
             FlatStyle = FlatStyle.Standard,

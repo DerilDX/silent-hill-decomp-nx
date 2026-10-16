@@ -389,7 +389,7 @@ partial class Form1
             // 
             this.lblUpdateStatus.Location = new System.Drawing.Point(209, 619);
             this.lblUpdateStatus.Name = "lblUpdateStatus";
-            this.lblUpdateStatus.Size = new System.Drawing.Size(237, 15);
+            this.lblUpdateStatus.Size = new System.Drawing.Size(207, 15);
             this.lblUpdateStatus.TabIndex = 14;
             // 
             // progUpdate
