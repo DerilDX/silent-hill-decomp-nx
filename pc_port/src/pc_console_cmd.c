@@ -2123,6 +2123,12 @@ void Pc_ConsoleExec(const char* line)
         extern int g_PsxPgxpDbg;
         if (arg[0]) g_PsxPgxpDbg = atoi(arg);
         cprintf("pgxpdbg %d: 1=no precise verts 2=legacy depth 4=opaque alpha 8=no world split 16=no exact twin 32=precise from MAC 64=W=1 128=integer xy", g_PsxPgxpDbg);
+    } else if (strcmp(cmd, "GREYPROBE") == 0) {
+        extern int g_PsxGreyProbe;
+        if (arg[0] == '1') g_PsxGreyProbe = 1;
+        else if (arg[0] == '0') g_PsxGreyProbe = 0;
+        else g_PsxGreyProbe = !g_PsxGreyProbe;
+        cprintf("greyprobe %s ([GREYFRAME]/[PANELMISS] presented-image checks)", g_PsxGreyProbe ? "ON" : "OFF");
     } else if (strcmp(cmd, "WORLDDEPTH") == 0) {
         /* worlddepth 0|1 -- depth function for static opaque world under PGXP.
          * 1 = GL_ALWAYS (paint order alone decides), 0 = GL_LEQUAL (a nearer
