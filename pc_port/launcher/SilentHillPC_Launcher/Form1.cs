@@ -94,6 +94,7 @@ public partial class Form1 : Form
         LoadConfig();
         SetupTooltips();
         SetupLanguageButton();
+        trackFog.ValueChanged += (s, e) => UpdateFogValueLabel();
         this.Shown += (s, e) =>
         {
             CleanupOldFiles();
@@ -272,6 +273,7 @@ public partial class Form1 : Form
         Loc.LocalizeItems(comboPost);
         Loc.LocalizeItems(comboTone);
         Loc.LocalizeItems(comboFlash);
+        Loc.LocalizeItems(comboLineGap);
         Loc.LocalizeItems(comboAudioOut);
         Loc.LocalizeItems(comboRender);
         Loc.LocalizeItems(comboMinimap);
@@ -859,6 +861,15 @@ public partial class Form1 : Form
             "Also in game: F10 > Graphics.";
         Set(lblFog, fogTip);
         Set(trackFog, fogTip);
+        Set(lblFogValue, fogTip);
+
+        const string lineGapTip =
+            "Emulates the PlayStation's CD seek before each spoken line in cutscenes.\n" +
+            "On the console a voice line started a beat after its subtitle while the disc\n" +
+            "sought the clip; the PC loads instantly. Scene and subtitle timing are unchanged,\n" +
+            "only the voice starts later. Normal is the default.";
+        Set(lblLineGap, lineGapTip);
+        Set(comboLineGap, lineGapTip);
 
         Set(btnManager, "Manage texture packs, load-folder and FMV mods: enable, disable and set load order.");
 
@@ -1280,14 +1291,25 @@ public partial class Form1 : Form
             comboFlash.SelectedIndex = fmIdx;
         }
 
+        // cutscene_line_gap_ms: minimum pause after a voiced cutscene line.
+        // Presets only; a hand-set value that matches none shows the nearest
+        // preset and stays in the file unless the dropdown is changed.
+        {
+            int ms;
+            if (!int.TryParse(config.Get("cutscene_line_gap_ms", "300"), out ms)) ms = 300;
+            _lineGapLoadedIdx = LineGapIndexFor(ms);
+            comboLineGap.SelectedIndex = _lineGapLoadedIdx;
+        }
+
         // fog_strength, snapped to the slider's 0.05 steps. A value the slider
-        // cannot show (set in game above 1.50) stays in the file unless moved.
+        // cannot show (set in game above 1.20) stays in the file unless moved.
         {
             float fs;
             if (!float.TryParse(config.Get("fog_strength", "1.10"), System.Globalization.NumberStyles.Float,
                                 System.Globalization.CultureInfo.InvariantCulture, out fs)) fs = 1.10f;
             _fogLoadedStep = Math.Max(trackFog.Minimum, Math.Min(trackFog.Maximum, (int)Math.Round(fs / FogStep)));
             trackFog.Value = _fogLoadedStep;
+            UpdateFogValueLabel();
         }
 
         // Audio output (speaker layout): auto = OpenAL detects the system
@@ -1505,6 +1527,10 @@ public partial class Form1 : Form
             config.Set("flashlight_shadows", (fmIdx == 1 || fmIdx == 3) ? "1" : "0");
         }
 
+        if (comboLineGap.SelectedIndex >= 0 &&
+            (comboLineGap.SelectedIndex != _lineGapLoadedIdx || config.Get("cutscene_line_gap_ms", "") == ""))
+            config.Set("cutscene_line_gap_ms", LineGapValues[comboLineGap.SelectedIndex].ToString());
+
         if (trackFog.Value != _fogLoadedStep)
             config.Set("fog_strength", (trackFog.Value * FogStep).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
 
@@ -1554,10 +1580,27 @@ public partial class Form1 : Form
     // Dropdown index -> audio_output config id (matches the game's parser).
     private static readonly string[] AudioOutputIds = { "auto", "stereo", "quad", "51", "71", "hrtf" };
 
-    // Fog/World Visibility slider -> fog_strength. Capped at 1.50 rather than
-    // the game's 2.0 so the 1.10 default sits high on the bar.
+    // Fog/World Visibility slider -> fog_strength. Capped at 1.20 rather than
+    // the game's 2.0: past that the town is already fully fogged out.
     private const float FogStep = 0.05f;
     private int _fogLoadedStep = 22;
+
+    private void UpdateFogValueLabel()
+    {
+        lblFogValue.Text = (trackFog.Value * FogStep).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // Dialog Pause dropdown -> cutscene_line_gap_ms (CD seek before each voice
+    // line). 300 is the engine default.
+    private static readonly int[] LineGapValues = { 0, 150, 300, 600 };
+    private int _lineGapLoadedIdx = 2;
+    private static int LineGapIndexFor(int ms)
+    {
+        if (ms <= 0)   return 0;
+        if (ms <= 220) return 1;
+        if (ms <= 450) return 2;
+        return 3;
+    }
 
     private const string RandomizerMapEntry = "Randomizer Enabled";
 

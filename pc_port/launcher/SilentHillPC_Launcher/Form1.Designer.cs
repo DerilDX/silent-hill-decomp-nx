@@ -71,6 +71,9 @@ partial class Form1
     private ComboBox comboFlash;
     private Label lblFog;
     private TrackBar trackFog;
+    private Label lblFogValue;
+    private Label lblLineGap;
+    private ComboBox comboLineGap;
     private Label regionLabel;
     private ComboBox comboMap;
     private ComboBox comboDisc;
@@ -176,6 +179,9 @@ partial class Form1
             this.comboShadow = new System.Windows.Forms.ComboBox();
             this.lblFog = new System.Windows.Forms.Label();
             this.trackFog = new System.Windows.Forms.TrackBar();
+            this.lblFogValue = new System.Windows.Forms.Label();
+            this.lblLineGap = new System.Windows.Forms.Label();
+            this.comboLineGap = new System.Windows.Forms.ComboBox();
             this.lblMinimap = new System.Windows.Forms.Label();
             this.comboMinimap = new System.Windows.Forms.ComboBox();
             this.vsyncPanel.SuspendLayout();
@@ -187,6 +193,7 @@ partial class Form1
             this.pgxpPanel.SuspendLayout();
             this.loggingPanel.SuspendLayout();
             this.consolePanel.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.trackFog)).BeginInit();
             this.SuspendLayout();
             // 
             // comboFullscreen
@@ -338,7 +345,7 @@ partial class Form1
             this.btnManager.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Zoom;
             this.btnManager.FlatAppearance.BorderSize = 0;
             this.btnManager.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-            this.btnManager.Location = new System.Drawing.Point(246, 347);
+            this.btnManager.Location = new System.Drawing.Point(246, 376);
             this.btnManager.Name = "btnManager";
             this.btnManager.Size = new System.Drawing.Size(203, 49);
             this.btnManager.TabIndex = 11;
@@ -351,7 +358,7 @@ partial class Form1
             // btnPlay
             // 
             this.btnPlay.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.btnPlay.Location = new System.Drawing.Point(352, 462);
+            this.btnPlay.Location = new System.Drawing.Point(352, 491);
             this.btnPlay.Name = "btnPlay";
             this.btnPlay.Size = new System.Drawing.Size(97, 23);
             this.btnPlay.TabIndex = 12;
@@ -360,7 +367,7 @@ partial class Form1
             // 
             // btnUpdate
             // 
-            this.btnUpdate.Location = new System.Drawing.Point(244, 405);
+            this.btnUpdate.Location = new System.Drawing.Point(244, 434);
             this.btnUpdate.Name = "btnUpdate";
             this.btnUpdate.Size = new System.Drawing.Size(104, 23);
             this.btnUpdate.TabIndex = 13;
@@ -370,7 +377,7 @@ partial class Form1
             // 
             // btnChangelog
             // 
-            this.btnChangelog.Location = new System.Drawing.Point(244, 434);
+            this.btnChangelog.Location = new System.Drawing.Point(244, 463);
             this.btnChangelog.Name = "btnChangelog";
             this.btnChangelog.Size = new System.Drawing.Size(104, 23);
             this.btnChangelog.TabIndex = 16;
@@ -387,9 +394,9 @@ partial class Form1
             // 
             // progUpdate
             // 
-            this.progUpdate.Location = new System.Drawing.Point(238, 557);
+            this.progUpdate.Location = new System.Drawing.Point(238, 585);
             this.progUpdate.Name = "progUpdate";
-            this.progUpdate.Size = new System.Drawing.Size(178, 23);
+            this.progUpdate.Size = new System.Drawing.Size(205, 23);
             this.progUpdate.TabIndex = 15;
             this.progUpdate.Visible = false;
             this.progUpdate.Click += new System.EventHandler(this.progUpdate_Click);
@@ -518,18 +525,29 @@ partial class Form1
             this.comboFiltering.Name = "comboFiltering";
             this.comboFiltering.Size = new System.Drawing.Size(96, 21);
             this.comboFiltering.TabIndex = 41;
-            //
-            // scalingLabel
-            //
-            this.scalingLabel.AutoSize = true;
-            this.scalingLabel.Location = new System.Drawing.Point(6, 176);
-            this.scalingLabel.Name = "scalingLabel";
-            this.scalingLabel.Size = new System.Drawing.Size(49, 13);
-            this.scalingLabel.TabIndex = 120;
-            this.scalingLabel.Text = "Scaling:";
-            //
+            // 
+            // comboDithering
+            // 
+            this.comboDithering.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.comboDithering.Items.AddRange(new object[] {
+            "Off",
+            "On"});
+            this.comboDithering.Location = new System.Drawing.Point(311, 172);
+            this.comboDithering.Name = "comboDithering";
+            this.comboDithering.Size = new System.Drawing.Size(138, 21);
+            this.comboDithering.TabIndex = 123;
+            // 
+            // ditheringLabel
+            // 
+            this.ditheringLabel.AutoSize = true;
+            this.ditheringLabel.Location = new System.Drawing.Point(235, 176);
+            this.ditheringLabel.Name = "ditheringLabel";
+            this.ditheringLabel.Size = new System.Drawing.Size(52, 13);
+            this.ditheringLabel.TabIndex = 122;
+            this.ditheringLabel.Text = "Dithering:";
+            // 
             // comboScaling
-            //
+            // 
             this.comboScaling.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.comboScaling.Items.AddRange(new object[] {
             "Integer",
@@ -540,26 +558,15 @@ partial class Form1
             this.comboScaling.Name = "comboScaling";
             this.comboScaling.Size = new System.Drawing.Size(135, 21);
             this.comboScaling.TabIndex = 121;
-            //
-            // ditheringLabel
-            //
-            this.ditheringLabel.AutoSize = true;
-            this.ditheringLabel.Location = new System.Drawing.Point(235, 176);
-            this.ditheringLabel.Name = "ditheringLabel";
-            this.ditheringLabel.Size = new System.Drawing.Size(53, 13);
-            this.ditheringLabel.TabIndex = 122;
-            this.ditheringLabel.Text = "Dithering:";
-            //
-            // comboDithering
-            //
-            this.comboDithering.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboDithering.Items.AddRange(new object[] {
-            "Off",
-            "On"});
-            this.comboDithering.Location = new System.Drawing.Point(311, 172);
-            this.comboDithering.Name = "comboDithering";
-            this.comboDithering.Size = new System.Drawing.Size(138, 21);
-            this.comboDithering.TabIndex = 123;
+            // 
+            // scalingLabel
+            // 
+            this.scalingLabel.AutoSize = true;
+            this.scalingLabel.Location = new System.Drawing.Point(6, 176);
+            this.scalingLabel.Name = "scalingLabel";
+            this.scalingLabel.Size = new System.Drawing.Size(45, 13);
+            this.scalingLabel.TabIndex = 120;
+            this.scalingLabel.Text = "Scaling:";
             // 
             // pgxpLabel
             // 
@@ -758,27 +765,6 @@ partial class Form1
             this.comboFlash.Size = new System.Drawing.Size(135, 21);
             this.comboFlash.TabIndex = 61;
             // 
-            // lblFog
-            // 
-            this.lblFog.AutoSize = true;
-            this.lblFog.Location = new System.Drawing.Point(232, 525);
-            this.lblFog.Name = "lblFog";
-            this.lblFog.Size = new System.Drawing.Size(108, 13);
-            this.lblFog.TabIndex = 100;
-            this.lblFog.Text = "Fog/World Visibility:";
-            // 
-            // trackFog
-            // 
-            this.trackFog.AutoSize = false;
-            this.trackFog.LargeChange = 2;
-            this.trackFog.Location = new System.Drawing.Point(344, 520);
-            this.trackFog.Maximum = 30;
-            this.trackFog.Name = "trackFog";
-            this.trackFog.Size = new System.Drawing.Size(106, 24);
-            this.trackFog.TabIndex = 101;
-            this.trackFog.TickStyle = System.Windows.Forms.TickStyle.None;
-            this.trackFog.Value = 22;
-            // 
             // regionLabel
             // 
             this.regionLabel.AutoSize = true;
@@ -793,9 +779,9 @@ partial class Form1
             // 
             this.comboMap.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.comboMap.DropDownWidth = 400;
-            this.comboMap.Location = new System.Drawing.Point(94, 575);
+            this.comboMap.Location = new System.Drawing.Point(51, 585);
             this.comboMap.Name = "comboMap";
-            this.comboMap.Size = new System.Drawing.Size(118, 21);
+            this.comboMap.Size = new System.Drawing.Size(178, 21);
             this.comboMap.TabIndex = 63;
             // 
             // comboDisc
@@ -804,14 +790,14 @@ partial class Form1
             this.comboDisc.DropDownWidth = 320;
             this.comboDisc.Location = new System.Drawing.Point(94, 498);
             this.comboDisc.Name = "comboDisc";
-            this.comboDisc.Size = new System.Drawing.Size(136, 21);
+            this.comboDisc.Size = new System.Drawing.Size(135, 21);
             this.comboDisc.TabIndex = 64;
             this.comboDisc.SelectedIndexChanged += new System.EventHandler(this.comboDisc_SelectedIndexChanged);
             // 
             // lblDisc
             // 
             this.lblDisc.AutoEllipsis = true;
-            this.lblDisc.Location = new System.Drawing.Point(11, 550);
+            this.lblDisc.Location = new System.Drawing.Point(11, 555);
             this.lblDisc.Name = "lblDisc";
             this.lblDisc.Size = new System.Drawing.Size(193, 18);
             this.lblDisc.TabIndex = 65;
@@ -819,7 +805,7 @@ partial class Form1
             // audioLabel
             // 
             this.audioLabel.AutoSize = true;
-            this.audioLabel.Location = new System.Drawing.Point(236, 321);
+            this.audioLabel.Location = new System.Drawing.Point(236, 351);
             this.audioLabel.Name = "audioLabel";
             this.audioLabel.Size = new System.Drawing.Size(57, 13);
             this.audioLabel.TabIndex = 67;
@@ -836,14 +822,14 @@ partial class Form1
             "5.1 Surround",
             "7.1 Surround",
             "HRTF (Headphones)"});
-            this.comboAudioOut.Location = new System.Drawing.Point(311, 317);
+            this.comboAudioOut.Location = new System.Drawing.Point(311, 347);
             this.comboAudioOut.Name = "comboAudioOut";
             this.comboAudioOut.Size = new System.Drawing.Size(138, 21);
             this.comboAudioOut.TabIndex = 68;
             // 
             // btnControls
             // 
-            this.btnControls.Location = new System.Drawing.Point(353, 405);
+            this.btnControls.Location = new System.Drawing.Point(353, 434);
             this.btnControls.Name = "btnControls";
             this.btnControls.Size = new System.Drawing.Size(97, 23);
             this.btnControls.TabIndex = 50;
@@ -853,7 +839,7 @@ partial class Form1
             // 
             // btnBuildSettings
             // 
-            this.btnBuildSettings.Location = new System.Drawing.Point(352, 434);
+            this.btnBuildSettings.Location = new System.Drawing.Point(352, 463);
             this.btnBuildSettings.Name = "btnBuildSettings";
             this.btnBuildSettings.Size = new System.Drawing.Size(98, 23);
             this.btnBuildSettings.TabIndex = 51;
@@ -863,7 +849,7 @@ partial class Form1
             // 
             // downloadBuild
             // 
-            this.downloadBuild.Location = new System.Drawing.Point(243, 462);
+            this.downloadBuild.Location = new System.Drawing.Point(243, 491);
             this.downloadBuild.Name = "downloadBuild";
             this.downloadBuild.Size = new System.Drawing.Size(104, 23);
             this.downloadBuild.TabIndex = 52;
@@ -904,7 +890,7 @@ partial class Form1
             // comboRefresh
             // 
             this.comboRefresh.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboRefresh.Location = new System.Drawing.Point(296, 343);
+            this.comboRefresh.Location = new System.Drawing.Point(296, 379);
             this.comboRefresh.Name = "comboRefresh";
             this.comboRefresh.Size = new System.Drawing.Size(120, 21);
             this.comboRefresh.TabIndex = 1;
@@ -914,7 +900,7 @@ partial class Form1
             // label1
             // 
             this.label1.AutoSize = true;
-            this.label1.Location = new System.Drawing.Point(9, 579);
+            this.label1.Location = new System.Drawing.Point(9, 589);
             this.label1.Name = "label1";
             this.label1.Size = new System.Drawing.Size(36, 13);
             this.label1.TabIndex = 66;
@@ -922,7 +908,7 @@ partial class Form1
             // 
             // chkRandomizer
             // 
-            this.chkRandomizer.Location = new System.Drawing.Point(214, 577);
+            this.chkRandomizer.Location = new System.Drawing.Point(197, 589);
             this.chkRandomizer.Name = "chkRandomizer";
             this.chkRandomizer.Size = new System.Drawing.Size(16, 17);
             this.chkRandomizer.TabIndex = 66;
@@ -931,7 +917,7 @@ partial class Form1
             // 
             // checkBox1
             // 
-            this.checkBox1.Location = new System.Drawing.Point(218, 292);
+            this.checkBox1.Location = new System.Drawing.Point(217, 291);
             this.checkBox1.Name = "checkBox1";
             this.checkBox1.Size = new System.Drawing.Size(18, 17);
             this.checkBox1.TabIndex = 69;
@@ -940,7 +926,7 @@ partial class Form1
             // 
             // chkUncensored
             // 
-            this.chkUncensored.Location = new System.Drawing.Point(26, 524);
+            this.chkUncensored.Location = new System.Drawing.Point(26, 528);
             this.chkUncensored.Name = "chkUncensored";
             this.chkUncensored.Size = new System.Drawing.Size(16, 17);
             this.chkUncensored.TabIndex = 91;
@@ -950,7 +936,7 @@ partial class Form1
             // lblUncensored
             // 
             this.lblUncensored.AutoSize = true;
-            this.lblUncensored.Location = new System.Drawing.Point(7, 525);
+            this.lblUncensored.Location = new System.Drawing.Point(7, 529);
             this.lblUncensored.Name = "lblUncensored";
             this.lblUncensored.Size = new System.Drawing.Size(19, 13);
             this.lblUncensored.TabIndex = 90;
@@ -960,9 +946,9 @@ partial class Form1
             // lblMenuType
             // 
             this.lblMenuType.AutoSize = true;
-            this.lblMenuType.Location = new System.Drawing.Point(62, 525);
+            this.lblMenuType.Location = new System.Drawing.Point(62, 529);
             this.lblMenuType.Name = "lblMenuType";
-            this.lblMenuType.Size = new System.Drawing.Size(63, 13);
+            this.lblMenuType.Size = new System.Drawing.Size(64, 13);
             this.lblMenuType.TabIndex = 93;
             this.lblMenuType.Text = "Menu Type:";
             // 
@@ -974,24 +960,24 @@ partial class Form1
             "US",
             "EU",
             "JP"});
-            this.comboMenuType.Location = new System.Drawing.Point(152, 521);
+            this.comboMenuType.Location = new System.Drawing.Point(152, 525);
             this.comboMenuType.Name = "comboMenuType";
-            this.comboMenuType.Size = new System.Drawing.Size(72, 21);
+            this.comboMenuType.Size = new System.Drawing.Size(77, 21);
             this.comboMenuType.TabIndex = 94;
             // 
             // lblGameLang
             // 
             this.lblGameLang.AutoSize = true;
-            this.lblGameLang.Location = new System.Drawing.Point(232, 501);
+            this.lblGameLang.Location = new System.Drawing.Point(235, 528);
             this.lblGameLang.Name = "lblGameLang";
-            this.lblGameLang.Size = new System.Drawing.Size(84, 13);
+            this.lblGameLang.Size = new System.Drawing.Size(89, 13);
             this.lblGameLang.TabIndex = 95;
             this.lblGameLang.Text = "Game Language:";
             // 
             // comboGameLang
             // 
             this.comboGameLang.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboGameLang.Location = new System.Drawing.Point(330, 497);
+            this.comboGameLang.Location = new System.Drawing.Point(330, 525);
             this.comboGameLang.Name = "comboGameLang";
             this.comboGameLang.Size = new System.Drawing.Size(118, 21);
             this.comboGameLang.TabIndex = 96;
@@ -1055,6 +1041,58 @@ partial class Form1
             this.comboShadow.Size = new System.Drawing.Size(135, 21);
             this.comboShadow.TabIndex = 97;
             // 
+            // lblFog
+            // 
+            this.lblFog.AutoSize = true;
+            this.lblFog.Location = new System.Drawing.Point(236, 555);
+            this.lblFog.Name = "lblFog";
+            this.lblFog.Size = new System.Drawing.Size(100, 13);
+            this.lblFog.TabIndex = 100;
+            this.lblFog.Text = "Fog/World Visibility:";
+            // 
+            // trackFog
+            // 
+            this.trackFog.AutoSize = false;
+            this.trackFog.LargeChange = 2;
+            this.trackFog.Location = new System.Drawing.Point(373, 554);
+            this.trackFog.Maximum = 24;
+            this.trackFog.Name = "trackFog";
+            this.trackFog.Size = new System.Drawing.Size(76, 24);
+            this.trackFog.TabIndex = 101;
+            this.trackFog.TickStyle = System.Windows.Forms.TickStyle.None;
+            this.trackFog.Value = 22;
+            // 
+            // lblFogValue
+            // 
+            this.lblFogValue.Location = new System.Drawing.Point(341, 555);
+            this.lblFogValue.Name = "lblFogValue";
+            this.lblFogValue.Size = new System.Drawing.Size(32, 13);
+            this.lblFogValue.TabIndex = 102;
+            this.lblFogValue.Text = "1.10";
+            this.lblFogValue.TextAlign = System.Drawing.ContentAlignment.MiddleRight;
+            // 
+            // lblLineGap
+            // 
+            this.lblLineGap.AutoSize = true;
+            this.lblLineGap.Location = new System.Drawing.Point(236, 321);
+            this.lblLineGap.Name = "lblLineGap";
+            this.lblLineGap.Size = new System.Drawing.Size(75, 13);
+            this.lblLineGap.TabIndex = 103;
+            this.lblLineGap.Text = "Dialog Pause:";
+            // 
+            // comboLineGap
+            // 
+            this.comboLineGap.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.comboLineGap.Items.AddRange(new object[] {
+            "Off",
+            "Short",
+            "Normal",
+            "Long"});
+            this.comboLineGap.Location = new System.Drawing.Point(311, 317);
+            this.comboLineGap.Name = "comboLineGap";
+            this.comboLineGap.Size = new System.Drawing.Size(138, 21);
+            this.comboLineGap.TabIndex = 104;
+            // 
             // lblMinimap
             // 
             this.lblMinimap.AutoSize = true;
@@ -1081,6 +1119,9 @@ partial class Form1
             this.ClientSize = new System.Drawing.Size(454, 642);
             this.Controls.Add(this.lblFog);
             this.Controls.Add(this.trackFog);
+            this.Controls.Add(this.lblFogValue);
+            this.Controls.Add(this.lblLineGap);
+            this.Controls.Add(this.comboLineGap);
             this.Controls.Add(this.lblMinimap);
             this.Controls.Add(this.comboMinimap);
             this.Controls.Add(this.lblShadow);
@@ -1169,6 +1210,7 @@ partial class Form1
             this.pgxpPanel.ResumeLayout(false);
             this.loggingPanel.ResumeLayout(false);
             this.consolePanel.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)(this.trackFog)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
 
