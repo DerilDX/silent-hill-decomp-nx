@@ -169,6 +169,7 @@ namespace SilentHillPC_Launcher
             // (ShadowResValues / the minimap mapping in SaveConfig), so translating
             // these cannot change what is written to config.cfg.
             { "Dialog Pause:",                     new[]{ "Pausa diálogo:", "Pausa diálogo:", "Pause dialogue :", "Dialogpause:", "Pausa dialogo:", "台詞の間:", "对话停顿:", "Пауза реплик:", "Pauza dialogu:" } },
+            { "Fog/World Visibility:",            new[]{ "Niebla/Visibilidad:", "Névoa/Visibilidade:", "Brouillard/Visibilité :", "Nebel/Sichtweite:", "Nebbia/Visibilità:", "霧/視界:", "雾/可视范围:", "Туман/Видимость:", "Mgła/Widoczność:" } },
             { "Shadow Res:",                       new[]{ "Sombras:", "Sombras:", "Ombres :", "Schatten:", "Ombre:", "影の解像度:", "阴影分辨率:", "Тени:", "Cienie:" } },
             { "Minimap:",                          new[]{ "Minimapa:", "Minimapa:", "Minicarte :", "Minikarte:", "Minimappa:", "ミニマップ:", "小地图:", "Миникарта:", "Minimapa:" } },
             { "Circle + Top Left",                 new[]{ "Círculo + sup. izq.", "Círculo + sup. esq.", "Cercle + h. gauche", "Kreis + oben links", "Cerchio + alto sx", "円 + 左上", "圆形 + 左上", "Круг + сверху-слева", "Koło + lewy górny" } },

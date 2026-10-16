@@ -185,9 +185,9 @@ typedef struct {
                            * AI update funcs, so console SPAWN works for every type in any map. Native
                            * maps keep their native slots/variants; 0 = vanilla 3-types-per-map.
                            * (config key: global_chara_pool; docs/Global_Chara_Pool.md) */
-    int wholeMapExteriors; /* EXPERIMENTAL, default 0: texture + draw every loaded exterior chunk (whole
-                            * town resident — combine with fogstr to see it). Costs draw time and shows
-                            * geometry vanilla never rendered at once. Requires preload_chunks and
+    int wholeMapExteriors; /* 0 off, 1 on, 2 auto (default): texture + draw every loaded exterior chunk
+                            * (whole town resident). Auto engages only while fog strength is below 1.0,
+                            * since denser fog hides it anyway. Requires preload_chunks and
                             * resident_textures. (config key: whole_map_exteriors) */
     int usePgxp;         /* 1 = enable PGXP precision/perspective-correct textures (work-in-progress) */
     int itemDepthProbe;  /* DIAGNOSTIC, default 0: one-shot [ITEMDEPTH] dump per item-screen entry
@@ -537,6 +537,11 @@ extern s_PcConfig g_PcConfig;
  * street room, whole_map_exteriors + preload_chunks + resident_textures all
  * on. Implemented in bodyprog_80040B74.c (needs g_Map/g_SavegamePtr). */
 int Pc_WholeMapDrawActive(void);
+/* whole_map_exteriors resolved against the live fog strength (auto mode). */
+int Pc_WholeMapEnabled(void);
+/* Per frame: the far band is depth-tested on PGXP view depth, so PGXP is held
+ * on while the mode is enabled and handed back to use_pgxp afterwards. */
+void Pc_WholeMapPgxpSync(void);
 
 /* Apply a flashlight mode (0..3, see flashlightMode) to the config + all PsyX
  * globals. Swaps flashlight_intensity/size between the two per-pixel styles'

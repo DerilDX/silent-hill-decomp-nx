@@ -61,7 +61,7 @@ s_PcConfig g_PcConfig = {
     .lowHealthGlow = 0, /* 1=pulsing red edge glow below 20 hp (SH2 remake style); off by default */
     .bulletDecals = 0, /* 1=bullet-hole decals at player gunshot impacts (gamedata/decal.png); off by default */
     .globalCharaPool = 1, /* 1=all chara assets resident PC-side + chara_global.dll AI backfill (SPAWN anything anywhere) */
-    .wholeMapExteriors = 0, /* EXPERIMENTAL: texture+draw every exterior chunk (whole town visible; heavy with fog weakened) */
+    .wholeMapExteriors = 2, /* auto: whole town drawn while fog_strength < 1.0, the only time it can be seen */
     .usePgxp        = 0, /* 0=affine textures (PSX look), 1=PGXP perspective correct (WIP) */
     .itemDepthProbe = 0, /* 1=one-shot [ITEMDEPTH] depth dump per item-screen entry (diagnostic) */
     .charaPrimProbe = 0, /* 0=off, else e_CharaId to trace: one-shot [CHARAPRIM] per-model submit/reject dump */
@@ -758,7 +758,8 @@ void PcConfig_Load(const char* path)
         }
         else if (strcmp(key, "whole_map_exteriors") == 0)
         {
-            g_PcConfig.wholeMapExteriors = (atoi(value) != 0);
+            int v = atoi(value);
+            g_PcConfig.wholeMapExteriors = (v < 0) ? 0 : ((v > 2) ? 2 : v);
         }
         else if (strcmp(key, "use_pgxp") == 0)
         {

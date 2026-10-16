@@ -2140,7 +2140,7 @@ static void Pc_WholeMapRoomTableEnsure(void)
 
     s_pcRoomTableValid = 1;
 
-    if (g_PcConfig.wholeMapExteriors && g_Map.isExterior)
+    if (Pc_WholeMapEnabled() && g_Map.isExterior)
     {
         s32 r;
         SH_DBG("[WHOLEMAP] room table: %d outdoor cells; distinct-cell counts per room:", outdoorCells);
@@ -2163,12 +2163,41 @@ static int Pc_WholeMapCellOutdoor(s32 cellX, s32 cellZ)
     return s_pcCellOutdoor[cellZ + 8][cellX + 8];
 }
 
+int Pc_WholeMapEnabled(void)
+{
+    extern float g_PsyX_FogStrength;
+
+    if (g_PcConfig.wholeMapExteriors == 2)
+        return g_PsyX_FogStrength < 1.0f;
+    return g_PcConfig.wholeMapExteriors != 0;
+}
+
+void Pc_WholeMapPgxpSync(void)
+{
+    extern int g_PsxUsePgxp;
+    static int s_forced = 0;
+
+    if (Pc_WholeMapEnabled())
+    {
+        if (!g_PsxUsePgxp)
+        {
+            g_PsxUsePgxp = 1;
+            s_forced     = 1;
+        }
+    }
+    else if (s_forced)
+    {
+        g_PsxUsePgxp = g_PcConfig.usePgxp ? 1 : 0;
+        s_forced     = 0;
+    }
+}
+
 int Pc_WholeMapDrawActive(void)
 {
     s32 pcx;
     s32 pcz;
 
-    if (!(g_PcConfig.wholeMapExteriors && g_PcConfig.preloadChunks &&
+    if (!(Pc_WholeMapEnabled() && g_PcConfig.preloadChunks &&
           g_PcConfig.residentTextures && g_Map.isExterior))
     {
         return 0;
@@ -2959,7 +2988,7 @@ void Ipd_ChunkCheckDraw(GsOT* ot, s32 arg1) // 0x80043A24
     /* TEMP [WHOLEMAP] probe (remove when the whole-town report closes): with
      * the mode active, confirm every chunk actually submits — separates a
      * residual chunk gate from the GTE far-projection limit. */
-    if (g_Map.isExterior && g_PcConfig.wholeMapExteriors)
+    if (g_Map.isExterior && Pc_WholeMapEnabled())
     {
         static u32 s_wmLogMs = 0;
         if ((SDL_GetTicks() - s_wmLogMs) > 2000)

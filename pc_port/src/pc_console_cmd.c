@@ -1779,13 +1779,8 @@ void Pc_ConsoleExec(const char* line)
         }
         cprintf("draw distance: %d%% (25..200; config key draw_distance_pct)", g_PcConfig.drawDistancePct);
     } else if (strcmp(cmd, "WHOLEMAP") == 0) {
-        /* Live, not saved. The far band is depth-tested on PGXP's per-vertex
-         * view depth, which only exists while PGXP runs, so the mode turns it on
-         * for its own lifetime and hands it back as it found it. */
-        extern int g_PsxUsePgxp;
-        extern int Pc_WholeMapDrawActive(void);
-        static int s_pgxpBefore = -1;
-        int on = g_PcConfig.wholeMapExteriors;
+        /* Live, not saved. PGXP follows the mode via Pc_WholeMapPgxpSync. */
+        int on;
         if (strncmp(arg, "PROBE", 5) == 0 || strncmp(arg, "probe", 5) == 0) {
             extern int g_PsxWholeMapProbe;
             g_PsxWholeMapProbe = 2;
@@ -1824,23 +1819,15 @@ void Pc_ConsoleExec(const char* line)
             cprintf("whole map far depth test: %s", g_PsxWholeMapFarDepth ? "ON" : "OFF (painter order)");
             return;
         }
-        if (arg[0] == '1') on = 1;
+        if (strncmp(arg, "AUTO", 4) == 0 || strncmp(arg, "auto", 4) == 0) on = 2;
+        else if (arg[0] == '1') on = 1;
         else if (arg[0] == '0') on = 0;
-        else on = !on;
-        if (on && !g_PcConfig.wholeMapExteriors) {
-            s_pgxpBefore = g_PsxUsePgxp;
-            g_PsxUsePgxp = 1;
-        } else if (!on && g_PcConfig.wholeMapExteriors && s_pgxpBefore >= 0) {
-            g_PsxUsePgxp = s_pgxpBefore;
-            s_pgxpBefore = -1;
-        }
+        else on = !Pc_WholeMapEnabled();
         g_PcConfig.wholeMapExteriors = on;
-        cprintf("whole map: %s (engaged here: %s)%s", on ? "ON" : "OFF",
-                Pc_WholeMapDrawActive() ? "yes" : "no, outdoor exterior cells only",
+        cprintf("whole map: %s (engaged here: %s)%s", on == 2 ? "AUTO (on below fogstr 1.0)" : (on ? "ON" : "OFF"),
+                Pc_WholeMapDrawActive() ? "yes" : "no",
                 (on && !(g_PcConfig.preloadChunks && g_PcConfig.residentTextures))
                     ? " -- needs preload_chunks=1 and resident_textures=1" : "");
-        if (on)
-            cprintf("lower the fog to see it: fogstr 0.2");
     } else if (strcmp(cmd, "FOGDIST") == 0) {
         /* Push the fog planes out (or in). Indoors the fog is BLACK, so this is
          * also the "see further in the sewers" knob: the wall of black is the fog

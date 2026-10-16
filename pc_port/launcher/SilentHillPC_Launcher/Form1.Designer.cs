@@ -69,8 +69,8 @@ partial class Form1
     private ComboBox comboTone;
     private Label flashLabel;
     private ComboBox comboFlash;
-    private Label lblLineGap;
-    private ComboBox comboLineGap;
+    private Label lblFog;
+    private TrackBar trackFog;
     private Label regionLabel;
     private ComboBox comboMap;
     private ComboBox comboDisc;
@@ -174,8 +174,8 @@ partial class Form1
             this.lblRender = new System.Windows.Forms.Label();
             this.lblShadow = new System.Windows.Forms.Label();
             this.comboShadow = new System.Windows.Forms.ComboBox();
-            this.lblLineGap = new System.Windows.Forms.Label();
-            this.comboLineGap = new System.Windows.Forms.ComboBox();
+            this.lblFog = new System.Windows.Forms.Label();
+            this.trackFog = new System.Windows.Forms.TrackBar();
             this.lblMinimap = new System.Windows.Forms.Label();
             this.comboMinimap = new System.Windows.Forms.ComboBox();
             this.vsyncPanel.SuspendLayout();
@@ -758,27 +758,26 @@ partial class Form1
             this.comboFlash.Size = new System.Drawing.Size(135, 21);
             this.comboFlash.TabIndex = 61;
             // 
-            // lblLineGap
+            // lblFog
             // 
-            this.lblLineGap.AutoSize = true;
-            this.lblLineGap.Location = new System.Drawing.Point(9, 579);
-            this.lblLineGap.Name = "lblLineGap";
-            this.lblLineGap.Size = new System.Drawing.Size(75, 13);
-            this.lblLineGap.TabIndex = 100;
-            this.lblLineGap.Text = "Dialog Pause:";
+            this.lblFog.AutoSize = true;
+            this.lblFog.Location = new System.Drawing.Point(232, 525);
+            this.lblFog.Name = "lblFog";
+            this.lblFog.Size = new System.Drawing.Size(108, 13);
+            this.lblFog.TabIndex = 100;
+            this.lblFog.Text = "Fog/World Visibility:";
             // 
-            // comboLineGap
+            // trackFog
             // 
-            this.comboLineGap.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboLineGap.Items.AddRange(new object[] {
-            "Off",
-            "Short",
-            "Normal",
-            "Long"});
-            this.comboLineGap.Location = new System.Drawing.Point(94, 575);
-            this.comboLineGap.Name = "comboLineGap";
-            this.comboLineGap.Size = new System.Drawing.Size(135, 21);
-            this.comboLineGap.TabIndex = 101;
+            this.trackFog.AutoSize = false;
+            this.trackFog.LargeChange = 2;
+            this.trackFog.Location = new System.Drawing.Point(344, 520);
+            this.trackFog.Maximum = 30;
+            this.trackFog.Name = "trackFog";
+            this.trackFog.Size = new System.Drawing.Size(106, 24);
+            this.trackFog.TabIndex = 101;
+            this.trackFog.TickStyle = System.Windows.Forms.TickStyle.None;
+            this.trackFog.Value = 22;
             // 
             // regionLabel
             // 
@@ -794,9 +793,9 @@ partial class Form1
             // 
             this.comboMap.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.comboMap.DropDownWidth = 400;
-            this.comboMap.Location = new System.Drawing.Point(285, 497);
+            this.comboMap.Location = new System.Drawing.Point(94, 575);
             this.comboMap.Name = "comboMap";
-            this.comboMap.Size = new System.Drawing.Size(161, 21);
+            this.comboMap.Size = new System.Drawing.Size(118, 21);
             this.comboMap.TabIndex = 63;
             // 
             // comboDisc
@@ -915,7 +914,7 @@ partial class Form1
             // label1
             // 
             this.label1.AutoSize = true;
-            this.label1.Location = new System.Drawing.Point(248, 500);
+            this.label1.Location = new System.Drawing.Point(9, 579);
             this.label1.Name = "label1";
             this.label1.Size = new System.Drawing.Size(36, 13);
             this.label1.TabIndex = 66;
@@ -923,7 +922,7 @@ partial class Form1
             // 
             // chkRandomizer
             // 
-            this.chkRandomizer.Location = new System.Drawing.Point(432, 499);
+            this.chkRandomizer.Location = new System.Drawing.Point(214, 577);
             this.chkRandomizer.Name = "chkRandomizer";
             this.chkRandomizer.Size = new System.Drawing.Size(16, 17);
             this.chkRandomizer.TabIndex = 66;
@@ -983,7 +982,7 @@ partial class Form1
             // lblGameLang
             // 
             this.lblGameLang.AutoSize = true;
-            this.lblGameLang.Location = new System.Drawing.Point(232, 525);
+            this.lblGameLang.Location = new System.Drawing.Point(232, 501);
             this.lblGameLang.Name = "lblGameLang";
             this.lblGameLang.Size = new System.Drawing.Size(84, 13);
             this.lblGameLang.TabIndex = 95;
@@ -992,7 +991,7 @@ partial class Form1
             // comboGameLang
             // 
             this.comboGameLang.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.comboGameLang.Location = new System.Drawing.Point(330, 521);
+            this.comboGameLang.Location = new System.Drawing.Point(330, 497);
             this.comboGameLang.Name = "comboGameLang";
             this.comboGameLang.Size = new System.Drawing.Size(118, 21);
             this.comboGameLang.TabIndex = 96;
@@ -1080,8 +1079,8 @@ partial class Form1
             // Form1
             // 
             this.ClientSize = new System.Drawing.Size(454, 642);
-            this.Controls.Add(this.lblLineGap);
-            this.Controls.Add(this.comboLineGap);
+            this.Controls.Add(this.lblFog);
+            this.Controls.Add(this.trackFog);
             this.Controls.Add(this.lblMinimap);
             this.Controls.Add(this.comboMinimap);
             this.Controls.Add(this.lblShadow);

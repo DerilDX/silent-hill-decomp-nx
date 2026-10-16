@@ -549,7 +549,8 @@ enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
        QO_X_TPSRESTZOOM, QO_X_OTSRESTZOOM,
        QO_X_TPSRESTX, QO_X_TPSRESTY, QO_X_TPSAIMX, QO_X_TPSAIMY,
        QO_X_OTSRESTX, QO_X_OTSRESTY, QO_X_OTSAIMX, QO_X_OTSAIMY,
-       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE };
+       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE,
+       QO_X_LINEGAP };
 
 /* display_aspect = crt puts the picture on (4:3 x trim), so one framebuffer
  * pixel lands on screen this many times wider than tall at trim 1.0. It is the
@@ -609,6 +610,19 @@ static const char* const QO_SPEAKER_LBL[]  = { "Auto", "Stereo", "Quad", "5.1", 
  * and the Backspace cycle in control_style.c reports. */
 static const char* const QO_CROSSHAIR_LBL[] = { "Cross (+)", "Dot", "Circle", "Dashes" };
 static const char* const QO_SPEAKER_IDS[]  = { "auto", "stereo", "quad", "51", "71" };
+/* Dialog Pause presets, the launcher's former dropdown: cutscene_line_gap_ms. */
+static const char* const QO_LINEGAP_LBL[] = { "Off", "Short", "Normal", "Long" };
+static const int         QO_LINEGAP_MS[]  = { 0, 150, 300, 600 };
+
+static int PcOpt_LineGapIndex(void)
+{
+    int ms = g_PcConfig.cutsceneLineGapMs;
+
+    if (ms <= 0)   return 0;
+    if (ms <= 220) return 1;
+    if (ms <= 450) return 2;
+    return 3;
+}
 
 const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz)
 {
@@ -625,6 +639,10 @@ const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz)
         return Pc_LangQuickMenu(g_PcConfig.dreamBlur ? "On" : "Off");
     case QO_X_DPADMOVE:
         return Pc_LangQuickMenu(g_PcConfig.disableDpadMovement ? "On" : "Off");
+    case QO_X_LINEGAP: {
+        int i = PcOpt_LineGapIndex();
+        return (i == 0) ? Pc_LangQuickMenu("Off") : Pc_LangQuick(QO_LINEGAP_LBL[i]);
+    }
     /* Marked "(off)" while the crosshair itself is off, the way Dream Blur
      * Strength does, since the shape has nothing to draw then. */
     case QO_X_CROSSHAIRSTYLE: {
@@ -995,6 +1013,14 @@ void PcOpt_QuickExtraAdjust(int which, int dir)
         g_PsxFeedbackDampBlend       = v;
         snprintf(buf, sizeof(buf), "%.2f", v);
         PcConfig_SaveKeyValue("dream_blur_strength", buf);
+        Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+        break;
+    }
+    case QO_X_LINEGAP: {
+        int i = (PcOpt_LineGapIndex() + dir + 4) % 4;
+        g_PcConfig.cutsceneLineGapMs = QO_LINEGAP_MS[i];
+        snprintf(buf, sizeof(buf), "%d", QO_LINEGAP_MS[i]);
+        PcConfig_SaveKeyValue("cutscene_line_gap_ms", buf);
         Sd_PlaySfx(Sfx_MenuMove, 0, 64);
         break;
     }

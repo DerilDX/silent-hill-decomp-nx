@@ -2340,6 +2340,7 @@ void MainLoop(void) // 0x80032EE0
              g_GameWork.gameState == GameState_MainLoadScreen || g_GameWork.gameState == GameState_AutoLoadSavegame ||
              g_GameWork.gameState == GameState_LoadMapScreen))
             Pc_FreeCam_Set(0);
+        Pc_WholeMapPgxpSync();
         {
             extern int g_PcQuickOptionsActive;
             if (g_DebugCamEnabled && !g_PcQuickOptionsActive) {
