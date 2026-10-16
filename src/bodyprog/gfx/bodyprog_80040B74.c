@@ -2739,11 +2739,13 @@ static float Pc_WholeMapConeSlope(void)
     return slope;
 }
 
+/* Outdoors only: thin fog exposes the spawn ring on the open streets, and
+ * interiors must keep the PSX spawn/despawn rules whatever the fog. */
 int Pc_LongViewActive(void)
 {
     extern float g_PsyX_FogStrength;
 
-    return g_PsyX_FogStrength < 1.0f;
+    return g_Map.isExterior && g_PsyX_FogStrength < 1.0f;
 }
 
 /* Scenes authored for the stock fog (the final map's ending, where thin fog
