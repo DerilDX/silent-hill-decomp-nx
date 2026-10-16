@@ -7,6 +7,7 @@
 #include "pc_big_lm.h"
 #include "pc_playas.h"
 #ifdef SH_PC_PORT
+#include "bodyprog/events/npc_main.h"
 #include "main/fileinfo.h" /* g_GameRegion — PAL BG_ETC material-UV relocation */
 #endif
 #endif
@@ -535,6 +536,22 @@ void WorldObject_ModelNameSet(s_WorldObjectModel* model, char* newStr) // 0x8003
 
     model->metadata.field_8 = 0;
 }
+
+#ifdef SH_PC_PORT
+bool Pc_CommonPickupInRange(const VECTOR3* pos)
+{
+    const VECTOR3* pp = &g_SysWork.playerWork.player.position;
+    q19_12         dy = pos->vy - pp->vy;
+
+    /* The floor test keeps an item on a storey above or below from showing
+     * through a stairwell or an unloaded room. */
+    if (dy > Q12(3.0f) || dy < Q12(-3.0f))
+    {
+        return false;
+    }
+    return !Math_Distance2dCheck(pp, pos, Q12(24.0f));
+}
+#endif
 
 void WorldGfx_ObjectAdd(s_WorldObjectModel* model, const VECTOR3* pos, const SVECTOR3* rot) // 0x8003C92C
 {

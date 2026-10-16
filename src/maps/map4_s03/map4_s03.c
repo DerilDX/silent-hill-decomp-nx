@@ -5263,7 +5263,11 @@ void Map_WorldObjectsUpdate(void) // 0x800D9BB0
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 6, -1, 6) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[1].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 6, -1, 6) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M4S03_RifleShells0))
         {
@@ -5271,7 +5275,11 @@ void Map_WorldObjectsUpdate(void) // 0x800D9BB0
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 6, -1, 6) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[2].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 6, -1, 6) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M4S03_RifleShells1))
         {
