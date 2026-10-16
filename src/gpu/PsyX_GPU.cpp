@@ -422,7 +422,14 @@ static unsigned s_wmDevPrims, s_wmPrecPrims;
 extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
 static Uint64 s_wmFrameStart = 0;
 /* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
+/* The rate is calibrated against SDL each probe frame, so any monotonic
+ * counter serves where there is no TSC (arm64 macOS). */
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <x86intrin.h>
+#define WM_TICKS() __rdtsc()
+#else
+#define WM_TICKS() SDL_GetPerformanceCounter()
+#endif
 static unsigned long long s_wmCyc[9];
 static unsigned s_wmGt4;
 /* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
@@ -432,8 +439,8 @@ static unsigned long long s_wmClsCyc[18];
 static unsigned s_wmClsN[18];
 static unsigned long long s_wmTscStart;
 extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0, g_wmFarMeshKeys = 0, g_wmFarMeshDraws = 0, g_wmFarMeshQueued = 0; }
-#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmClsCyc[i] += __rdtsc() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
-#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = __rdtsc(); stmt; s_wmCyc[i] += __rdtsc() - _c0; } else { stmt; } } while (0)
+#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TICKS(); stmt; s_wmClsCyc[i] += WM_TICKS() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
+#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TICKS(); stmt; s_wmCyc[i] += WM_TICKS() - _c0; } else { stmt; } } while (0)
 static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
 static float s_wmWMin, s_wmWMax;
 static unsigned char s_lastLookupFar;
@@ -490,7 +497,7 @@ extern "C" void PGXP_CoverageTick(void)
 			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
 		{
 			const double frameMs = (double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
-			const double cycPerMs = (frameMs > 0.0) ? (double)(__rdtsc() - s_wmTscStart) / frameMs : 1.0;
+			const double cycPerMs = (frameMs > 0.0) ? (double)(WM_TICKS() - s_wmTscStart) / frameMs : 1.0;
 			char buf[1024];
 			int len = 0;
 			for (int c = 0; c < 18; c++)
@@ -520,7 +527,7 @@ extern "C" void PGXP_CoverageTick(void)
 		s_wmDevPrims = s_wmPrecPrims = 0;
 		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
 		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
-		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = __rdtsc();
+		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = WM_TICKS();
 		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
 		s_wmFrameStart = SDL_GetPerformanceCounter();
 		g_PsxWholeMapProbe = 1;
