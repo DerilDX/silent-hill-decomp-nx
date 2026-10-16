@@ -1640,8 +1640,9 @@ void Player_LogicUpdate(s_SubCharacter* player, s_PlayerExtra* extra, GsCOORDINA
              * Harry is standing still. Player_Controller doesn't fold R2
              * into HasActionInput (only Cross/run do that on PSX). */
             {
+                extern int g_PcRearLookActive;
                 u16 aimBtn  = g_GameWorkPtr->config.controllerConfig.aim;
-                bool aimHeld   = (g_Controller0->heldBtnFlags & aimBtn) != 0;
+                bool aimHeld   = (g_Controller0->heldBtnFlags & aimBtn) != 0 && !g_PcRearLookActive;
                 bool hasWeapon = (g_SysWork.playerCombat.weaponAttack != (s8)NO_VALUE);
                 if (!aimHeld || !hasWeapon)
                 {
@@ -2611,6 +2612,15 @@ void Player_LogicUpdate(s_SubCharacter* player, s_PlayerExtra* extra, GsCOORDINA
                      * sprint-cancel below drops aim while running. */
                     aimHeld  = (g_Controller0->heldBtnFlags & aimBtn)  != 0;
                     fireHeld = (g_Controller0->heldBtnFlags & fireBtn) != 0;
+                    {
+                        /* Rear Look (TPS/OTS, held) and aiming are exclusive:
+                         * the camera faces behind Harry, so an aim would point
+                         * away from what the player sees. Only aim is refused;
+                         * the aim button's other uses read g_Controller0 as is. */
+                        extern int g_PcRearLookActive;
+                        if (g_PcRearLookActive)
+                            aimHeld = false;
+                    }
 
                     /* Free-aim (OTS/TPS): a ranged weapon stays aimed while running
                      * (move+aim+shoot). Walk speed is forced at the move-speed site
@@ -11998,6 +12008,13 @@ void Player_Controller(void) // 0x8007F32C
     {
         g_Player_IsAiming = g_Controller0->clickedBtnFlags & g_GameWorkPtr->config.controllerConfig.aim;
     }
+#ifdef SH_PC_PORT
+    {
+        extern int g_PcRearLookActive;
+        if (g_PcRearLookActive)
+            g_Player_IsAiming = false;
+    }
+#endif
 
     if (g_SysWork.playerCombat.weaponAttack >= WEAPON_ATTACK(EquippedWeaponId_Handgun, AttackInputType_Tap) &&
         g_SysWork.playerWork.extra.lowerBodyState >= PlayerLowerBodyState_Aim
