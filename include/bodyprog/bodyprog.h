@@ -1212,7 +1212,7 @@ void WorldObject_ModelNameSet(s_WorldObjectModel* model, char* newStr);
 /** Submits a world object to draw. */
 void WorldGfx_ObjectAdd(s_WorldObjectModel* model, const VECTOR3* pos, const SVECTOR3* rot);
 #ifdef SH_PC_PORT
-/* Map scripts draw a common pickup only while the player stands in its 40u map
+/* Interiors only. Map scripts draw a common pickup only while the player stands in its 40u map
  * cell. Behind fog and fixed cameras that edge never showed; in first person or
  * with the fog thinned the item blinked out a few steps away. ORed into each
  * pickup's cell test so a nearby item stays drawn. Drawing only: taking an

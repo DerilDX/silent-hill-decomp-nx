@@ -539,14 +539,21 @@ void WorldObject_ModelNameSet(s_WorldObjectModel* model, char* newStr) // 0x8003
 #ifdef SH_PC_PORT
 bool Pc_CommonPickupInRange(const VECTOR3* pos)
 {
-    const VECTOR3* pp = &g_SysWork.playerWork.player.position;
-    q19_12         dy = pos->vy - pp->vy;
+    extern s_MapTerrain g_Map;
+    const VECTOR3*      pp = &g_SysWork.playerWork.player.position;
+    q19_12              dy = pos->vy - pp->vy;
+    s32                 dx;
+    s32                 dz;
+
+    /* Interiors only: rooms are short and first person sees across a cell
+     * edge within a few steps. Outdoors keeps the original per-cell items. */
+    if (g_Map.isExterior)
+    {
+        return false;
+    }
 
     /* The floor test keeps an item on a storey above or below from showing
      * through a stairwell or an unloaded room. */
-    s32            dx;
-    s32            dz;
-
     if (dy > Q12(3.0f) || dy < Q12(-3.0f))
     {
         return false;

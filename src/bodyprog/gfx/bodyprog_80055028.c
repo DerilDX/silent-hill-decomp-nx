@@ -5653,6 +5653,7 @@ typedef struct
     PsyX_FarMeshRange* ranges;
     s32                rangeCount;
     float              orgX, orgZ;
+    u32                lastFrame;
 } PcFarChunk;
 
 #define PC_FAR_CHUNK_MAX      256
@@ -5660,6 +5661,7 @@ typedef struct
 
 static PcFarChunk s_pcFarChunks[PC_FAR_CHUNK_MAX];
 static s32        s_pcFarChunkCount;
+static u32        s_pcFarFrame;
 static s32        s_pcFarBuildBudget;
 static s32        s_pcFarArg;
 static s32        s_pcFarNearHead[ORDERING_TABLE_SIZE];
@@ -6110,17 +6112,46 @@ static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
 
 static PcFarChunk* Pc_FarChunkFind(const s_IpdHeader* ipd)
 {
-    s32 i;
+    PcFarChunk* fc;
+    s32         i;
+    s32         lru = -1;
 
     for (i = 0; i < s_pcFarChunkCount; i++)
     {
         if (s_pcFarChunks[i].ipd == ipd)
+        {
+            s_pcFarChunks[i].lastFrame = s_pcFarFrame;
             return &s_pcFarChunks[i];
+        }
     }
-    if (s_pcFarChunkCount >= PC_FAR_CHUNK_MAX)
-        return NULL;
-    memset(&s_pcFarChunks[s_pcFarChunkCount], 0, sizeof(s_pcFarChunks[0]));
-    return &s_pcFarChunks[s_pcFarChunkCount++];
+    if (s_pcFarChunkCount < PC_FAR_CHUNK_MAX)
+    {
+        fc = &s_pcFarChunks[s_pcFarChunkCount++];
+    }
+    else
+    {
+        /* Streaming loads chunks into fresh buffers over a session, and a slot
+         * is keyed by buffer address, so dead addresses used to hold their slots
+         * until the next map change. Once all 256 were taken every new chunk
+         * fell to the PSX path for good: the town turned CPU-bound after a while
+         * of play, never on a fresh start. Reclaim the least recently drawn
+         * slot instead; one drawn this frame is never taken (its mesh is queued). */
+        for (i = 0; i < s_pcFarChunkCount; i++)
+        {
+            if (s_pcFarChunks[i].lastFrame != s_pcFarFrame &&
+                (lru < 0 || (s32)(s_pcFarChunks[i].lastFrame - s_pcFarChunks[lru].lastFrame) < 0))
+                lru = i;
+        }
+        if (lru < 0)
+            return NULL;
+        fc = &s_pcFarChunks[lru];
+        free(fc->prims);
+        free(fc->ranges);
+        PsyX_FarMeshFree(fc->gpu);
+    }
+    memset(fc, 0, sizeof(*fc));
+    fc->lastFrame = s_pcFarFrame;
+    return fc;
 }
 
 void Pc_FarFrameBegin(s32 arg, const void* mapKey)
@@ -6142,6 +6173,7 @@ void Pc_FarFrameBegin(s32 arg, const void* mapKey)
         s_pcFarMapKey     = mapKey;
     }
 
+    s_pcFarFrame++;
     PsyX_FarQuadsReset();
     for (i = 0; i < ORDERING_TABLE_SIZE; i++)
         s_pcFarNearHead[i] = -1;
