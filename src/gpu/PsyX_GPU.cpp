@@ -139,13 +139,17 @@ static void Shadow_Put(void* addr, float x, float y, float w, unsigned value) {
 	e->x = x; e->y = y; e->w = w;
 }
 
+/* A miss may stop at the first stale-gen slot, not only an empty one: Put takes
+ * the first slot that is empty, ours or stale, and a slot stamped this gen never
+ * goes stale within it, so every slot ahead of a live entry is live. The tables
+ * are never cleared, so stopping only at key 0 walked all 16 slots per miss. */
 static const ShadowEntry* Shadow_Get(const void* addr) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
 		const ShadowEntry* e = &s_shadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
 }
@@ -191,11 +195,16 @@ extern "C" float g_PsyX_CharaFade = 0.0f;
  * vertices with whichever values the LAST RTPS of the frame happened to leave. */
 struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float fade; float ofx, ofy, h; };
 static VsEntry s_vshadow[SHADOW_SIZE];
+/* With PGXP and the flashlight off nothing stores view-space data, yet texture
+ * filtering alone keeps GR_NeedViewSpaceData() true, so every vertex copy
+ * probed this 96 MB table for a hit that cannot exist this gen. */
+static unsigned s_vsPutGen = 0;
 
 static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value,
                    float ofx, float ofy, float h, float fade = 0.0f) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned b = ShadowBucket(k);
+	s_vsPutGen = s_pgxpGen;
 	for (int i = 0; i < 16; i++) {
 		VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
@@ -212,10 +221,12 @@ static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsig
 static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned b = ShadowBucket(k);
+	if (s_vsPutGen != s_pgxpGen)
+		return nullptr;
 	for (int i = 0; i < 16; i++) {
 		const VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen && e->value == value) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
 }
@@ -594,7 +605,7 @@ static const AffineEntry* AffineFind(const void* prim) {
 	for (int i = 0; i < 16; i++) {
 		const AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
 		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
 }
@@ -956,7 +967,7 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2, SPLIT_DEPTH_WORLD_FAR = 
  * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
  * address from a previous frame must then read as a miss, exactly like the
  * s_shadow / s_affine tables already do). Inert while the memset still runs. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; unsigned char alpha; unsigned char far; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned wipe; unsigned char kind; unsigned char alpha; unsigned char far; };
 
 /* Per-prim ALPHA (0..255, default 255 = opaque semantics unchanged), armed like
  * the SZ payload and carried in the same entry. BM_AVERAGE is real
@@ -976,6 +987,11 @@ extern "C" void PsyX_SetNextPrimAlpha(int a)
 	g_primAlphaNext = a;
 }
 static SZEntry g_szTable[SZ_TABLE_SIZE];
+/* The PGXP-off GsDrawOt wipe bumps this instead of memsetting the 8 MB table
+ * (twice a frame, a few ms on a weak CPU). An entry stamped with an older wipe
+ * reads exactly as the zeroed entry the memset left. */
+static unsigned s_szWipe = 0;
+#define SZ_KEY(s) (g_szTable[s].wipe == s_szWipe ? g_szTable[s].key : (uintptr_t)0)
 
 /* --- Depth channel Step 3 (docs: PGXP_PR51_Vetting.md; live only when PGXP is
  * on and outside the inventory item pass) ---------------------------------
@@ -1192,8 +1208,9 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		/* Stale-gen slots are reclaimable (same probe rule as Shadow_Put/
 		 * AffineStore): identical placement while the memset wipes the table
 		 * (stale entries then never exist mid-probe). */
-		if (g_szTable[s].key == 0 || g_szTable[s].key == key || g_szTable[s].gen != s_pgxpGen) {
+		if (SZ_KEY(s) == 0 || SZ_KEY(s) == key || g_szTable[s].gen != s_pgxpGen) {
 			g_szTable[s].key = key;
+			g_szTable[s].wipe = s_szWipe;
 			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			g_szTable[s].gen = s_pgxpGen;
@@ -1207,6 +1224,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	// Probe exhausted — overwrite initial slot
 	if (g_PsxUsePgxp) s_dbgSzExhaust++;
 	g_szTable[slot].key = key;
+	g_szTable[slot].wipe = s_szWipe;
 	g_szTable[slot].alpha = (unsigned char)g_primAlphaNext;
 	g_primAlphaNext = 255;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
@@ -1228,7 +1246,7 @@ static int SplitDepthForPrim(const void* prim)
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == key)
+		if (SZ_KEY(s) == key)
 		{
 			/* Stale-gen = captured a previous frame, not this one: a reused
 			 * packet address must not inherit last frame's kind. (Function is
@@ -1241,7 +1259,7 @@ static int SplitDepthForPrim(const void* prim)
 			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return g_szTable[s].far ? SPLIT_DEPTH_WORLD_FAR : SPLIT_DEPTH_WORLD; }
 			return SPLIT_DEPTH_DISABLED;
 		}
-		if (g_szTable[s].key == 0)
+		if (SZ_KEY(s) == 0)
 			break;
 	}
 	return SPLIT_DEPTH_DISABLED;
@@ -1274,7 +1292,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 		 * wipes exactly as before (byte-identical); a runtime PGXP on->off
 		 * toggle self-heals here on the first off-frame GsDrawOt. */
 		if (!g_PsxUsePgxp)
-			memset(g_szTable, 0, sizeof(g_szTable));
+			s_szWipe++;
 	}
 	else if (g_PsxUsePgxp)
 		s_dbgWipeSkips++;
@@ -1294,7 +1312,7 @@ static unsigned char PsyX_LookupGteAlpha(const void* prim)
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == key)
+		if (SZ_KEY(s) == key)
 			/* Gen-validate ALWAYS (unlike the depths lookup's PGXP-gated
 			 * check): arm and consume are same-frame, so a match from an
 			 * earlier gen is a reused packet address, not this prim. Without
@@ -1302,7 +1320,7 @@ static unsigned char PsyX_LookupGteAlpha(const void* prim)
 			 * whatever landed on that address later -- the load screen drew
 			 * Harry semi-transparent, ghosting over the uncleared background. */
 			return (g_szTable[s].gen == s_pgxpGen) ? g_szTable[s].alpha : 255;
-		if (g_szTable[s].key == 0) break;
+		if (SZ_KEY(s) == 0) break;
 	}
 	return 255;
 }
@@ -1313,7 +1331,7 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == key) {
+		if (SZ_KEY(s) == key) {
 			/* Gen-validate gated on PGXP: the legacy pgxpZBuffer path (PGXP
 			 * off) keeps its exact historical behavior; when PGXP is on a
 			 * reused packet address from a prior frame reads as a miss. */
@@ -1328,7 +1346,7 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 			s_lastLookupFar = g_szTable[s].far;
 			return true;
 		}
-		if (g_szTable[s].key == 0) break;
+		if (SZ_KEY(s) == 0) break;
 	}
 	return false;
 }
