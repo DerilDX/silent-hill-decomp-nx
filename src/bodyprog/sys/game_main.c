@@ -3626,30 +3626,6 @@ void MainLoop(void) // 0x80032EE0
                 g_GameWork.background2dColor.r = PC_WorldEnvWork.fog.color.r;
                 g_GameWork.background2dColor.g = PC_WorldEnvWork.fog.color.g;
                 g_GameWork.background2dColor.b = PC_WorldEnvWork.fog.color.b;
-                /* [GREYFLASH] v2. v1 logged EVERY fog-clear frame and burned its
-                 * cap on normal frames in seconds. The flash = a fog-coloured
-                 * clear presented while the world draws (almost) nothing, so
-                 * gate on the renderer's per-frame vertex tally instead: a real
-                 * world frame parses thousands of vertices, a flash frame
-                 * nearly none (one frame of lag -- the tally describes the
-                 * previous frame -- fine for detection). Re-arms over time so a
-                 * long session keeps capturing. */
-                {
-                    extern int g_freezeFrameValid, g_PsxLastFrameVerts;
-                    static s32 s_gfLogs = 0;
-                    static u32 s_gfWindowMs = 0;
-                    u32 nowMs = SDL_GetTicks();
-                    if (nowMs - s_gfWindowMs > 10000) { s_gfWindowMs = nowMs; s_gfLogs = 0; }
-                    if (g_PsxLastFrameVerts < 900 && s_gfLogs < 8) {
-                        s_gfLogs++;
-                        SH_DBG("[GREYFLASH] emptyframe verts=%d sys=%d worldDrawn=%d present=%d freezeValid=%d bg2dHeld=%d fog=(%d,%d,%d)",
-                               g_PsxLastFrameVerts,
-                               (int)g_SysWork.sysState, (int)g_PcWorldDrawnThisFrame,
-                               (int)g_PsxPresentLastFrame, (int)g_freezeFrameValid, (int)bg2dHeld,
-                               (int)PC_WorldEnvWork.fog.color.r, (int)PC_WorldEnvWork.fog.color.g,
-                               (int)PC_WorldEnvWork.fog.color.b);
-                    }
-                }
             } else {
                 g_GameWork.background2dColor.r = 0;
                 g_GameWork.background2dColor.g = 0;
@@ -4151,16 +4127,6 @@ void MainLoop(void) // 0x80032EE0
          * frozen pause / "no map" image (which used to ghost the live console against the
          * frozen copy when the console was already open before pausing). Not drawn here. */
         ML_TRACE("PsyX_EndScene");
-        /* [GREYFRAME] game-side context for the renderer's flash detector. */
-        {
-            extern int g_PsxGreyTag[6];
-            g_PsxGreyTag[0] = g_GameWork.gameState;
-            g_PsxGreyTag[1] = g_SysWork.sysState;
-            g_PsxGreyTag[2] = g_VBlanks;
-            g_PsxGreyTag[3] = g_PcWorldDrawnThisFrame;
-            g_PsxGreyTag[4] = g_DeltaTime;
-            g_PsxGreyTag[5] = g_PsxPresentLastFrame;
-        }
         PsyX_EndScene();
         /* Demand-driven texture-pack composes (pc_port/src/texpack_lazy.c). Runs
          * HERE, after the OT submit and after the swap inside PsyX_EndScene,

@@ -124,6 +124,9 @@ typedef struct {
 
 static HiresEntry g_entries[MAX_HIRES_OVERRIDES];
 static int        g_numEntries = 0;
+/* Bumped on every change to the set or placement of g_entries; invalidates the
+ * (tpage, clut) lookup memo in HiresOverride_LookupByTpageClut. */
+static unsigned   g_hiresEntriesGen = 1;
 static int        g_initialized = 0;
 
 static int upload_rgba(GLuint* tex, const unsigned char* rgba, int w, int h, int nearest);
@@ -434,6 +437,7 @@ int HiresOverride_EvictColdestPackRow(unsigned minAgeTicks,
             glDeleteTextures(1, &e->glTexture);
             pack_credit(&e->packBytes);
             g_entries[bestEntry] = g_entries[--g_numEntries];
+            g_hiresEntriesGen++;
         }
     }
 
@@ -627,6 +631,7 @@ void HiresOverride_Init(void)
 
     if (g_initialized) return;
     g_numEntries = 0;
+    g_hiresEntriesGen++;
     for (i = 0; i < HIRES_POOL_SLOT_MAX; i++)
     {
         g_poolSlots[i].nativeClutX = -1;
@@ -883,6 +888,7 @@ int HiresOverride_RegisterFromTim(const char* timPath,
     free(rgba);
 
     HiresEntry* e = &g_entries[g_numEntries++];
+    g_hiresEntriesGen++;
     e->vramX = targetVramX;
     e->vramY = targetVramY;
     e->vramW = targetVramW;
@@ -1493,6 +1499,7 @@ int HiresOverride_DropVramRect(int vramX, int vramY, int vramW, int vramH,
     }
     pack_credit(&e->packBytes);
     *e = g_entries[--g_numEntries];
+    g_hiresEntriesGen++;
     return 0;
 }
 
@@ -1560,6 +1567,7 @@ int HiresOverride_RegisterRGBAKeyed(const char* label,
      * maximally cold to the evictor, which would free it before a single prim
      * ever sampled it. */
     e->tick = g_hiresTick;
+    g_hiresEntriesGen++;
 
     e->vramX = targetVramX;
     e->vramY = targetVramY;
@@ -1657,6 +1665,7 @@ int HiresOverride_RegisterDdsKeyed(const char* label,
     pack_charge(&e->packBytes, (w + 3) / 4, h);
     e->contentHash = contentHash;
     e->tick = g_hiresTick; /* see the RGBA twin */
+    g_hiresEntriesGen++;
 
     e->vramX = targetVramX;
     e->vramY = targetVramY;
@@ -1875,6 +1884,7 @@ void HiresOverride_InvalidateVramRect(int x, int y, int w, int h)
             }
             pack_credit(&e->packBytes);
             g_entries[i] = g_entries[--g_numEntries];
+            g_hiresEntriesGen++;
             continue;
         }
         i++;
@@ -2000,16 +2010,42 @@ unsigned int HiresOverride_LookupByTpageClut(int tpage, int clut,
      * TIM keep the final coordinate non-negative. */
     int pageCellW = (bd == 4) ? 64 : (bd == 8) ? 128 : 256;
 
-    for (int i = 0; i < g_numEntries; i++)
+    /* The scan below depends only on (tpage, clut) and the entry table, and a
+     * pack-heavy frame repeats the same few keys for thousands of prims while
+     * each miss walks every entry. */
+    int hit;
     {
-        HiresEntry* e = &g_entries[i];
-        if (e->originalBitDepth != bd) continue;
-        if (tpx >= e->vramX + e->vramW || tpx + pageCellW <= e->vramX) continue;
-        if (tpy >= e->vramY + e->vramH || tpy + 256 <= e->vramY) continue;
-        if (e->clutX >= 0)
+        static struct { unsigned key; unsigned gen; int idx; } s_memo[256];
+        const unsigned key = ((unsigned)(tpage & 0xFFFF) << 16) | (unsigned)(clut & 0xFFFF);
+        const unsigned m   = (key * 2654435761u) >> 24;
+
+        if (s_memo[m].gen == g_hiresEntriesGen && s_memo[m].key == key)
+            hit = s_memo[m].idx;
+        else
         {
-            if (cx != e->clutX || cy != e->clutY) continue;
+            hit = -1;
+            for (int i = 0; i < g_numEntries; i++)
+            {
+                HiresEntry* e = &g_entries[i];
+                if (e->originalBitDepth != bd) continue;
+                if (tpx >= e->vramX + e->vramW || tpx + pageCellW <= e->vramX) continue;
+                if (tpy >= e->vramY + e->vramH || tpy + 256 <= e->vramY) continue;
+                if (e->clutX >= 0)
+                {
+                    if (cx != e->clutX || cy != e->clutY) continue;
+                }
+                hit = i;
+                break;
+            }
+            s_memo[m].key = key;
+            s_memo[m].gen = g_hiresEntriesGen;
+            s_memo[m].idx = hit;
         }
+    }
+
+    if (hit >= 0)
+    {
+        HiresEntry* e = &g_entries[hit];
         {
             /* vramX/W are in 16-bit VRAM cells; texels per cell depends on
              * the bit depth. The offset is where this prim's tpage origin
