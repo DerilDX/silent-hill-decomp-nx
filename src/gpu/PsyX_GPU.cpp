@@ -2935,8 +2935,8 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 		/* Only the suspicious kind: every vertex projects on-screen (a real
 		 * straddler's behind-eye vertex saturates the GTE screen box) yet one
 		 * still reads as behind the near plane. */
-		bool onScreen = true;
-		for (int j = 0; j < count; j++)
+		bool onScreen = s_clipLog < 24;
+		for (int j = 0; onScreen && j < count; j++)
 			if (v[j].x < -400.0f || v[j].x > 400.0f || v[j].y < -300.0f || v[j].y > 300.0f)
 				onScreen = false;
 		if (onScreen && s_clipLog < 24)

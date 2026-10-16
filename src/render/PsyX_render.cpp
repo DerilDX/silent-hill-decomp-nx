@@ -6999,10 +6999,16 @@ void GR_DiagGLError(const char* where)
 {
 	static const char* s_seen[16];
 	static int         s_seenCount = 0;
+	static int         s_esChecks  = 0;
 	GLenum             err;
 
-	if (!g_grIsGLES && !g_dbg_glDiag)
+	/* ES backends sweep only the first ~10 s of frames (the black-from-boot
+	 * case this exists for); glGetError can serialise a mobile driver, so it
+	 * must not run every frame for the whole session. */
+	if (!g_dbg_glDiag && (!g_grIsGLES || s_esChecks >= 1200))
 		return;
+	if (!g_dbg_glDiag)
+		s_esChecks++;
 
 	err = glGetError();
 	if (err == GL_NO_ERROR)
