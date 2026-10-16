@@ -1,5 +1,94 @@
 # Silent Hill PC Port — Changelog
 
+## beta-2026.10.16.1 -- 2026-10-16
+- The whole world can finally be seen. The new Fog/World Visibility slider in the launcher controls the thickness of the fog, and if it is set below 1.0 the entire map is drawn in the daylight outdoor parts of the game. I recommend something like 0.85-0.95 for oppressive fog with far away visuals. It needs PGXP, so the launcher will offer to turn it on if you lower the fog without it. Warning: This will impact performance and lowering fog below 1.0 is only recommended on somewhat modern devices. 
+- Lots of optimizations, the game should perform better in general and especially on lower end systems. A background timer no longer eats a whole CPU core, a lot of redundant per-frame graphics and debug work was removed, and texture packs look up their textures faster
+- Dialog Pause now emulates the pauses the original had the same way Duckstation does it. Normal matches the original, Short and Long scale it, and Off removes it. It's in the launcher and the quick menu
+- With thinner fog, monsters outside now spawn and despawn out of the camera's view so they don't pop in and out in plain sight. Indoors and at normal fog spawning is the same as the original
+- Fixed the first boss (Split Head) not hurting Harry with its melee attacks at high frame rates
+- Fixed shadows disappearing in menus, item pickups, doors, and examine screens
+- Fixed Harry running on a black floor and the missing road after the final boss, and the ending cutscenes now keep the normal fog so nothing shows that shouldn't
+- The sewer water and Harry's reflection in look much better than before
+- Fixed the sewer fence dropping before Harry before the Twinfeeler fight
+- Fixed the audio glitch at the start of FMVs
+- Starting a New Game directly on Old Silent Hill (map2_s00) now starts at the cafe door instead of in the void
+- Items on the floor indoors now show up as you get near them instead of only once you're in the same spot
+- Added an FPS counter, turn it on in the quick menu under Debug Actions > FPS Display and pick a corner
+- The mouse cursor now hides while you're using a controller and comes back when you use the mouse
+- Fixed the map and spawn dropdowns in the quick menu, the spawn list no longer shows map names and scrolling with the mouse wheel works properly
+- Aiming is now disabled while using Rear Look in the alternate camera modes
+- Typing in the console no longer triggers quick heal, and the console now supports cursor editing with the arrow keys, Home/End and Delete
+- Free camera has photo mode controls now
+
+Commit summaries:
+- Split Head body damage scaled to the 30 Hz tick; launcher Dialog Pause option
+- Shadows on every live world frame; sewer grating hinge at 30 Hz; STR FMV audio pre-roll and device close
+- docs: Oct 14 user report tracker, items 2/9 dropped, item 10 findings
+- Chunk slots never share the PSX RAM buffer: the map7_s03 ending's DMS loads clobbered the arena chunk
+- Dialogue pause is a CD-seek delay at voice start, not an end-of-line hold
+- docs: Oct 14 report tracker, items 6/8/10 updated
+- Sewer water caustic tile composited in software (bit-exact PSX words)
+- docs: sewer water item resolved
+- Bump PsyCross: dither untextured additive prims (sewer water octagon rings)
+- Bump PsyCross: per-pixel flashlight skips additive prims (sewer water blowout in Modern)
+- Sewer water reflection A/B: ADDSTP console switch + one-shot [WATERVRAM] palette log
+- [WATERREFL] sampled probe for the sewer water reflection sprite (gate, angle, colour)
+- WHOLEMAP console command: render the whole outdoor town, depth-sorted
+- docs: whole-map v5 (far-band z-buffer, wholemap console command)
+- Whole-map: far models no longer wrap to 256u-shifted spots near the player
+- wholemap probe / wholemap depth 0|1: diagnose the PGXP-only far road strips (PsyCross 8734b16)
+- PsyCross eae5954: per-prim depth table sized for whole-map frames, wider far probe
+- Console: caret editing with Left/Right, Home/End and Delete
+- OT clamp leaves room for the model's bucket base: far polys wrote past org[]
+- PsyCross 6a75fb6: whole-map far band uses painter order by default (fixes the white-tiled far road)
+- Whole-map: a depth-sorted far list past the OT instead of one shared bucket
+- Console PGXPDBG for the PGXP-only far ground holes (PsyCross 9043975)
+- PGXPDBG 16/32 help text (PsyCross 8905a98)
+- PsyCross 6b71f85: centroid v_uvlim fixes the PGXP+MSAA holes in distant ground
+- PGXPDBG 64/128 (PsyCross 99ce4d8)
+- PsyCross 63d2500: probe for misattached precise vertices
+- PGXP: world backface on the float projection, not just the whole-map far band
+- [WMPROBE] times the whole-map chunk submission (PsyCross 5e067cb)
+- Console open blocks the action binds: typing no longer quick-heals
+- PsyCross 8e07039: cache-friendly PGXP shadow tables (whole-map frame cost)
+- [WMPROBE] times vertex transform vs mesh emission (PsyCross 60b9b82)
+- Mesh drawer: skip the fog-overlay poly colour the PC never draws
+- docs: whole-map perf numbers and the fast far path plan
+- Whole-map fast far path: distant chunks from a world-space cache
+- [WMPROBE] far-path tallies: chunk builds, clip/backface/emit counts, refused model prims by reason
+- PsyCross: lean whole-map far-quad emitter
+- Whole map: far chunks drawn from GPU-resident meshes (wholemap gpu / layer)
+- Whole map: crossroads cells count as outdoor; freecam faster and carries Harry
+- Whole-map far cache: rebuild on slot reuse/texture moves; free camera photo-mode controls
+- Launcher/game binds: stop rewriting untouched keys, open the live scheme, no config line cap
+- Free camera: Harry stays put (drop bring-Harry and follow)
+- Launcher fog/world visibility slider; whole map auto below fog 1.0; Dialog Pause to quick menu
+- Launcher: user's layout cleanup, Dialog Pause back, fog value readout, cap 1.20
+- Launcher: language flag to the bottom-right corner
+- Whole map requires PGXP; launcher offers to enable it when fog drops below 1.00
+- Launcher: PGXP fog prompt waits for the slider to be released
+- Thinned fog: monsters spawn and despawn out of the camera's view
+- Alt Russian: author's update (hammer renamed, three subtitles trimmed)
+- New Game straight on map2_s00 starts at the cafe door, not in the void
+- PsyCross: PGXP shadow table back to the scattered hash (seams while turning)
+- Common pickups stay drawn near the player, not only in their own map cell
+- Pickups: Harry's cell and the adjacent ones; PsyCross blocked-scatter PGXP tables
+- Whole map: far-chunk cache reclaims slots; pickups widen in interiors only
+- perf-lowend: PsyCross uniform cache, greyprobe console switch
+- perf-lowend: bump PsyCross (depth-table wipe counter, table miss early-outs, sleeping interrupt thread)
+- perf-lowend: grey-flash probes removed, texture-pack lookup memo, timing untouched
+- Remove leftover per-frame probes and empty probe shells
+- Bump PsyCross: sleeping interrupt thread restored (tested, no timing drift)
+- Sewer water closed: addstp console switch and [WATERVRAM] palette log removed
+- Dialog Pause emulates the PSX per-line CD seek instead of a flat 300 ms
+- Quick menu dropdowns: Spawn no longer shows map names; wheel scrolls every notch
+- Ending cutscenes hold fog at the stock 1.0 while they play
+- Mouse cursor hides while a controller is in use, returns on mouse use
+- Rear Look refuses aim while held (TPS/OTS)
+- Thin-fog monster spawn rules apply outdoors only
+- [ROMPER-HOP] landing line only after a logged hop
+- FPS Display: Debug Actions row, counter in any corner
+
 ## beta-2026.10.13.1 -- 2026-10-13
 - Mostly just fixes some issues with languages, including them not applying properly. This time the commit summaries are detailed enough that they should be self explanatory.
 
