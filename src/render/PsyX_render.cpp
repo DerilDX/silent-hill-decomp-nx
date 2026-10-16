@@ -3109,6 +3109,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	/* Shaders without the decode table return location -1, where this is a no-op. */
 	glUniform1iv(glGetUniformLocation(program, "s_rgLut"), 1, &lutSampler);
 	glUseProgram(0);
+	g_PreviousShader = (ShaderID)-1;
 
 	return program;
 }
@@ -3202,9 +3203,87 @@ TextureID GR_CreateRGBATexture(int width, int height, u_char* data /*= nullptr*/
 	return newTexture;
 }
 
+/* Last value pushed per (program, uniform location). A dense outdoor frame has
+ * thousands of splits and GR_SetTexture re-pushes ~24 uniforms on each, nearly
+ * all unchanged; on weak drivers those calls are the frame's dominant CPU cost.
+ * Keyed on g_PreviousShader, so it relies on every foreign glUseProgram also
+ * resetting that to -1 (an unknown bound program always pushes). */
+typedef struct
+{
+	GLuint   prog;
+	GLint    loc;
+	int      n;
+	uint32_t v[16];
+} UniformCacheEntry;
+
+static UniformCacheEntry s_uniformCache[1024];
+
+static void GR_UniformCacheReset(void)
+{
+	memset(s_uniformCache, 0, sizeof(s_uniformCache));
+}
+
+static int GR_UniformChanged(GLint loc, const void* data, int n)
+{
+	UniformCacheEntry* e;
+	GLuint             prog;
+
+	if (loc == -1)
+		return 0;
+	if (g_PreviousShader == (ShaderID)-1)
+		return 1;
+	prog = (GLuint)g_PreviousShader;
+	e = &s_uniformCache[((prog * 97u) ^ (GLuint)loc) & 1023u];
+	if (e->prog == prog && e->loc == loc && e->n == n && memcmp(e->v, data, (size_t)n * 4) == 0)
+		return 0;
+	e->prog = prog;
+	e->loc  = loc;
+	e->n    = n;
+	memcpy(e->v, data, (size_t)n * 4);
+	return 1;
+}
+
+static void UC_1i(GLint loc, int x)
+{
+	if (GR_UniformChanged(loc, &x, 1))
+		glUniform1i(loc, x);
+}
+
+static void UC_1f(GLint loc, float x)
+{
+	if (GR_UniformChanged(loc, &x, 1))
+		glUniform1f(loc, x);
+}
+
+static void UC_2f(GLint loc, float x, float y)
+{
+	const float v[2] = { x, y };
+	if (GR_UniformChanged(loc, v, 2))
+		glUniform2fv(loc, 1, v);
+}
+
+static void UC_2fv(GLint loc, const float* v)
+{
+	if (GR_UniformChanged(loc, v, 2))
+		glUniform2fv(loc, 1, v);
+}
+
+static void UC_3fv(GLint loc, const float* v)
+{
+	if (GR_UniformChanged(loc, v, 3))
+		glUniform3fv(loc, 1, v);
+}
+
+static void UC_M4(GLint loc, const float* m)
+{
+	if (GR_UniformChanged(loc, m, 16))
+		glUniformMatrix4fv(loc, 1, GL_FALSE, m);
+}
+
 static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 {
 	sh->shader = shader;
+	GR_UniformCacheReset();
 
 #if USE_OPENGL
 	
@@ -3473,7 +3552,7 @@ void GR_Ortho2D(float left, float right, float bottom, float top, float znear, f
 	};
 
 #if USE_OPENGL
-	glUniformMatrix4fv(u_projectionLoc, 1, GL_FALSE, ortho);
+	UC_M4(u_projectionLoc, ortho);
 #endif
 }
 
@@ -3494,7 +3573,7 @@ void GR_Perspective3D(const float fov, const float width, const float height, co
 	};
 
 #if USE_OPENGL
-	glUniformMatrix4fv(u_projection3DLoc, 1, GL_FALSE, persp);
+	UC_M4(u_projection3DLoc, persp);
 #endif
 }
 
@@ -3741,47 +3820,47 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * and forced-nearest sampling on actual 3D geometry (visible as
 	 * blocky tree leaves). */
 	if (u_pgxpEnabledLoc != -1)
-		glUniform1i(u_pgxpEnabledLoc, g_PsxUsePgxp);
+		UC_1i(u_pgxpEnabledLoc, g_PsxUsePgxp);
 
 	/* PGXP depth normalize: prev-frame max SZ. Lets the vertex shader turn each
 	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
 	if (u_szMaxLoc != -1)
-		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
+		UC_1f(u_szMaxLoc, PGXP_GetSzMax());
 	if (u_worldFarBiasLoc != -1)
-		glUniform1f(u_worldFarBiasLoc, (float)g_PsxPgxpWorldFarBias);
+		UC_1f(u_worldFarBiasLoc, (float)g_PsxPgxpWorldFarBias);
 	{
 		extern float g_PgxpFarWClamp;
 		if (u_pgxpFarWLoc != -1)
-			glUniform1f(u_pgxpFarWLoc, g_PgxpFarWClamp);
+			UC_1f(u_pgxpFarWLoc, g_PgxpFarWClamp);
 	}
 
 	if (u_fogColorLoc != -1)
-		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
+		UC_3fv(u_fogColorLoc, g_PsyX_FogColor);
 	if (u_voidProbeLoc != -1)
-		glUniform1i(u_voidProbeLoc, g_PsxVoidProbeArmed == 2 ? 1 : 0);
+		UC_1i(u_voidProbeLoc, g_PsxVoidProbeArmed == 2 ? 1 : 0);
 
 	if (u_fogToBlackLoc != -1)
-		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
+		UC_1i(u_fogToBlackLoc, g_PsxFogToBlack);
 
 	if (u_fogStrengthLoc != -1)
-		glUniform1f(u_fogStrengthLoc, g_PsyX_FogStrength);
+		UC_1f(u_fogStrengthLoc, g_PsyX_FogStrength);
 
 	/* Per-pixel flashlight cone. u_flashlightOn is 0 unless BOTH the master
 	 * config flag and the per-frame game push are set, so the OFF path never
 	 * touches the spotlight branch (and the vsz>0 gate also keeps it off). */
 	if (u_flashlightOnLoc != -1)
-		glUniform1i(u_flashlightOnLoc,
+		UC_1i(u_flashlightOnLoc,
 		            (g_PsyX_UsePerPixelFlashlight && g_PsyX_FlashlightActive) ? 1 : 0);
 	/* Untextured splits bind g_whiteTexture; tell the lit tail so the beam's
 	 * albedo falls back to the vertex-lit color instead of full white. Keyed on
 	 * the caller's texture, not g_lastBoundTexture — this block runs before the
 	 * bind early-out, so it stays correct across program switches. */
 	if (u_untexturedLoc != -1)
-		glUniform1i(u_untexturedLoc, texture == g_whiteTexture ? 1 : 0);
+		UC_1i(u_untexturedLoc, texture == g_whiteTexture ? 1 : 0);
 	if (u_flStyleLoc != -1)
-		glUniform1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
+		UC_1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
 	if (u_flLightPosLoc != -1)
-		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
+		UC_3fv(u_flLightPosLoc, g_PsyX_FlashlightPos);
 
 	/* The cone collapses if any of these is degenerate -- a zero direction most of
 	 * all. Reported on change so a backend that lights wrongly can be compared
@@ -3806,7 +3885,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		}
 	}
 	if (u_flDirLoc != -1)
-		glUniform3fv(u_flDirLoc, 1, g_PsyX_FlashlightDir);
+		UC_3fv(u_flDirLoc, g_PsyX_FlashlightDir);
 	/* FPS mode swaps in its own (tighter/dimmer) cone size + brightness. */
 	float flIntensityActive = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightIntensityFps : g_PsyX_FlashlightIntensity;
 	float flSizeActive      = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightSizeFps      : g_PsyX_FlashlightSize;
@@ -3815,7 +3894,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		flCol[0] = g_PsyX_FlashlightColor[0] * flIntensityActive;
 		flCol[1] = g_PsyX_FlashlightColor[1] * flIntensityActive;
 		flCol[2] = g_PsyX_FlashlightColor[2] * flIntensityActive;
-		glUniform3fv(u_flColorLoc, 1, flCol);
+		UC_3fv(u_flColorLoc, flCol);
 	}
 	/* Scale cone coverage by g_PsyX_FlashlightSize: a cone's solid angle is
 	 * ~proportional to (1 - cos(halfAngle)), so scaling that term scales the lit
@@ -3830,12 +3909,12 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		if (flInner < 0.05f) flInner = 0.05f;
 		if (flOuter < 0.05f) flOuter = 0.05f;
 		if (u_flInnerCosLoc != -1)
-			glUniform1f(u_flInnerCosLoc, flInner);
+			UC_1f(u_flInnerCosLoc, flInner);
 		if (u_flOuterCosLoc != -1)
-			glUniform1f(u_flOuterCosLoc, flOuter);
+			UC_1f(u_flOuterCosLoc, flOuter);
 	}
 	if (u_flRangeLoc != -1)
-		glUniform1f(u_flRangeLoc, g_PsyX_FlashlightRange);
+		UC_1f(u_flRangeLoc, g_PsyX_FlashlightRange);
 
 	/* Flashlight shadow map: same gate as the depth pre-pass in DrawAllSplits, so the
 	 * shader only samples the shadow texture on frames one was actually rendered. */
@@ -3875,23 +3954,23 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		}
 
 		if (u_shadowOnLoc != -1)
-			glUniform1i(u_shadowOnLoc, shadowOn);
+			UC_1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
 		{
 			if (u_shadowMatrixLoc != -1)
-				glUniformMatrix4fv(u_shadowMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix);
+				UC_M4(u_shadowMatrixLoc, g_shadowLightMatrix);
 			if (u_shadowBiasLoc != -1)
-				glUniform1f(u_shadowBiasLoc, g_PsyX_FlashlightShadowBias);
+				UC_1f(u_shadowBiasLoc, g_PsyX_FlashlightShadowBias);
 			if (u_shadowNormalOffsetLoc != -1)
-				glUniform1f(u_shadowNormalOffsetLoc, g_PsyX_FlashlightShadowNormalOffset);
+				UC_1f(u_shadowNormalOffsetLoc, g_PsyX_FlashlightShadowNormalOffset);
 			if (u_shadowStrengthLoc != -1)
-				glUniform1f(u_shadowStrengthLoc, g_PsyX_FlashlightShadowStrength);
+				UC_1f(u_shadowStrengthLoc, g_PsyX_FlashlightShadowStrength);
 			if (u_shadowClipLoc != -1)
-				glUniform2f(u_shadowClipLoc, g_shadowZNear, g_shadowZFar);
+				UC_2f(u_shadowClipLoc, g_shadowZNear, g_shadowZFar);
 			if (u_shadowFadeDistLoc != -1)
-				glUniform1f(u_shadowFadeDistLoc, g_PsyX_FlashlightShadowFadeDist);
+				UC_1f(u_shadowFadeDistLoc, g_PsyX_FlashlightShadowFadeDist);
 			if (u_shadowTexelLoc != -1)
-				glUniform2f(u_shadowTexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
+				UC_2f(u_shadowTexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
 			glActiveTexture(GL_TEXTURE1);
 			glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
 			glActiveTexture(GL_TEXTURE0);
@@ -3914,7 +3993,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * 2D-only states (menus, logos, inventory) without changing the
 	 * config flag. */
 	if (u_ditherForceLoc != -1)
-		glUniform1f(u_ditherForceLoc,
+		UC_1f(u_ditherForceLoc,
 		            (g_cfg_psxDither && !g_PsxDitherSuppressed) ? 1.0f : 0.0f);
 
 	/* Pixel scale = window width / PSX native (320). Scales the dither
@@ -3925,7 +4004,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		float pixelScale = (g_windowWidth > 0)
 			? ((float)g_windowWidth / 320.0f)
 			: 1.0f;
-		glUniform1f(u_pixelScaleLoc, pixelScale);
+		UC_1f(u_pixelScaleLoc, pixelScale);
 	}
 
 	/* Filtering is a per-FRAME decision (the frame class flips with
@@ -3970,7 +4049,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * magnified four or five times and bilinear-smoothed run into blots -- the
 	 * blurred Japanese and Chinese menus. Everything else keeps the filter. */
 	if (u_bilinearFilterLoc != -1)
-		glUniform1i(u_bilinearFilterLoc,
+		UC_1i(u_bilinearFilterLoc,
 		            g_PsxSplitIsGlyph       ? 0
 		            : g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0)
 		                                    : ((g_cfg_textureFilter > 0) ? 1 : 0));
@@ -3990,7 +4069,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 			if (taps < 1.0f)  taps = 1.0f;
 		}
 
-		glUniform1f(u_anisoTapsLoc, taps);
+		UC_1f(u_anisoTapsLoc, taps);
 	}
 
 	if (g_dbg_texturelessMode) {
@@ -4033,12 +4112,12 @@ void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
 	// clamp the divisor to >=1 to keep coords finite. Valid slots are unaffected.
 	float vec[] = { 1.0f / (float)(width  > 0 ? width  : 1),
 	                1.0f / (float)(height > 0 ? height : 1) };
-	glUniform2fv(u_texelSizeLoc, 1, vec);
+	UC_2fv(u_texelSizeLoc, vec);
 
 	if(u_texOffsetLoc != -1)
 	{
 		float ofs[] = { (float)offsetX, (float)offsetY };
-		glUniform2fv(u_texOffsetLoc, 1, ofs);
+		UC_2fv(u_texOffsetLoc, ofs);
 	}
 
 	if(u_hiresHalfLoc != -1)
@@ -4052,7 +4131,7 @@ void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
 		float hh[2];
 		hh[0] = (hx > 0.5f) ? 0.5f : hx;
 		hh[1] = (hy > 0.5f) ? 0.5f : hy;
-		glUniform2fv(u_hiresHalfLoc, 1, hh);
+		UC_2fv(u_hiresHalfLoc, hh);
 	}
 }
 
@@ -4125,6 +4204,9 @@ extern "C" { int g_PsxGreyTag[6] = { 0, 0, 0, 0, 0, 0 }; }
 /* [PANELMISS] armed each frame by an overlay that wants its presence checked in
  * the presented image (pc_bind_panel.c); consumed at the swap. */
 extern "C" { int g_PsxPanelProbe[6] = { 0 }; int g_PsxPanelState[16] = { 0 }; }
+/* Off by default: the probe's glGet queries and per-swap glReadPixels serialise
+ * the driver's command thread, which costs real frame time on weak machines. */
+extern "C" { int g_PsxGreyProbe = 0; }
 
 static void GreyFrame_FirstDraw(void)
 {
@@ -4132,6 +4214,8 @@ static void GreyFrame_FirstDraw(void)
 	GLboolean m[4] = { 1, 1, 1, 1 };
 	GLint     iv = 0;
 
+	if (!g_PsxGreyProbe)
+		return;
 	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &iv); s_gf.firstFbo = iv;
 	glGetIntegerv(GL_VIEWPORT, s_gf.firstVp);
 	s_gf.firstSc = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
@@ -4239,6 +4323,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 		s_gf.clearsAfterDraw++;
 	s_gf.clearRGB[0] = r; s_gf.clearRGB[1] = g; s_gf.clearRGB[2] = b;
 #if USE_OPENGL
+	if (g_PsxGreyProbe)
 	{
 		GLint fbo = 0;
 		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
@@ -6154,6 +6239,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 			if (loc != -1) glUniform1i(loc, 0);
 		}
 		glUseProgram(0);
+		g_PreviousShader = (ShaderID)-1;
 		glGenVertexArrays(1, &g_fbPackVAO);
 		glGenTextures(1, &g_fbPackTex);
 		glGenFramebuffers(1, &g_fbPackFBO);
@@ -7013,6 +7099,13 @@ static void GreyFrame_Present(int w, int h)
 	GLint                prevRead = 0, prevPack = 0, fbo = 0;
 	const int            slot = s_idx;
 
+	if (!g_PsxGreyProbe)
+	{
+		/* A re-armed probe must not judge ring slots filled before it was off. */
+		s_filled = 0;
+		memset(&s_gf, 0, sizeof(s_gf));
+		return;
+	}
 	if (g_grIsGLES || w <= 0 || h <= 0)
 		return;
 
@@ -7375,7 +7468,7 @@ void GR_SetBlendMode(BlendMode blendMode)
 	g_PsxFogToBlack = (blendMode == BM_ADD || blendMode == BM_SUBTRACT ||
 	                   blendMode == BM_ADD_QUATER_SOURCE) ? 1 : 0;
 	if (u_fogToBlackLoc != -1)
-		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
+		UC_1i(u_fogToBlackLoc, g_PsxFogToBlack);
 	if (blendMode == BM_NONE)
 	{
 		if (g_PreviousBlendMode != BM_NONE)
@@ -7746,8 +7839,20 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	 * cutscene went from ~6.7 fps to ~53 fps. The win scales with how long the
 	 * GPU holds the buffer, so it is largest on tilers and shared-memory iGPUs
 	 * and smallest on a discrete desktop card — but it is never a pessimisation,
-	 * and the size is constant so drivers can recycle identical blocks. */
-	glBufferData(GL_ARRAY_BUFFER, MAX_VERTEX_BUFFER_SIZE * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
+	 * and the size is constant so drivers can recycle identical blocks.
+	 *
+	 * The size is a power-of-two bucket of what this pass uses, not the full
+	 * capacity: the whole-map capacity is ~18 MB, and orphaning that two to four
+	 * times a frame for a normal frame's ~1-2 MB costs weak iGPUs real time.
+	 * Buckets keep the recycling property. */
+	{
+		int cap = 16384;
+		while (cap < num_vertices && cap < MAX_VERTEX_BUFFER_SIZE)
+			cap <<= 1;
+		if (cap > MAX_VERTEX_BUFFER_SIZE)
+			cap = MAX_VERTEX_BUFFER_SIZE;
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cap * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
+	}
 	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
 #else
 #error
