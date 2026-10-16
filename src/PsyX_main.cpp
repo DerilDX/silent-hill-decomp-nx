@@ -920,6 +920,9 @@ int g_PsyX_WheelNotches    = 0;
 /* Never cleared: readers diff it against their own last sample, so no reader
  * can steal another's notches. */
 int g_PsyX_WheelTotal      = 0;
+/* 1 once a controller button or a deliberate stick/trigger push arrives, 0
+ * again on real mouse use; the host hides its UI cursor while it is 1. */
+int g_PsyX_PadInputLast    = 0;
 
 void PsyX_Sys_DoPollEvent()
 {
@@ -958,7 +961,26 @@ void PsyX_Sys_DoPollEvent()
 					break;
 				}
 				break;
+			case SDL_CONTROLLERBUTTONDOWN:
+				g_PsyX_PadInputLast = 1;
+				break;
+			case SDL_CONTROLLERAXISMOTION:
+				/* Past the resting noise of a worn stick, so an idle pad on the
+				 * desk never hides the cursor from under the mouse. */
+				if (event.caxis.value > 12000 || event.caxis.value < -12000)
+					g_PsyX_PadInputLast = 1;
+				break;
+			case SDL_MOUSEBUTTONDOWN:
+				if (event.button.which != SDL_TOUCH_MOUSEID)
+					g_PsyX_PadInputLast = 0;
+				break;
 			case SDL_MOUSEMOTION:
+				/* A one-pixel nudge is the pointer settling or a warp, not the
+				 * player reaching for the mouse. */
+				if (event.motion.which != SDL_TOUCH_MOUSEID &&
+				    (event.motion.xrel > 1 || event.motion.xrel < -1 ||
+				     event.motion.yrel > 1 || event.motion.yrel < -1))
+					g_PsyX_PadInputLast = 0;
 
 				PsyX_Sys_DoDebugMouseMotion(event.motion.x, event.motion.y);
 				break;
@@ -973,6 +995,7 @@ void PsyX_Sys_DoPollEvent()
 				 * the same scroll without racing to consume it. */
 				g_PsyX_WheelNotches += wy;
 				g_PsyX_WheelTotal   += wy;
+				g_PsyX_PadInputLast  = 0;
 				if (wy > 0)      g_PsyX_WheelUpFrames   = 2;
 				else if (wy < 0) g_PsyX_WheelDownFrames = 2;
 				break;
