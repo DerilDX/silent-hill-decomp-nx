@@ -7,7 +7,6 @@
 #include "pc_big_lm.h"
 #include "pc_playas.h"
 #ifdef SH_PC_PORT
-#include "bodyprog/events/npc_main.h"
 #include "main/fileinfo.h" /* g_GameRegion — PAL BG_ETC material-UV relocation */
 #endif
 #endif
@@ -545,11 +544,16 @@ bool Pc_CommonPickupInRange(const VECTOR3* pos)
 
     /* The floor test keeps an item on a storey above or below from showing
      * through a stairwell or an unloaded room. */
+    s32            dx;
+    s32            dz;
+
     if (dy > Q12(3.0f) || dy < Q12(-3.0f))
     {
         return false;
     }
-    return !Math_Distance2dCheck(pp, pos, Q12(24.0f));
+    dx = FLOOR_TO_STEP(pos->vx, CHUNK_CELL_SIZE) - FLOOR_TO_STEP(pp->vx, CHUNK_CELL_SIZE);
+    dz = FLOOR_TO_STEP(pos->vz, CHUNK_CELL_SIZE) - FLOOR_TO_STEP(pp->vz, CHUNK_CELL_SIZE);
+    return dx >= -1 && dx <= 1 && dz >= -1 && dz <= 1;
 }
 #endif
 
