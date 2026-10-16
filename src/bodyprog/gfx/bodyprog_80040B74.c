@@ -2166,30 +2166,16 @@ static int Pc_WholeMapCellOutdoor(s32 cellX, s32 cellZ)
 int Pc_WholeMapEnabled(void)
 {
     extern float g_PsyX_FogStrength;
+    extern int   g_PsxUsePgxp;
 
+    /* The far band is depth-tested on PGXP's per-vertex view depth; without
+     * it the distant town sorts wrong, so the mode stays off. The launcher
+     * offers to turn PGXP on when the fog is lowered. */
+    if (!g_PsxUsePgxp)
+        return 0;
     if (g_PcConfig.wholeMapExteriors == 2)
         return g_PsyX_FogStrength < 1.0f;
     return g_PcConfig.wholeMapExteriors != 0;
-}
-
-void Pc_WholeMapPgxpSync(void)
-{
-    extern int g_PsxUsePgxp;
-    static int s_forced = 0;
-
-    if (Pc_WholeMapEnabled())
-    {
-        if (!g_PsxUsePgxp)
-        {
-            g_PsxUsePgxp = 1;
-            s_forced     = 1;
-        }
-    }
-    else if (s_forced)
-    {
-        g_PsxUsePgxp = g_PcConfig.usePgxp ? 1 : 0;
-        s_forced     = 0;
-    }
 }
 
 int Pc_WholeMapDrawActive(void)

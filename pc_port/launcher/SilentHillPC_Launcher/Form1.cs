@@ -95,6 +95,9 @@ public partial class Form1 : Form
         SetupTooltips();
         SetupLanguageButton();
         trackFog.ValueChanged += (s, e) => UpdateFogValueLabel();
+        // Scroll, not ValueChanged: only a user drag may raise the question,
+        // never LoadConfig setting the slider.
+        trackFog.Scroll += (s, e) => AskPgxpForDistantWorld();
         this.Shown += (s, e) =>
         {
             CleanupOldFiles();
@@ -1583,6 +1586,36 @@ public partial class Form1 : Form
     // the game's 2.0: past that the town is already fully fogged out.
     private const float FogStep = 0.05f;
     private int _fogLoadedStep = 22;
+
+    // A "No" holds until the launcher is closed; "Do Not Ask Again" is saved.
+    private static bool s_pgxpFogDeclined;
+
+    private void AskPgxpForDistantWorld()
+    {
+        if (trackFog.Value * FogStep >= 0.999f || pgxpYes.Checked || s_pgxpFogDeclined)
+            return;
+        if (config.Get("launcher_warn_pgxp_fog", "1").Trim() == "0")
+            return;
+
+        using (var dlg = new SilentHillPC_Launcher.PgxpFogDialog())
+        {
+            dlg.ShowDialog(this);
+            switch (dlg.Result)
+            {
+                case SilentHillPC_Launcher.PgxpFogDialog.Choice.Yes:
+                    pgxpYes.Checked = true;
+                    break;
+                case SilentHillPC_Launcher.PgxpFogDialog.Choice.NeverAsk:
+                    config.EnsureLauncherSection();
+                    config.Set("launcher_warn_pgxp_fog", "0");
+                    config.Save();
+                    break;
+                default:
+                    s_pgxpFogDeclined = true;
+                    break;
+            }
+        }
+    }
 
     private void UpdateFogValueLabel()
     {

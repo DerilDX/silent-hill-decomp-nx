@@ -537,11 +537,9 @@ extern s_PcConfig g_PcConfig;
  * street room, whole_map_exteriors + preload_chunks + resident_textures all
  * on. Implemented in bodyprog_80040B74.c (needs g_Map/g_SavegamePtr). */
 int Pc_WholeMapDrawActive(void);
-/* whole_map_exteriors resolved against the live fog strength (auto mode). */
+/* whole_map_exteriors resolved against the live fog strength (auto mode)
+ * and PGXP, which the far band's depth test needs. */
 int Pc_WholeMapEnabled(void);
-/* Per frame: the far band is depth-tested on PGXP view depth, so PGXP is held
- * on while the mode is enabled and handed back to use_pgxp afterwards. */
-void Pc_WholeMapPgxpSync(void);
 
 /* Apply a flashlight mode (0..3, see flashlightMode) to the config + all PsyX
  * globals. Swaps flashlight_intensity/size between the two per-pixel styles'

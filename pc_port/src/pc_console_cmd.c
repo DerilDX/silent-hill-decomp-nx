@@ -1779,7 +1779,7 @@ void Pc_ConsoleExec(const char* line)
         }
         cprintf("draw distance: %d%% (25..200; config key draw_distance_pct)", g_PcConfig.drawDistancePct);
     } else if (strcmp(cmd, "WHOLEMAP") == 0) {
-        /* Live, not saved. PGXP follows the mode via Pc_WholeMapPgxpSync. */
+        /* Live, not saved. */
         int on;
         if (strncmp(arg, "PROBE", 5) == 0 || strncmp(arg, "probe", 5) == 0) {
             extern int g_PsxWholeMapProbe;
@@ -1822,12 +1822,17 @@ void Pc_ConsoleExec(const char* line)
         if (strncmp(arg, "AUTO", 4) == 0 || strncmp(arg, "auto", 4) == 0) on = 2;
         else if (arg[0] == '1') on = 1;
         else if (arg[0] == '0') on = 0;
-        else on = !Pc_WholeMapEnabled();
+        else on = !g_PcConfig.wholeMapExteriors;
         g_PcConfig.wholeMapExteriors = on;
         cprintf("whole map: %s (engaged here: %s)%s", on == 2 ? "AUTO (on below fogstr 1.0)" : (on ? "ON" : "OFF"),
                 Pc_WholeMapDrawActive() ? "yes" : "no",
                 (on && !(g_PcConfig.preloadChunks && g_PcConfig.residentTextures))
                     ? " -- needs preload_chunks=1 and resident_textures=1" : "");
+        {
+            extern int g_PsxUsePgxp;
+            if (on && !g_PsxUsePgxp)
+                cprintf("distant geometry needs PGXP: pgxp 1");
+        }
     } else if (strcmp(cmd, "FOGDIST") == 0) {
         /* Push the fog planes out (or in). Indoors the fog is BLACK, so this is
          * also the "see further in the sewers" knob: the wall of black is the fog
