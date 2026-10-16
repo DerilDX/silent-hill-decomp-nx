@@ -907,6 +907,11 @@ void Map_CutsceneObjectsUpdate(void) // 0x800E2E90
 {
     if (g_Cutscene_Timer >= Q12(0.0f))
     {
+#ifdef SH_PC_PORT
+        /* Ending shots are framed for the stock fog; thinner fog (whole map)
+         * reveals Kaufmann's body behind them. */
+        Pc_FogFloorRequest();
+#endif
         if (g_Cutscene_UpdateHero)
         {
             Dms_CharacterTransformGet(&g_SysWork.playerWork.player.position, &g_SysWork.playerWork.player.rotation, "HERO", g_Cutscene_Timer, D_800ED230[D_800F4806]);

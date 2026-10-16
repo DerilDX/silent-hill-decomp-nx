@@ -2746,6 +2746,40 @@ int Pc_LongViewActive(void)
     return g_PsyX_FogStrength < 1.0f;
 }
 
+/* Scenes authored for the stock fog (the final map's ending, where thin fog
+ * shows Kaufmann's body behind the shot) raise the live fog to at least the
+ * default for as long as they ask, every frame. The user's setting is never
+ * written: the first frame nobody asks, the value from before comes back. */
+static int   s_pcFogFloorAsked = 0;
+static int   s_pcFogFloorHeld  = 0;
+static float s_pcFogFloorSaved = 0.0f;
+
+void Pc_FogFloorRequest(void)
+{
+    extern float g_PsyX_FogStrength;
+
+    if (!s_pcFogFloorHeld)
+    {
+        s_pcFogFloorHeld  = 1;
+        s_pcFogFloorSaved = g_PsyX_FogStrength;
+    }
+    if (g_PsyX_FogStrength < 1.0f)
+        g_PsyX_FogStrength = 1.0f;
+    s_pcFogFloorAsked = 1;
+}
+
+void Pc_FogFloorFrameEnd(void)
+{
+    extern float g_PsyX_FogStrength;
+
+    if (s_pcFogFloorHeld && !s_pcFogFloorAsked)
+    {
+        g_PsyX_FogStrength = s_pcFogFloorSaved;
+        s_pcFogFloorHeld   = 0;
+    }
+    s_pcFogFloorAsked = 0;
+}
+
 int Pc_WorldPointInView(int x, int z)
 {
     /* A spawning or despawning monster is a body, not a point: a 3u margin

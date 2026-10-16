@@ -2693,6 +2693,7 @@ void MainLoop(void) // 0x80032EE0
         XaPlayer_Update();
         Pc_MsgVoice_Update();
         Pc_DarkHarry_Update(); /* easter egg, pc_dark_harry.c */
+        Pc_FogFloorFrameEnd();
 #endif
 
 #ifdef SH_PC_PORT

@@ -1218,6 +1218,10 @@ void WorldGfx_ObjectAdd(s_WorldObjectModel* model, const VECTOR3* pos, const SVE
  * pickup's cell test so a nearby item stays drawn. Drawing only: taking an
  * item is a separate map event and is unchanged. */
 bool Pc_CommonPickupInRange(const VECTOR3* pos);
+/* Hold the live fog at >= 1.0 this frame (call every frame the scene needs it);
+ * Pc_FogFloorFrameEnd restores the user's value once no one asks. */
+void Pc_FogFloorRequest(void);
+void Pc_FogFloorFrameEnd(void);
 #endif
 
 /** @unused Returns held item ID. */
