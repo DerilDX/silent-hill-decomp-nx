@@ -2694,6 +2694,13 @@ void MainLoop(void) // 0x80032EE0
         Pc_MsgVoice_Update();
         Pc_DarkHarry_Update(); /* easter egg, pc_dark_harry.c */
         Pc_FogFloorFrameEnd();
+        if (g_PcConfig.fpsDisplay)
+        {
+            /* The counter's font is read here, never from the draw hook
+             * (pc_ra_toast.c explains why); a no-op after the first call. */
+            extern void Pc_FreeCamHud_Preload(void);
+            Pc_FreeCamHud_Preload();
+        }
 #endif
 
 #ifdef SH_PC_PORT

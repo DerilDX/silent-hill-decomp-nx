@@ -168,6 +168,11 @@ static const s_QuickCjk s_QuickCjkTr[] = {
     { "Short", "短い", "短" },
     { "Normal", "標準", "标准" },
     { "Long", "長い", "长" },
+    { "FPS Display", "FPS表示", "FPS显示" },
+    { "Top Left", "左上", "左上" },
+    { "Top Right", "右上", "右上" },
+    { "Bottom Left", "左下", "左下" },
+    { "Bottom Right", "右下", "右下" },
 };
 
 /* PC Options literals as options.c holds them (underscores included). */

@@ -1275,6 +1275,11 @@ else if (strcmp(key, "enable_plugins") == 0)
             int v = atoi(value);
             g_PcConfig.shadowMapSize = (v < 256) ? 256 : ((v > 8192) ? 8192 : v);
         }
+        else if (strcmp(key, "fps_display") == 0)
+        {
+            int v = atoi(value);
+            g_PcConfig.fpsDisplay = (v < 0) ? 0 : ((v > 4) ? 4 : v);
+        }
         else if (strcmp(key, "minimap_corner") == 0)
         {
             int v = atoi(value);

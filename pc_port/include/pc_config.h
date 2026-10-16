@@ -287,6 +287,7 @@ typedef struct {
     int anisoLevel;          /* max anisotropic taps, 1..16 (config key: aniso_level); default 8 */
     int shadowMapSize;       /* flashlight shadow-map resolution, 256..8192 (config key: shadow_resolution); default 1024 */
     int minimapCorner;       /* minimap screen corner: 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right (config key: minimap_corner); default 0 */
+    int fpsDisplay;          /* FPS counter: 0 = off, 1 = top-left, 2 = top-right, 3 = bottom-left, 4 = bottom-right (config key: fps_display); default 0 */
     int minimapShape;        /* DEPRECATED, folded into `minimap`; still read to migrate old configs (config key: minimap_shape) */
     int configVersion;       /* PC_CONFIG_VERSION the file was last written at; 0 = pre-versioning. Drives the default-migration in PcConfig_Load (config key: config_version) */
     float minimapScale;      /* minimap size percentage, MINIMAP_SCALE_MIN..MAX (config key: minimap_scale); default 100 */

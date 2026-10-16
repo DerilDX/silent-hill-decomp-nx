@@ -17,6 +17,7 @@
 #include <PsyX/PsyX_backend.h>
 
 #include "sh_log.h"
+#include "pc_config.h"
 #include "stb_truetype.h"
 
 extern int   g_DebugCamEnabled;
@@ -418,6 +419,137 @@ void Pc_FreeCamHud_Draw(void)
     fch_quad(s_texWhite, NX(left), NY(bottom + s_texH + 2 * pad), NX(left + s_texW + 2 * pad), NY(bottom),
              0.0f, 0.0f, 0.0f, 0.45f);
     fch_quad(s_texText, NX(left + pad), NY(bottom + pad + s_texH), NX(left + pad + s_texW), NY(bottom + pad),
+             1.0f, 1.0f, 1.0f, 0.95f);
+#undef NX
+#undef NY
+
+restore:
+    glBindVertexArray((GLuint)prevVao);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevBuf);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    glActiveTexture((GLenum)prevUnit);
+    glUseProgram((GLuint)prevProg);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+    glBlendFuncSeparate((GLenum)prevSrcRgb, (GLenum)prevDstRgb, (GLenum)prevSrcA, (GLenum)prevDstA);
+    glBlendEquationSeparate((GLenum)prevEqRgb, (GLenum)prevEqA);
+    if (prevBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (prevDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (prevCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+}
+
+/* FPS counter (quick menu Debug Actions > FPS Display). Shares the panel's GL
+ * objects and font; counts the frames this hook sees, which is one per
+ * presented frame, and refreshes the number twice a second. */
+static GLuint s_texFps;
+static int    s_fpsW, s_fpsH, s_fpsPx;
+static char   s_fpsBaked[32];
+
+void Pc_FpsHud_Draw(void)
+{
+    static Uint64 s_winStart  = 0;
+    static int    s_winFrames = 0;
+    static int    s_fps       = 0;
+    const Uint64  now         = SDL_GetPerformanceCounter();
+    const Uint64  freq        = SDL_GetPerformanceFrequency();
+    const int     corner      = g_PcConfig.fpsDisplay;
+    GLint         vp[4];
+    float         vpW, vpH, margin, pad, x, y, boxW, boxH;
+    int           px;
+    char          text[32];
+    const char*   rows[1];
+    GLint      prevProg = 0, prevVao = 0, prevBuf = 0, prevTex = 0, prevUnit = GL_TEXTURE0, prevAlign = 4;
+    GLint      prevSrcRgb = GL_ONE, prevDstRgb = GL_ZERO, prevSrcA = GL_ONE, prevDstA = GL_ZERO;
+    GLint      prevEqRgb = GL_FUNC_ADD, prevEqA = GL_FUNC_ADD;
+    GLboolean  prevBlend, prevDepth, prevCull;
+
+    if (corner < 1 || corner > 4)
+    {
+        s_winStart = 0;
+        return;
+    }
+
+    if (s_winStart == 0)
+    {
+        s_winStart  = now;
+        s_winFrames = 0;
+    }
+    s_winFrames++;
+    if (now - s_winStart >= freq / 2)
+    {
+        s_fps       = (int)((double)s_winFrames * (double)freq / (double)(now - s_winStart) + 0.5);
+        s_winStart  = now;
+        s_winFrames = 0;
+    }
+    if (!s_fontOk)
+        return;
+
+    glGetIntegerv(GL_VIEWPORT, vp);
+    if (vp[2] <= 0 || vp[3] <= 0)
+        return;
+    vpW = (float)vp[2];
+    vpH = (float)vp[3];
+
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prevUnit);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &prevSrcRgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &prevDstRgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevSrcA);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prevDstA);
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &prevEqRgb);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prevEqA);
+    prevBlend = glIsEnabled(GL_BLEND);
+    prevDepth = glIsEnabled(GL_DEPTH_TEST);
+    prevCull  = glIsEnabled(GL_CULL_FACE);
+
+    if (!s_glReady)
+        fch_gl_init();
+    if (s_glReady != 1)
+        goto restore;
+
+    snprintf(text, sizeof(text), "%d FPS", s_fps);
+    px = (int)(0.026f * vpH);
+    if (px < 12) px = 12;
+    if (!s_texFps || px != s_fpsPx || strcmp(text, s_fpsBaked) != 0)
+    {
+        if (s_texFps)
+            glDeleteTextures(1, &s_texFps);
+        rows[0]  = text;
+        s_texFps = fch_bake(rows, 1, (float)px, &s_fpsW, &s_fpsH);
+        s_fpsPx  = px;
+        strncpy(s_fpsBaked, text, sizeof(s_fpsBaked) - 1);
+    }
+    if (!s_texFps)
+        goto restore;
+
+    glUseProgram(s_prog);
+    glBindVertexArray(s_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glUniform1i(s_locTex, 0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendEquation(GL_FUNC_ADD);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+#define NX(p_) (-1.0f + 2.0f * (p_) / vpW)
+#define NY(p_) (-1.0f + 2.0f * (p_) / vpH)
+    margin = 0.02f * vpH;
+    pad    = 0.008f * vpH;
+    boxW   = s_fpsW + 2 * pad;
+    boxH   = s_fpsH + 2 * pad;
+    x = (corner == 2 || corner == 4) ? vpW - margin - boxW : margin;
+    y = (corner == 3 || corner == 4) ? margin : vpH - margin - boxH; /* bottom edge, GL y-up */
+    fch_quad(s_texWhite, NX(x), NY(y + boxH), NX(x + boxW), NY(y), 0.0f, 0.0f, 0.0f, 0.45f);
+    fch_quad(s_texFps, NX(x + pad), NY(y + pad + s_fpsH), NX(x + pad + s_fpsW), NY(y + pad),
              1.0f, 1.0f, 1.0f, 0.95f);
 #undef NX
 #undef NY

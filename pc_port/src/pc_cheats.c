@@ -54,7 +54,7 @@ extern const char* Pc_PlayAs_Label(int idx);
 extern const char* Pc_PlayAs_Name(int idx);
 extern int         Pc_PlayAs_SetByName(const char* name, int save);
 
-enum { CH_TOGGLE = 0, CH_ACTION, CH_PLAYAS, CH_FREECAM, CH_DEBUGKEYS, CH_SPAWN, CH_MAP };
+enum { CH_TOGGLE = 0, CH_ACTION, CH_PLAYAS, CH_FREECAM, CH_DEBUGKEYS, CH_SPAWN, CH_MAP, CH_FPS };
 
 /* ---- big head mode ---------------------------------------------------- */
 
@@ -271,6 +271,7 @@ static const CheatRow s_debug[] = {
     { "No textures (Ctrl+F2)", CH_TOGGLE, &g_dbg_texturelessMode, NULL },
     { "Starting map",         CH_MAP,     NULL, NULL },
     { "Spawn",                CH_SPAWN,   NULL, NULL },
+    { "FPS Display",          CH_FPS,     NULL, NULL },
     { "Log Harry position",   CH_ACTION,  NULL, act_log_position },
     { "Log camera shot",      CH_ACTION,  NULL, act_log_camera },
     { "Kill Harry",           CH_ACTION,  NULL, act_kill_harry },
@@ -301,7 +302,9 @@ const char* Pc_Cheats_Name(int page, int idx)
 int Pc_Cheats_IsAction(int page, int idx)
 {
     const CheatRow* r = row_at(page, idx, NULL);
-    return r ? (r->kind == CH_ACTION) : 0;
+    /* Decides which half of the page a row lands on. FPS Display is a setting,
+     * but it sits with the actions, whose page had room. */
+    return r ? (r->kind == CH_ACTION || r->kind == CH_FPS) : 0;
 }
 
 const char* Pc_Cheats_Label(int page, int idx, char* buf, int bufsz)
@@ -316,6 +319,13 @@ const char* Pc_Cheats_Label(int page, int idx, char* buf, int bufsz)
         case CH_PLAYAS:    return Pc_PlayAs_Label(Pc_PlayAs_Current());
         case CH_FREECAM:   return Pc_LangQuickMenu(g_DebugCamEnabled ? "On" : "Off");
         case CH_DEBUGKEYS: return Pc_LangQuickMenu(g_PcAllowDebugControls ? "On" : "Off");
+        case CH_FPS:
+        {
+            static const char* const pos[5] = { "Off", "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
+            int v = g_PcConfig.fpsDisplay;
+            if (v < 0 || v > 4) v = 0;
+            return (v == 0) ? Pc_LangQuickMenu("Off") : Pc_LangQuick(pos[v]);
+        }
         case CH_SPAWN:
             snprintf(buf, bufsz, "< %s >%s%s", Pc_SpawnList_Name(s_spawnIdx),
                      Pc_SpawnList_Ready(s_spawnIdx) ? "" : "  ",
@@ -368,6 +378,15 @@ void Pc_Cheats_Adjust(int page, int idx, int dir)
         {
             int n = Pc_SpawnList_Count();
             if (n > 0) s_spawnIdx = (s_spawnIdx + (dir < 0 ? -1 : 1) + n) % n;
+            Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+            break;
+        }
+        case CH_FPS:
+        {
+            char v[4];
+            g_PcConfig.fpsDisplay = (g_PcConfig.fpsDisplay + (dir < 0 ? 4 : 1)) % 5;
+            snprintf(v, sizeof(v), "%d", g_PcConfig.fpsDisplay);
+            PcConfig_SaveKeyValue("fps_display", v);
             Sd_PlaySfx(Sfx_MenuMove, 0, 64);
             break;
         }
