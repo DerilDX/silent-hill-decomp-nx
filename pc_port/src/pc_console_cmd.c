@@ -2095,10 +2095,6 @@ void Pc_ConsoleExec(const char* line)
         if (arg[0]) { g_PgxpFarWClamp = (float)atof(arg); if (g_PgxpFarWClamp < 0.0f) g_PgxpFarWClamp = 0.0f; }
         cprintf("PGXP far-W clamp (affine beyond ~%.0fu): %.0f sz (0=off)",
                 g_PgxpFarWClamp / 256.0f, g_PgxpFarWClamp);
-    } else if (strcmp(cmd, "ADDSTP") == 0) {
-        extern int g_PsxAddStp;
-        g_PsxAddStp = (arg[0] == '0') ? 0 : (arg[0] == '1') ? 1 : !g_PsxAddStp;
-        cprintf("additive prims honour texel STP: %s", g_PsxAddStp ? "ON" : "OFF (add every texel)");
     } else if (strcmp(cmd, "ADD") == 0) {
         /* Debug-isolate the additive (BM_ADD) render layer to diagnose the map7_s03
          * pre/during/post-fight fire-and-lightning. 0 = drop all additive splits

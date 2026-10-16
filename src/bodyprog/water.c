@@ -745,42 +745,6 @@ void func_8008E5B4(void) // 0x8008E5B4
     PsyX_VramDrawTexturedRect(D_800AFDA4.x, D_800AFDA4.y, D_800AFDA4.w, D_800AFDA4.h,
                               45, 14, ((D_800AFDAC + 1) >> 2) & 0x1F, 8, 1, 1);
 
-    /* [WATERVRAM] one-shot: the palettes behind the water surface (DWAVE, CLUT
-     * at 0,0), the caustic composite (clut 14) and the reflection sprite
-     * (clut 78), plus how many tile words carry STP. Settles whether the
-     * reflection is hidden by water texels that draw solid. */
-    {
-        static int s_waterVramLogged = 0;
-        if (s_waterVramLogged < 2 && D_800AFDAC > 30)
-        {
-            static const int rows[3][2] = { { 0, 0 }, { 224, 0 }, { 224, 1 } };
-            int r, i, stp = 0, zero = 0;
-            s_waterVramLogged++;
-            for (r = 0; r < 3; r++)
-            {
-                SH_DBG("[WATERVRAM] clut(%d,%d): %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X",
-                       rows[r][0], rows[r][1],
-                       PsyX_VramRead(rows[r][0] + 0, rows[r][1]),  PsyX_VramRead(rows[r][0] + 1, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 2, rows[r][1]),  PsyX_VramRead(rows[r][0] + 3, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 4, rows[r][1]),  PsyX_VramRead(rows[r][0] + 5, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 6, rows[r][1]),  PsyX_VramRead(rows[r][0] + 7, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 8, rows[r][1]),  PsyX_VramRead(rows[r][0] + 9, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 10, rows[r][1]), PsyX_VramRead(rows[r][0] + 11, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 12, rows[r][1]), PsyX_VramRead(rows[r][0] + 13, rows[r][1]),
-                       PsyX_VramRead(rows[r][0] + 14, rows[r][1]), PsyX_VramRead(rows[r][0] + 15, rows[r][1]));
-            }
-            for (i = 0; i < 32 * 32; i++)
-            {
-                u16 w = PsyX_VramRead(D_800AFDA4.x + (i & 31), D_800AFDA4.y + (i >> 5));
-                if (w & 0x8000) stp++;
-                if (w == 0) zero++;
-            }
-            SH_DBG("[WATERVRAM] tile(832,224) words: stp=%d zero=%d of 1024; row0: %04X %04X %04X %04X %04X %04X %04X %04X",
-                   stp, zero,
-                   PsyX_VramRead(832, 224), PsyX_VramRead(833, 224), PsyX_VramRead(834, 224), PsyX_VramRead(835, 224),
-                   PsyX_VramRead(836, 224), PsyX_VramRead(837, 224), PsyX_VramRead(838, 224), PsyX_VramRead(839, 224));
-        }
-    }
     (void)drawEnv;
     (void)temp_v0;
     (void)packet;
