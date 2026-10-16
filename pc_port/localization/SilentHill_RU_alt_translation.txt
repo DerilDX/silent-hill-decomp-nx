@@ -1791,7 +1791,7 @@ RU: Отдолби молоток
 
 [ITEM_NAME.100]
 EN:
-RU: Пезда
+RU: Матыга
 
 [ITEM_NAME.101]
 EN:
@@ -2331,7 +2331,7 @@ RU: ~J0(1.0)
 
 [MAP0_S01.37]
 EN:
-RU: ~J0(2.0) Гарри Мейсон.
+RU: ~J0(2.0)
 
 [MAP0_S01.38]
 EN:
@@ -3827,7 +3827,7 @@ RU: ~J2(2.3)
 
 [MAP3_S03.33]
 EN:
-RU: ~J2(1.2) Д
+RU: ~J2(1.2)
 
 [MAP3_S03.34]
 EN:
@@ -4143,7 +4143,7 @@ RU: На полу видны следы, будто~N шкаф ебали.~E
 
 [MAP3_S05.31]
 EN:
-RU: Тут у нас ~C2Кувалда~C7.~N Берем?~S4
+RU: Тут у нас ~C2Мотыга~C7.~N Берем?~S4
 
 [MAP3_S05.32]
 EN:
@@ -6635,7 +6635,7 @@ RU: ~J0(3.0)
 
 [MAP7_S02.64]
 EN:
-RU: ~J0(2.7) Д
+RU: ~J0(2.7)
 
 [MAP7_S02.65]
 EN:
@@ -7277,3 +7277,66 @@ RU: ~J0(1.4)
 EN:
 RU: ~J0(1.0)
 
+[MENU.Japanese]
+EN:
+RU: Японский
+
+[MENU.Chinese]
+EN:
+RU: Китайский
+
+[MENU.________New_save]
+EN:
+RU: ____Новая_запись
+
+[MENU.____Create_new_file]
+EN:
+RU: ___Создать_файл
+
+[MENU.____File_is_damaged]
+EN:
+RU: ___Файл_повреждён
+
+[MENU.Out_of_blocks]
+EN:
+RU: Нет_места
+
+[MENU.No_data_file]
+EN:
+RU: Нет_данных
+
+[MENU.Yes__________No]
+EN:
+RU: Да__________Нет
+
+[MENU.Bus]
+EN:
+RU: Автобус
+
+[MENU.BRIGHTNESS]
+EN:
+RU: ЯРКОСТЬ_______
+
+[MENU.CONTRAST]
+EN:
+RU: КОНТРАСТ_____
+
+[MENU.SATURATION]
+EN:
+RU: НАСЫЩЕНИЕ___
+
+[MENU.USER]
+EN:
+RU: СВОЙ
+
+[MENU.TYPE_1]
+EN:
+RU: ТИП_1
+
+[MENU.TYPE_2]
+EN:
+RU: ТИП_2
+
+[MENU.TYPE_3]
+EN:
+RU: ТИП_3
