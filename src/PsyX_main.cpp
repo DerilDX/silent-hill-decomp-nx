@@ -917,6 +917,9 @@ int g_PsyX_WheelDownFrames = 0;
 /* Net notches since the last reader cleared it: the free camera's speed wheel
  * needs every notch, which the 2-frame latch above merges. */
 int g_PsyX_WheelNotches    = 0;
+/* Never cleared: readers diff it against their own last sample, so no reader
+ * can steal another's notches. */
+int g_PsyX_WheelTotal      = 0;
 
 void PsyX_Sys_DoPollEvent()
 {
@@ -969,6 +972,7 @@ void PsyX_Sys_DoPollEvent()
 				 * the pad word AND the graphics-tuning keys (dbg_overlay) can see
 				 * the same scroll without racing to consume it. */
 				g_PsyX_WheelNotches += wy;
+				g_PsyX_WheelTotal   += wy;
 				if (wy > 0)      g_PsyX_WheelUpFrames   = 2;
 				else if (wy < 0) g_PsyX_WheelDownFrames = 2;
 				break;
