@@ -1935,6 +1935,41 @@ void func_800485C0(s32 idx) // 0x800485C0
 
 #define CD_ERROR_LIMIT 600 // Matches value used in beatmania `FSCD.C`.
 
+#ifdef SH_PC_PORT
+/* The XA volume Sd_XaAudioPlay's Initialize state picks for a line; the PC
+ * skips that state machine, and the seek model needs it to size the next
+ * stop task's fade-out. */
+static int Pc_XaLineVolume(u16 xaIdx)
+{
+    switch (xaIdx)
+    {
+        case 53:
+        case 56:
+        case 596:
+        case 597:
+        case 598:
+        case 600:
+        case 602:
+        case 612:
+        case 614:
+        case 620:
+        case 657:
+        case 606:
+            return Sd_GetVolSe(84);
+
+        case 723:
+        case 725:
+            return 50;
+
+        case 724:
+            return 40;
+
+        default:
+            return 84;
+    }
+}
+#endif
+
 void Sd_TaskPoolExecute(void) // 0x800485D8
 {
     g_Sd_CurrentTask = g_Sd_TaskPool[0];
@@ -1960,6 +1995,7 @@ void Sd_TaskPoolExecute(void) // 0x800485D8
              * and XaLoadState_EnableAudio re-setting xaAudioIdx_4. Lets the
              * Stop-then-Play sequence in Sd_XaAudioPlayTaskAdd work correctly
              * even when Stop fully clears the streaming-state flags. */
+            Pc_XaSeek_OnPlayTask(g_Sd_AudioWork.xaAudioIdxCheck_2, Pc_XaLineVolume(g_Sd_AudioWork.xaAudioIdxCheck_2));
             XaPlayer_Play(g_Sd_AudioWork.xaAudioIdxCheck_2);
             if (PcAudioConfig_UsesSoftwareSpu())
                 SdSetSerialAttr(0, 0, 1);
@@ -1977,6 +2013,7 @@ void Sd_TaskPoolExecute(void) // 0x800485D8
              * Sd_XaAudioPlayTaskAdd's queue uses xaAudioIdxCheck_2 (still set). */
             if (PcAudioConfig_UsesSoftwareSpu())
                 SdSetSerialAttr(0, 0, 0);
+            Pc_XaSeek_OnStopTask();
             XaPlayer_Stop();
             Sd_TaskPoolUpdate();
 #else

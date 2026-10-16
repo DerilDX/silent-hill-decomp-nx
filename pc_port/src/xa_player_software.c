@@ -33,7 +33,9 @@ static Uint32 s_xaPadEndMs = 0;
  * after the drive sought to it, so each voice began a beat after its subtitle
  * while the scene kept running on its authored timers. The PC loads instantly
  * and the voice landed on the subtitle, which is the "pauses between lines
- * are gone" report. Hold the START of playback by cutscene_line_gap_ms; the
+ * are gone" report. Hold the START of playback by the modelled seek and
+ * sound-task time (xa_seek_model.c; loose voice files keep the flat
+ * cutscene_line_gap_ms, having no disc position); the
  * page timers and the drain gate are untouched, so nothing shifts except where
  * the voice sits inside its page. (The earlier end-of-line hold moved the page
  * advance instead, which is why it could drift tightly timed scenes.) */
@@ -406,7 +408,8 @@ void PcSoftwareXa_Play(uint16_t xaIdx) {
             nowMs = SDL_GetTicks();
             /* Authored pad keeps the scene's rhythm; the gap covers the longer take. */
             s_xaPadEndMs      = nowMs + (((uint32_t)item->audioLength_8_bits + 32u) * 1000u) / 60u;
-            s_xaSeekEndMs     = g_PcConfig.cutsceneLineGapMs > 0 ? nowMs + (Uint32)g_PcConfig.cutsceneLineGapMs : 0;
+            s_xaSeekEndMs     = Pc_XaSeek_LineDelayMs();
+            if (s_xaSeekEndMs) s_xaSeekEndMs += nowMs;
             SH_DBG("[XA] override xa_%04u.wav %s %dHz %ums (authored %ums)",
                    (unsigned)xaIdx, ovStereo ? "stereo" : "mono", ovRate, wavMs, origMs);
             return;
@@ -461,7 +464,8 @@ void PcSoftwareXa_Play(uint16_t xaIdx) {
         s_xaPrevFireMs  = nowMs;
         s_xaPlayStartMs = nowMs;
         s_xaPadEndMs    = nowMs + (((uint32_t)item->audioLength_8_bits + 32u) * 1000u) / 60u;
-        s_xaSeekEndMs   = g_PcConfig.cutsceneLineGapMs > 0 ? nowMs + (Uint32)g_PcConfig.cutsceneLineGapMs : 0;
+        s_xaSeekEndMs   = Pc_XaSeek_LineDelayMs();
+        if (s_xaSeekEndMs) s_xaSeekEndMs += nowMs;
     }
     SH_DBG("[XA] Play xaIdx=%u file=%u sector=%u sectors=%u %s %dHz filter=(%u,%u)",
            xaIdx, fileIdx, (uint32_t)item->sector_4_bits, numSectors,
