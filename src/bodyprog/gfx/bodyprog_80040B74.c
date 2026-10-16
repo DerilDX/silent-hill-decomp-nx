@@ -2768,6 +2768,30 @@ static float Pc_WholeMapConeSlope(void)
     return slope;
 }
 
+int Pc_LongViewActive(void)
+{
+    extern float g_PsyX_FogStrength;
+
+    return g_PsyX_FogStrength < 1.0f;
+}
+
+int Pc_WorldPointInView(int x, int z)
+{
+    /* A spawning or despawning monster is a body, not a point: a 3u margin
+     * keeps one standing at the frustum edge from popping half on screen. */
+    const s32 MARGIN = Q12_TO_Q8(Q12(3.0f));
+    s32       px     = Q12_TO_Q8(x);
+    s32       pz     = Q12_TO_Q8(z);
+    s32       vx     = (s32)(((s64)GsWSMATRIX.m[0][0] * px + (s64)GsWSMATRIX.m[0][2] * pz) >> 12) + GsWSMATRIX.t[0];
+    s32       vz     = (s32)(((s64)GsWSMATRIX.m[2][0] * px + (s64)GsWSMATRIX.m[2][2] * pz) >> 12) + GsWSMATRIX.t[2];
+    float     ax;
+
+    if (vz < -MARGIN)
+        return 0;
+    ax = (float)(vx < 0 ? -vx : vx);
+    return ax <= (float)vz * Pc_WholeMapConeSlope() + (float)MARGIN;
+}
+
 /* View-space depth of a cell center (Q8 world units; GsWSMATRIX row 2 is the
  * camera forward axis, matching RTPS MAC3 — positive = in front). Also serves
  * as the painter's sort key for the whole-town submit order. */

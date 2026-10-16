@@ -21,6 +21,7 @@
 #include "main/fsqueue.h"
 
 #ifdef SH_PC_PORT
+#include "pc_config.h"
 static s32 Camera_Distance2dGet(const VECTOR3* pos);
 extern int g_DebugAnimKfView;
 extern int g_DebugViewNpcSlot;
@@ -305,10 +306,20 @@ void Game_NpcRoomInitSpawn(bool cond) // 0x80037F24
             curCharaSpawn->flags != 0 &&
             g_SavegamePtr->gameDifficulty >= curCharaSpawn->gameDifficultyMin &&
             func_8008F914(curCharaSpawn->positionX, curCharaSpawn->positionZ) &&
+#ifdef SH_PC_PORT
+            /* The PSX spawn ring (20..22u) sits inside the fog. With the fog
+             * thinned the ring is in plain sight, so spawn anywhere out of the
+             * camera's view instead, nearer or further than the ring. */
+            (Pc_LongViewActive()
+                 ? (!Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(30.0f)) &&
+                    (!cond || (Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(12.0f)) &&
+                               !Pc_WorldPointInView(curCharaSpawn->positionX, curCharaSpawn->positionZ))))
+                 : (!Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(22.0f)) &&
+                    (!cond || Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(20.0f)))))
+            && _slotSpawnCooldown[i] == 0
+#else
             !Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(22.0f)) &&
             (!cond || Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(20.0f)))
-#ifdef SH_PC_PORT
-            && _slotSpawnCooldown[i] == 0
 #endif
             )
         {
@@ -607,7 +618,17 @@ void Game_NpcUpdate(void) // 0x80038354
 
                 new_var = temp_t3;
 
+#ifdef SH_PC_PORT
+                /* Thinned fog: despawn only out of view, and alive ones further
+                 * out than the 30u spawn reach. 80u frees the slot regardless. */
+                if (Pc_LongViewActive()
+                        ? (new_var > SQUARE(80) ||
+                           (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(48)) &&
+                            !Pc_WorldPointInView(npc->position.vx, npc->position.vz)))
+                        : (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(40))))
+#else
                 if (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(40)))
+#endif
                 {
                     npc->model.charaId = Chara_None;
                     SysWork_NpcFlagClear(k);
@@ -623,9 +644,18 @@ void Game_NpcUpdate(void) // 0x80038354
                     continue;
                 }
 
+#ifdef SH_PC_PORT
+                /* The 15u hide is the fog's edge; past it a thinned fog would
+                 * show monsters blinking out mid-street. */
+                if (!Pc_LongViewActive() &&
+                    ((g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2 && temp_t3 > SQUARE(15)) ||
+                     (!(g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2) &&
+                      Camera_Distance2dGet(&npc->position) > SQUARE(15))))
+#else
                 if ((g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2 && temp_t3 > SQUARE(15)) ||
                     (!(g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2) &&
                      Camera_Distance2dGet(&npc->position) > SQUARE(15)))
+#endif
                 {
                     npc->model.anim.flags &= ~AnimFlag_Visible;
                 }
