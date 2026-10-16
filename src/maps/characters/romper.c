@@ -54,6 +54,10 @@ static bool Romper_TickChance(s32 n)
 #ifdef SH_PC_PORT
 static VECTOR3 s_romperHopLaunch;
 static s32     s_romperHopBlocked;
+/* Set by a logged launch, cleared by its landing line: any brief fall (a slope,
+ * a step down) also sets RomperFlag_Falling, and logging those landings wrote
+ * a line every few frames while Rompers walked. */
+static s32     s_romperHopPending;
 #endif
 
 void Romper_Update(s_SubCharacter* romper, s_AnmHeader* anmHdr, GsCOORDINATE2* boneCoords)
@@ -1064,6 +1068,7 @@ void Romper_ControlJump(s_SubCharacter* romper)
                    surface.groundHeight, temp_v1_5, romper->moveSpeed, romper->fallSpeed);
             s_romperHopLaunch  = romper->position;
             s_romperHopBlocked = 0;
+            s_romperHopPending = 1;
 #endif
         }
         else if (FP_FROM(romper->model.anim.time, Q12_SHIFT) == 5 ||
@@ -1362,8 +1367,9 @@ void sharedFunc_800E8730_2_s02(s_SubCharacter* romper)
     else
     {
 #ifdef SH_PC_PORT
-        if (romperProps.flags & RomperFlag_Falling)
+        if ((romperProps.flags & RomperFlag_Falling) && s_romperHopPending)
         {
+            s_romperHopPending = 0;
             SH_DBG("[ROMPER-HOP] landed at (%d,%d,%d) from (%d,%d,%d) wallTrimmedFrames=%d",
                    romper->position.vx, romper->position.vy, romper->position.vz,
                    s_romperHopLaunch.vx, s_romperHopLaunch.vy, s_romperHopLaunch.vz,
