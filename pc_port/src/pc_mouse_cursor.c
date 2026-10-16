@@ -324,12 +324,20 @@ int Pc_MouseCursor_MenuRowHover(int baseY, int stepY, int count, unsigned int vi
     return hovered;
 }
 
+/* Only the picture hides: hover and clicks stay live, and any real mouse use
+ * clears the flag before they could matter. */
+static int Mc_HiddenForPad(void)
+{
+    extern int g_PsyX_PadInputLast;
+    return g_PsyX_PadInputLast;
+}
+
 void Pc_MouseCursor_Draw(void)
 {
     POLY_FT4* poly;
     s32       cx, cy;
 
-    if (!Mc_Enabled() || !s_inView)
+    if (!Mc_Enabled() || !s_inView || Mc_HiddenForPad())
         return;
     /* A GL overlay dialog composites above this whole frame, so it draws the
      * cursor itself (Pc_MouseCursor_SpriteRgba/GlRect); ours would sit under it. */
@@ -405,7 +413,7 @@ int Pc_MouseCursor_GlRect(float vpW, float vpH, float* outX, float* outY, float*
 {
     float w, h, fbH;
 
-    if (!Mc_Enabled() || !s_inView)
+    if (!Mc_Enabled() || !s_inView || Mc_HiddenForPad())
         return 0;
 
     /* The PSX draw is 16x16 framebuffer units; the framebuffer is 320 wide and
