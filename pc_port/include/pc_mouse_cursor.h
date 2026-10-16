@@ -63,6 +63,11 @@ int Pc_MouseCursor_RightClicked(void);
  * adjust the hovered value row / scroll lists. */
 int Pc_MouseCursor_WheelStep(void);
 
+/* Every wheel notch since the last frame, signed (+ = up). WheelStep merges
+ * notches that land inside its 2-frame latch, which makes a fast spin feel
+ * dead in a long list. */
+int Pc_MouseCursor_WheelNotches(void);
+
 /* The pad bits (ControllerFlag_*) the mouse is producing right now through
  * mouse binds (key_cross = Mouse1 and the like), d-pad bits mirrored onto the
  * left-stick ones. Panels that handle the mouse themselves drop these from the
