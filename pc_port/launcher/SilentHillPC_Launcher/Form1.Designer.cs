@@ -248,7 +248,7 @@ partial class Form1
             "Don\'t Skip",
             "Skip to Menu",
             "Skip to Game"});
-            this.comboSkipIntros.Location = new System.Drawing.Point(2, 7);
+            this.comboSkipIntros.Location = new System.Drawing.Point(1, 6);
             this.comboSkipIntros.Name = "comboSkipIntros";
             this.comboSkipIntros.Size = new System.Drawing.Size(138, 21);
             this.comboSkipIntros.TabIndex = 2;
@@ -532,7 +532,7 @@ partial class Form1
             this.comboDithering.Items.AddRange(new object[] {
             "Off",
             "On"});
-            this.comboDithering.Location = new System.Drawing.Point(311, 172);
+            this.comboDithering.Location = new System.Drawing.Point(310, 172);
             this.comboDithering.Name = "comboDithering";
             this.comboDithering.Size = new System.Drawing.Size(138, 21);
             this.comboDithering.TabIndex = 123;
@@ -651,7 +651,7 @@ partial class Form1
             // 
             this.consolePanel.Controls.Add(this.consoleYes);
             this.consolePanel.Controls.Add(this.consoleNo);
-            this.consolePanel.Location = new System.Drawing.Point(296, 639);
+            this.consolePanel.Location = new System.Drawing.Point(296, 640);
             this.consolePanel.Name = "consolePanel";
             this.consolePanel.Size = new System.Drawing.Size(120, 33);
             this.consolePanel.TabIndex = 56;
@@ -1054,17 +1054,17 @@ partial class Form1
             // 
             this.trackFog.AutoSize = false;
             this.trackFog.LargeChange = 2;
-            this.trackFog.Location = new System.Drawing.Point(373, 554);
+            this.trackFog.Location = new System.Drawing.Point(369, 554);
             this.trackFog.Maximum = 24;
             this.trackFog.Name = "trackFog";
-            this.trackFog.Size = new System.Drawing.Size(76, 24);
+            this.trackFog.Size = new System.Drawing.Size(80, 24);
             this.trackFog.TabIndex = 101;
             this.trackFog.TickStyle = System.Windows.Forms.TickStyle.None;
             this.trackFog.Value = 22;
             // 
             // lblFogValue
             // 
-            this.lblFogValue.Location = new System.Drawing.Point(341, 555);
+            this.lblFogValue.Location = new System.Drawing.Point(338, 555);
             this.lblFogValue.Name = "lblFogValue";
             this.lblFogValue.Size = new System.Drawing.Size(32, 13);
             this.lblFogValue.TabIndex = 102;
@@ -1076,7 +1076,7 @@ partial class Form1
             this.lblLineGap.AutoSize = true;
             this.lblLineGap.Location = new System.Drawing.Point(236, 321);
             this.lblLineGap.Name = "lblLineGap";
-            this.lblLineGap.Size = new System.Drawing.Size(75, 13);
+            this.lblLineGap.Size = new System.Drawing.Size(73, 13);
             this.lblLineGap.TabIndex = 103;
             this.lblLineGap.Text = "Dialog Pause:";
             // 
@@ -1109,7 +1109,7 @@ partial class Form1
             "Fullscreen",
             "Windowed",
             "Borderless"});
-            this.comboMinimap.Location = new System.Drawing.Point(310, 117);
+            this.comboMinimap.Location = new System.Drawing.Point(311, 117);
             this.comboMinimap.Name = "comboMinimap";
             this.comboMinimap.Size = new System.Drawing.Size(138, 21);
             this.comboMinimap.TabIndex = 99;

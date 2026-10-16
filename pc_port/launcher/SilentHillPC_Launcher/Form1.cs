@@ -95,9 +95,10 @@ public partial class Form1 : Form
         SetupTooltips();
         SetupLanguageButton();
         trackFog.ValueChanged += (s, e) => UpdateFogValueLabel();
-        // Scroll, not ValueChanged: only a user drag may raise the question,
-        // never LoadConfig setting the slider.
-        trackFog.Scroll += (s, e) => AskPgxpForDistantWorld();
+        // On release, not while dragging, and never from LoadConfig setting
+        // the slider.
+        trackFog.MouseUp += (s, e) => AskPgxpForDistantWorld();
+        trackFog.KeyUp   += (s, e) => AskPgxpForDistantWorld();
         this.Shown += (s, e) =>
         {
             CleanupOldFiles();
