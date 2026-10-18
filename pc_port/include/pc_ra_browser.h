@@ -19,28 +19,11 @@
 
 #include <stddef.h>
 
+#include "pc_retroachievements.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* One achievement, flattened out of rcheevos so the browser TU needs no
- * rcheevos headers. Sizes follow RA's own limits with room to spare. */
-typedef struct PcRaAch
-{
-    char     title[128];
-    char     desc[256];
-    char     badge[16];
-    unsigned points;
-    int      unlocked;
-    long long unlockTime;   /* unix seconds; 0 when unknown or still locked */
-} PcRaAch;
-
-/* Fill `out` with the loaded set. Returns the count written, 0 when no set is
- * loaded. Defined in pc_retroachievements.c, which owns the rcheevos client. */
-int  Pc_Ra_SnapshotAchievements(PcRaAch* out, int max);
-
-/* Queue a badge PNG download. No-op for a name already requested this session. */
-void Pc_Ra_RequestBadge(const char* badgeName);
 
 /* Open on the title screen. No-op if a set is not loaded. */
 void Pc_RaBrowser_Open(void);

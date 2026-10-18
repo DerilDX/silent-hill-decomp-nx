@@ -26,6 +26,7 @@
 
 #include "pc_retroachievements.h"
 #include "pc_ra_browser.h"
+#include "pc_ach_screen.h"
 
 #ifdef SH_RETROACHIEVEMENTS
 
@@ -1315,8 +1316,8 @@ void Pc_Ra_Update(void)
 
         if (done->badge[0])
         {
-            /* Badge PNG: hand the bytes to whoever asked. Offered to BOTH
-             * consumers unconditionally — each ignores a name it has no row or
+            /* Badge PNG: hand the bytes to whoever asked. Offered to EVERY
+             * consumer unconditionally — each ignores a name it has no row or
              * toast waiting on — because the browser and an unlock popup can
              * legitimately want the same badge at the same time. */
             if (done->status == 200 && done->body && done->body_len)
@@ -1324,6 +1325,8 @@ void Pc_Ra_Update(void)
                 Pc_RaToast_ProvideBadge(done->badge,
                                         (const unsigned char*)done->body, done->body_len);
                 Pc_RaBrowser_ProvideBadge(done->badge,
+                                          (const unsigned char*)done->body, done->body_len);
+                Pc_AchScreen_ProvideBadge(done->badge,
                                           (const unsigned char*)done->body, done->body_len);
             }
             else
@@ -1431,6 +1434,11 @@ int Pc_Ra_IsActive(void)
     return s_active;
 }
 
+int Pc_Ra_SetLoaded(void)
+{
+    return s_client != NULL && s_active;
+}
+
 const char* Pc_Ra_StatusLine(void)
 {
     return s_status;
@@ -1447,6 +1455,7 @@ void        Pc_Ra_Init(void)     {}
 void        Pc_Ra_Update(void)   {}
 void        Pc_Ra_Shutdown(void) {}
 int         Pc_Ra_IsActive(void) { return 0; }
+int         Pc_Ra_SetLoaded(void) { return 0; }
 const char* Pc_Ra_StatusLine(void) { return ""; }
 const char* Pc_Ra_UnavailableReason(void) { return "RetroAchievements is not in this build"; }
 void        Pc_Ra_RequestBadge(const char* badgeName) { (void)badgeName; }
