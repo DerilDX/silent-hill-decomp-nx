@@ -371,7 +371,9 @@ void Pc_ControlsScreen_Open(void)
 
 int Pc_ControlsScreen_IsOpen(void)
 {
-    return s_open;
+    /* Options can be left without a Back (the Select+Start warm reset), which
+     * leaves s_open set. */
+    return s_open && g_GameWork.gameState == GameState_OptionScreen;
 }
 
 int Pc_ControlsScreen_Update(void)
@@ -572,12 +574,14 @@ static void cs_cell_draw(int row, int col, int y, int selected)
         return;
     }
 
-    if (!BindCore_RowEnabled(row))
-        color = selected ? StringColorId_Gold : StringColorId_DarkGrey;
+    if (selected)
+        color = StringColorId_Gold;
+    else if (!BindCore_RowEnabled(row))
+        color = StringColorId_DarkGrey;
     else if (BindCore_IsDuplicate(row, col))
         color = StringColorId_Red;
     else
-        color = selected ? StringColorId_Gold : StringColorId_White;
+        color = StringColorId_White;
 
     v = BindCore_Value(row, col);
     if (BindCore_Unbound(v))

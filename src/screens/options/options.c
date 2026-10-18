@@ -1737,6 +1737,12 @@ void GameState_Options_Update(void) // 0x801E2D44
                 g_SysWork.counters_1C[1]              = 0;
                 g_GameWork.gameStateSteps[1] = 0;
                 g_GameWork.gameStateSteps[2] = 0;
+#ifdef SH_PC_PORT
+                /* Opened on entry, once per visit: a visit left by the
+                 * Select+Start warm reset never reaches the screen's own close,
+                 * so the screen cannot tell the next visit is a new one. */
+                Pc_ControlsScreen_Open();
+#endif
             }
             break;
 
@@ -4285,13 +4291,10 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
      * only ever re-mapped PSX buttons onto game actions, which on PC sits
      * under the launcher's physical binds and only confused them. */
     {
-        static int s_controlsScreenShown = 0;
-
         if (g_GameWork.gameStateSteps[1] == ControllerMenuState_Leave)
         {
             /* The PSX leave path would draw the old layout under the fade-out;
              * leave the same way without drawing anything. */
-            s_controlsScreenShown = 0;
             if (ScreenFade_IsFinished())
             {
                 ScreenFade_Start(true, true, false);
@@ -4304,11 +4307,6 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
         }
         else
         {
-            if (!s_controlsScreenShown)
-            {
-                Pc_ControlsScreen_Open();
-                s_controlsScreenShown = 1;
-            }
             if (Pc_ControlsScreen_Update())
             {
                 Pc_ControlsScreen_Draw();
@@ -4322,7 +4320,6 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
             ScreenFade_Start(false, false, false);
             g_GameWork.gameStateSteps[1] = ControllerMenuState_Leave;
             g_GameWork.gameStateSteps[2] = 0;
-            s_controlsScreenShown             = 0;
 
             /* Return on the closing frame too. Without this the function ran on
              * into the stock controller layout below and drew it once, which is

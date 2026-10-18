@@ -1837,7 +1837,7 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
     if (FSQ_INFO_VALID(entry->info) &&
         (int)(entry->info - &g_FileTable[0]) == FILE_TIM_OPTION2_TIM)
     {
-        PadIcons_Apply();
+        PadIcons_AtlasUploaded();
     }
 #endif
 

@@ -6,6 +6,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <SDL.h>
+
 #include "bodyprog/sound/sfx_id_enum.h"
 #include "bodyprog/sound/sound_system.h"
 #include "bodyprog/text/text_draw.h"
@@ -67,6 +69,7 @@ static int           s_open;
 static int           s_single;
 static int           s_onBack;
 static int           s_refresh;
+static int           s_escPrev;
 static AchList       s_list;
 static PcRaAch       s_snap[ACH_MAX];
 static NmScroll      s_scroll;
@@ -223,6 +226,7 @@ void Pc_AchScreen_Open(void)
     s_onBack  = s_list.count == 0;
     s_single  = 0;
     s_refresh = 0;
+    s_escPrev = 1;
     s_open    = 1;
     SH_DBG("[ACHSCREEN] opened with %d achievements", s_list.count);
 }
@@ -296,14 +300,26 @@ static int ach_activate(void)
     return 1;
 }
 
-static int ach_update_list(const NmInput* in)
+/* Raw Escape backs out like the Controls screen: Escape is the default Exit
+ * Game bind, which is suppressed while this screen is open. */
+static int ach_escape_pressed(void)
+{
+    const Uint8* ks   = SDL_GetKeyboardState(NULL);
+    int          held = ks != NULL && ks[SDL_SCANCODE_ESCAPE];
+    int          edge = held && !s_escPrev;
+
+    s_escPrev = held;
+    return edge;
+}
+
+static int ach_update_list(const NmInput* in, int back)
 {
     int oldSel  = s_scroll.sel;
     int oldBack = s_onBack;
     int count   = s_list.count;
     int hit;
 
-    if (in->cancel || in->mouseRight)
+    if (back || in->cancel || in->mouseRight)
     {
         SD_Call(Sfx_MenuCancel);
         return 0;
@@ -363,9 +379,9 @@ static int ach_update_list(const NmInput* in)
     return 1;
 }
 
-static void ach_update_single(const NmInput* in)
+static void ach_update_single(const NmInput* in, int back)
 {
-    if (in->cancel || in->confirm || in->mouseRight || in->mouseLeft)
+    if (back || in->cancel || in->confirm || in->mouseRight || in->mouseLeft)
     {
         SD_Call(Sfx_MenuCancel);
         s_single = 0;
@@ -389,10 +405,13 @@ static void ach_request_visible(void)
 
 int Pc_AchScreen_Update(const NmInput* in)
 {
+    int back;
+
     if (!s_open)
     {
         return 0;
     }
+    back = ach_escape_pressed();
 
     if (++s_refresh >= ACH_REFRESH_FRAMES)
     {
@@ -402,9 +421,9 @@ int Pc_AchScreen_Update(const NmInput* in)
 
     if (s_single)
     {
-        ach_update_single(in);
+        ach_update_single(in, back);
     }
-    else if (!ach_update_list(in))
+    else if (!ach_update_list(in, back))
     {
         /* Stays open so the host can keep drawing it through its fade out. */
         return 0;

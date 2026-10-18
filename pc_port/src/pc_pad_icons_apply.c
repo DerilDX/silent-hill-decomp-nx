@@ -30,6 +30,9 @@ static const char* const s_files[PAD_ICONS_COUNT] = {
 
 /* Until a set is applied the disc atlas is what draws. */
 static int s_hasArt[PI_COUNT] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+/* Only our own entry may be dropped: one a texture pack or loose OPTION2 file
+ * registered for the atlas shares its key, and is the art to show then. */
+static int s_registered;
 
 static unsigned char* read_file(const char* path, unsigned int* outSize)
 {
@@ -58,8 +61,12 @@ static void UseDiscArt(void)
 {
     int i;
 
-    HiresOverride_DropVramRect(ATLAS_VRAM_X, ATLAS_VRAM_Y, ATLAS_VRAM_W, ATLAS_VRAM_H,
-                               ATLAS_CLUT_X, ATLAS_CLUT_Y, ATLAS_BPP);
+    if (s_registered)
+    {
+        HiresOverride_DropVramRect(ATLAS_VRAM_X, ATLAS_VRAM_Y, ATLAS_VRAM_W, ATLAS_VRAM_H,
+                                   ATLAS_CLUT_X, ATLAS_CLUT_Y, ATLAS_BPP);
+        s_registered = 0;
+    }
     for (i = 0; i < PI_COUNT; i++)
         s_hasArt[i] = i <= PI_START;
 }
@@ -105,6 +112,7 @@ void PadIcons_Apply(void)
                PadIcons_SetLabel(set), path, w, h);
         return;
     }
+    s_registered = 1;
 
     for (i = 0; i < PI_COUNT; i++)
     {
@@ -117,6 +125,13 @@ void PadIcons_Apply(void)
     free(rgba);
     SH_DBG("[PADICONS] %s set: %s %dx%d, %d of %d icons have art", PadIcons_SetLabel(set), path, w,
            h, cells, PI_COUNT);
+}
+
+void PadIcons_AtlasUploaded(void)
+{
+    /* The upload invalidated every override on the atlas rect, ours included. */
+    s_registered = 0;
+    PadIcons_Apply();
 }
 
 int PadIcons_HasArt(int icon)

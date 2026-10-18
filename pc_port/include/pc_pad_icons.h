@@ -32,5 +32,6 @@ int         PadIcons_HasArt(int icon);
 const char* PadIcons_SetLabel(int set);
 void        PadIcons_Step(int dir);
 void        PadIcons_Apply(void);
+void        PadIcons_AtlasUploaded(void);
 
 #endif
