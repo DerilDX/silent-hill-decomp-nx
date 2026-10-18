@@ -37,6 +37,8 @@
 #include "stb_truetype.h"
 
 #include "pc_ra_browser.h"
+#include "pc_retroachievements.h"
+#include "dbg_overlay.h"
 #include "pc_config.h"
 #include "pc_mouse_cursor.h"
 #include "pc_ui_sound.h"
@@ -914,6 +916,7 @@ void Pc_RaBrowser_Open(void)
     if (s_rowCount == 0)
     {
         SH_DBG("[RABROWSE] no achievement set loaded - not opening");
+        DbgOverlay_ToastLine(Pc_Ra_UnavailableReason());
         return;
     }
 

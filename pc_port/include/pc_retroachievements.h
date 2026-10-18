@@ -33,6 +33,8 @@ int Pc_Ra_IsActive(void);
 
 /* "12/40 (135 pts)" for HUD/console use; empty string when inactive. */
 const char* Pc_Ra_StatusLine(void);
+/* Why no achievement set is loaded, for the player (never NULL). */
+const char* Pc_Ra_UnavailableReason(void);
 
 #ifdef __cplusplus
 }
