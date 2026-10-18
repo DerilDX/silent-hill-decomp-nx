@@ -27,6 +27,8 @@
 
 #include "stb_truetype.h"
 
+#include "pc_bind_core.h"
+#include "pc_bind_input.h"
 #include "pc_bind_panel.h"
 #include "pc_confirm_dialog.h"
 #include "pc_mouse_cursor.h"
@@ -40,9 +42,6 @@
 
 extern const char* PsyX_Pad_ConnectedControllerName(void);
 extern int         PsyX_Pad_ConnectedControllerType(void);
-extern const char* PsyX_Pad_HeldBindName(void);
-extern int         PsyX_Pad_AxisValue(int sdlAxis);
-extern int         g_PsyX_WheelUpFrames, g_PsyX_WheelDownFrames;
 extern int         g_DebugThirdPersonCam;
 extern void        PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* outH);
 
@@ -50,53 +49,7 @@ extern void        PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int*
 /* Rows                                                                */
 /* ------------------------------------------------------------------ */
 
-enum { BP_KB1 = 0, BP_KB2, BP_PAD1, BP_PAD2, BP_COLS };
-
-#define BPF_STICK   1 /* controller side is the stick / d-pad, not a bind */
-#define BPF_ALTCAM  2 /* only does anything with an alternate camera */
-#define BPF_GLOBAL  4 /* one value shared by both schemes */
-#define BPF_MOUSE   8 /* keyboard columns accept mouse buttons */
-#define BPF_WHEEL  16 /* ...and the mouse wheel */
-
-typedef struct
-{
-    const char* label;
-    const char* key[BP_COLS];
-    int         flags;
-} BpRow;
-
-/* Labels and order follow the launcher. The PSX-button rows resolve mouse
- * names in Pc_ApplyKeyOrMouse; the port's own actions resolve keyboard names
- * only (Swap Shoulder also takes a mouse button), so the mouse is offered only
- * where the game can use it. */
-static const BpRow s_rows[] = {
-    { "Move Up",        { "key_up",            "key_up_2",       NULL,                NULL },             BPF_STICK | BPF_MOUSE | BPF_WHEEL },
-    { "Move Down",      { "key_down",          "key_down_2",     NULL,                NULL },             BPF_STICK | BPF_MOUSE | BPF_WHEEL },
-    { "Turn Left",      { "key_left",          "key_left_2",     NULL,                NULL },             BPF_STICK | BPF_MOUSE | BPF_WHEEL },
-    { "Turn Right",     { "key_right",         "key_right_2",    NULL,                NULL },             BPF_STICK | BPF_MOUSE | BPF_WHEEL },
-    { "Action / Shoot", { "key_cross",         "key_cross_2",    "pad_cross",         "pad_cross_2" },    BPF_MOUSE | BPF_WHEEL },
-    { "Flashlight",     { "key_circle",        "key_circle_2",   "pad_circle",        "pad_circle_2" },   BPF_MOUSE | BPF_WHEEL },
-    { "Map",            { "key_triangle",      "key_triangle_2", "pad_triangle",      "pad_triangle_2" }, BPF_MOUSE | BPF_WHEEL },
-    { "Run",            { "key_square",        "key_square_2",   "pad_square",        "pad_square_2" },   BPF_MOUSE | BPF_WHEEL },
-    { "Sidestep Left",  { "key_l1",            "key_l1_2",       "pad_l1",            "pad_l1_2" },       BPF_MOUSE | BPF_WHEEL },
-    { "Sidestep Right", { "key_r1",            "key_r1_2",       "pad_r1",            "pad_r1_2" },       BPF_MOUSE | BPF_WHEEL },
-    { "View",           { "key_l2",            "key_l2_2",       "pad_l2",            "pad_l2_2" },       BPF_MOUSE | BPF_WHEEL },
-    { "Aim",            { "key_r2",            "key_r2_2",       "pad_r2",            "pad_r2_2" },       BPF_MOUSE | BPF_WHEEL },
-    { "Pause",          { "key_start",         "key_start_2",    "pad_start",         "pad_start_2" },    BPF_MOUSE | BPF_WHEEL },
-    { "Inventory",      { "key_select",        "key_select_2",   "pad_select",        "pad_select_2" },   BPF_MOUSE | BPF_WHEEL },
-    { "Reload",         { "key_reload",        "key_reload_2",   "pad_reload",        NULL },             0 },
-    { "Cycle Weapons",  { "key_cycle_weapons", NULL,             "pad_cycle_weapons", NULL },             0 },
-    { "Quick Heal",     { "key_quick_heal",    NULL,             "pad_quick_heal",    NULL },             0 },
-    { "Quick Turn",     { "key_quick_turn",    NULL,             "pad_quick_turn",    NULL },             0 },
-    { "Rear Look",      { "key_rear_look",     NULL,             "pad_rear_look",     NULL },             BPF_ALTCAM },
-    { "Change Camera",  { "key_change_cam",    NULL,             "pad_change_cam",    NULL },             0 },
-    { "Swap Shoulder",  { "key_swap_shoulder", NULL,             "pad_swap_shoulder", NULL },             BPF_GLOBAL | BPF_MOUSE },
-    { "Quick Options",  { "key_quick_options", NULL,             "pad_quick_options", NULL },             BPF_GLOBAL },
-    { "Quick Save",     { "key_quicksave",     NULL,             NULL,                NULL },             BPF_GLOBAL },
-    { "Quick Load",     { "key_quickload",     NULL,             NULL,                NULL },             BPF_GLOBAL },
-};
-
-#define BP_ROWS      ((int)(sizeof(s_rows) / sizeof(s_rows[0])))
+#define BP_ROWS      BindCore_RowCount()
 #define BP_ROW_RESET BP_ROWS
 #define BP_ROW_CLOSE (BP_ROWS + 1)
 #define BP_ROW_COUNT (BP_ROWS + 2)
@@ -111,22 +64,16 @@ static Uint32 s_phaseStart;
 #define BP_OPEN_MS  160u
 #define BP_CLOSE_MS 140u
 
-static int s_scheme;       /* 0 = classic, 1 = alternate cameras; fixed while open */
 static int s_style;        /* g_ControlStyle when opened, for the header */
 static int s_row, s_col, s_scroll;
 static int s_visRows = 16; /* published by Draw */
 
 static int    s_listen;       /* waiting for an input for (s_row, s_col) */
-static int    s_listenArmed;  /* everything was released since listening began */
-static Uint32 s_listenStart;
-#define BP_LISTEN_PAD_MS 8000u
 
 static int s_resetAsked;      /* the confirm dialog is ours */
 
 /* Raw navigation edges and repeat. */
-enum { BN_UP = 0, BN_DOWN, BN_LEFT, BN_RIGHT, BN_OK, BN_BACK, BN_CLEAR, BN_COUNT };
-static int    s_navPrev[BN_COUNT];
-static Uint32 s_navRepeatAt[BN_COUNT];
+static BindNav s_nav;
 
 /* GL */
 #define BP_GARBAGE 256
@@ -158,7 +105,7 @@ static int    s_bakedForPx;
 
 /* Geometry published by Draw for Update's mouse hit-test (viewport px, y up). */
 static float s_vpW = 1920.0f, s_vpH = 1080.0f;
-static float s_geoColL[BP_COLS + 1], s_geoColR[BP_COLS + 1]; /* [0] = label column */
+static float s_geoColL[BC_COLS + 1], s_geoColR[BC_COLS + 1]; /* [0] = label column */
 static float s_geoRowT[64], s_geoRowB[64];
 static int   s_geoRowIdx[64];
 static int   s_geoRows;
@@ -172,102 +119,6 @@ static int   s_geoValid;
 static void bp_beep(int sfxId)
 {
     Sd_PlaySfx((u16)sfxId, 0, 64);
-}
-
-static int bp_unbound(const char* v)
-{
-    return v == NULL || v[0] == '\0' || SDL_strcasecmp(v, "NONE") == 0;
-}
-
-static const char* bp_value(int row, int col)
-{
-    if (row < 0 || row >= BP_ROWS || s_rows[row].key[col] == NULL)
-        return NULL;
-    return PcConfig_BindField(s_rows[row].key[col], s_scheme, NULL);
-}
-
-static int bp_row_enabled(int row)
-{
-    if (row >= BP_ROWS)
-        return 1;
-    return !((s_rows[row].flags & BPF_ALTCAM) && s_scheme == 0);
-}
-
-static int bp_cell_usable(int row, int col)
-{
-    return row >= 0 && row < BP_ROWS && s_rows[row].key[col] != NULL && bp_row_enabled(row);
-}
-
-static void bp_binds_changed(void)
-{
-    extern void Pc_QuickOptions_InvalidateRows(void);
-
-    g_PcBindsGen++;
-    Pc_ControlStyle_ReapplyBinds();
-    /* The quick options footer names the Quick Options key. */
-    Pc_QuickOptions_InvalidateRows();
-}
-
-static void bp_cfg_key(const char* key, int perScheme, char* out, size_t outSize)
-{
-    if (perScheme && s_scheme != 0)
-        snprintf(out, outSize, "%s_altcam", key);
-    else
-        snprintf(out, outSize, "%s", key);
-}
-
-static void bp_set(int row, int col, const char* value)
-{
-    const char* key       = s_rows[row].key[col];
-    int         perScheme = 0;
-    char*       field     = PcConfig_BindField(key, s_scheme, &perScheme);
-    char        cfgKey[64];
-
-    if (field == NULL)
-        return;
-    snprintf(field, 24, "%s", value);
-    bp_cfg_key(key, perScheme, cfgKey, sizeof(cfgKey));
-    PcConfig_SaveKeyValue(cfgKey, field);
-    SH_DBG("[BINDS] %s = %s", cfgKey, field);
-    bp_binds_changed();
-}
-
-/* This scheme's binds back to the built-in values; the shared (global) rows
- * are left alone because they belong to both schemes. One file write. */
-static void bp_reset_scheme(void)
-{
-    static char keyBuf[BP_ROWS * BP_COLS][40];
-    const char* keys[BP_ROWS * BP_COLS];
-    const char* vals[BP_ROWS * BP_COLS];
-    int         n = 0, r, c;
-
-    for (r = 0; r < BP_ROWS; r++)
-    {
-        if (s_rows[r].flags & BPF_GLOBAL)
-            continue;
-        for (c = 0; c < BP_COLS; c++)
-        {
-            const char* key = s_rows[r].key[c];
-            const char* def;
-            char*       field;
-            int         perScheme = 0;
-
-            if (key == NULL)
-                continue;
-            field = PcConfig_BindField(key, s_scheme, &perScheme);
-            if (field == NULL)
-                continue;
-            def = PcConfig_BindDefault(key, s_scheme);
-            snprintf(field, 24, "%s", bp_unbound(def) ? "NONE" : def);
-            bp_cfg_key(key, perScheme, keyBuf[n], sizeof(keyBuf[n]));
-            keys[n] = keyBuf[n];
-            vals[n] = field;
-            n++;
-        }
-    }
-    PcConfig_SaveKeyValues(keys, vals, n);
-    SH_DBG("[BINDS] %s scheme reset to defaults (%d binds)", s_scheme ? "altcam" : "classic", n);
-    bp_binds_changed();
 }
 
 static const char* bp_pretty_key(const char* v)
@@ -322,43 +173,16 @@ static const char* bp_cell_text(int row, int col, int padType)
 
     if (row >= BP_ROWS)
         return "";
-    if (s_rows[row].key[col] == NULL)
+    if (BindCore_Row(row)->key[col] == NULL)
     {
-        if (col == BP_PAD1 && (s_rows[row].flags & BPF_STICK))
+        if (col == BC_PAD1 && (BindCore_Row(row)->flags & BCF_STICK))
             return Pc_LangQuick("Left Stick");
         return "";
     }
-    v = bp_value(row, col);
-    if (bp_unbound(v))
+    v = BindCore_Value(row, col);
+    if (BindCore_Unbound(v))
         return "-";
-    return (col >= BP_PAD1) ? bp_pretty_pad(v, padType) : bp_pretty_key(v);
-}
-
-/* The same input on two actions of this scheme, same device. Allowed, as the
- * launcher allows it, but shown so it is never a surprise. */
-static int bp_is_duplicate(int row, int col)
-{
-    const char* v = bp_value(row, col);
-    int         pad = (col >= BP_PAD1);
-    int         r, c;
-
-    if (bp_unbound(v))
-        return 0;
-    for (r = 0; r < BP_ROWS; r++)
-    {
-        if (!bp_row_enabled(r))
-            continue;
-        for (c = pad ? BP_PAD1 : BP_KB1; c <= (pad ? BP_PAD2 : BP_KB2); c++)
-        {
-            const char* o;
-            if (r == row && c == col)
-                continue;
-            o = bp_value(r, c);
-            if (!bp_unbound(o) && SDL_strcasecmp(o, v) == 0)
-                return 1;
-        }
-    }
-    return 0;
+    return (col >= BC_PAD1) ? bp_pretty_pad(v, padType) : bp_pretty_key(v);
 }
 
 /* ------------------------------------------------------------------ */
@@ -370,32 +194,22 @@ int Pc_BindPanel_IsOpen(void)
     return s_phase != BP_CLOSED;
 }
 
-static void bp_nav_reset(void)
-{
-    int i;
-    for (i = 0; i < BN_COUNT; i++)
-    {
-        s_navPrev[i]     = 1; /* whatever opened the panel must be released first */
-        s_navRepeatAt[i] = 0;
-    }
-}
-
 void Pc_BindPanel_Open(void)
 {
     if (s_phase == BP_OPENING || s_phase == BP_SHOWN)
         return;
-    s_scheme      = g_DebugThirdPersonCam ? 1 : 0;
+    BindCore_SetScheme(g_DebugThirdPersonCam ? 1 : 0);
     s_style       = g_ControlStyle;
     s_row         = 0;
-    s_col         = BP_KB1;
+    s_col         = BC_KB1;
     s_scroll      = 0;
     s_listen      = 0;
     s_resetAsked  = 0;
     s_geoValid    = 0;
     s_phase       = BP_OPENING;
     s_phaseStart  = SDL_GetTicks();
-    bp_nav_reset();
-    SH_DBG("[BINDS] panel open: %s scheme (style %s)", s_scheme ? "altcam" : "classic", Pc_ControlStyleId(s_style));
+    BindNav_Reset(&s_nav);
+    SH_DBG("[BINDS] panel open: %s scheme (style %s)", BindCore_Scheme() ? "altcam" : "classic", Pc_ControlStyleId(s_style));
 }
 
 static void bp_close(void)
@@ -420,59 +234,6 @@ void Pc_BindPanel_Close(void)
 /* ------------------------------------------------------------------ */
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
-
-static void bp_read_nav(int held[BN_COUNT])
-{
-    const Uint8* ks = SDL_GetKeyboardState(NULL);
-    const int    ly = PsyX_Pad_AxisValue(SDL_CONTROLLER_AXIS_LEFTY);
-    const int    lx = PsyX_Pad_AxisValue(SDL_CONTROLLER_AXIS_LEFTX);
-    const char*  pb = PsyX_Pad_HeldBindName();
-
-    memset(held, 0, sizeof(int) * BN_COUNT);
-    if (ks)
-    {
-        held[BN_UP]    = ks[SDL_SCANCODE_UP];
-        held[BN_DOWN]  = ks[SDL_SCANCODE_DOWN];
-        held[BN_LEFT]  = ks[SDL_SCANCODE_LEFT];
-        held[BN_RIGHT] = ks[SDL_SCANCODE_RIGHT];
-        held[BN_OK]    = ks[SDL_SCANCODE_RETURN] || ks[SDL_SCANCODE_KP_ENTER] || ks[SDL_SCANCODE_SPACE];
-        held[BN_BACK]  = ks[SDL_SCANCODE_ESCAPE];
-        held[BN_CLEAR] = ks[SDL_SCANCODE_DELETE] || ks[SDL_SCANCODE_BACKSPACE];
-    }
-    held[BN_UP]    |= ly < -16000 || (pb && strcmp(pb, "dpup") == 0);
-    held[BN_DOWN]  |= ly >  16000 || (pb && strcmp(pb, "dpdown") == 0);
-    held[BN_LEFT]  |= lx < -16000 || (pb && strcmp(pb, "dpleft") == 0);
-    held[BN_RIGHT] |= lx >  16000 || (pb && strcmp(pb, "dpright") == 0);
-    if (pb)
-    {
-        held[BN_OK]    |= strcmp(pb, "a") == 0;
-        held[BN_BACK]  |= strcmp(pb, "b") == 0 || strcmp(pb, "start") == 0;
-        held[BN_CLEAR] |= strcmp(pb, "x") == 0;
-    }
-}
-
-/* Press edges, with key-repeat on the four directions. */
-static void bp_nav_edges(int held[BN_COUNT], int pressed[BN_COUNT])
-{
-    const Uint32 now = SDL_GetTicks();
-    int          i;
-
-    for (i = 0; i < BN_COUNT; i++)
-    {
-        pressed[i] = 0;
-        if (held[i] && !s_navPrev[i])
-        {
-            pressed[i]       = 1;
-            s_navRepeatAt[i] = now + 360u;
-        }
-        else if (held[i] && i <= BN_RIGHT && now >= s_navRepeatAt[i])
-        {
-            pressed[i]       = 1;
-            s_navRepeatAt[i] = now + 90u;
-        }
-        s_navPrev[i] = held[i];
-    }
-}
 
 static void bp_move_row(int dir)
 {
@@ -505,132 +266,35 @@ static void bp_activate(void)
     {
         bp_beep(Sfx_MenuConfirm);
         Pc_ConfirmDialog_Open("RESET CONTROLS",
-                              s_scheme ? "Reset the alternate camera binds to their defaults?"
+                              BindCore_Scheme() ? "Reset the alternate camera binds to their defaults?"
                                        : "Reset the classic camera binds to their defaults?");
         s_resetAsked = 1;
         return;
     }
-    if (!bp_cell_usable(s_row, s_col))
+    if (!BindCore_CellUsable(s_row, s_col))
     {
         bp_beep(Sfx_MenuError);
         return;
     }
-    if (s_col >= BP_PAD1 && PsyX_Pad_ConnectedControllerName() == NULL)
+    if (s_col >= BC_PAD1 && !BindInput_PadConnected())
     {
         bp_beep(Sfx_MenuError);
         return;
     }
     bp_beep(Sfx_MenuConfirm);
     s_listen      = 1;
-    s_listenArmed = 0;
-    s_listenStart = SDL_GetTicks();
+    BindCapture_Begin(s_row, s_col);
 }
 
 static void bp_clear_cell(void)
 {
-    if (!bp_cell_usable(s_row, s_col))
+    if (!BindCore_CellUsable(s_row, s_col))
     {
         bp_beep(Sfx_MenuError);
         return;
     }
-    bp_set(s_row, s_col, "NONE");
+    BindCore_Set(s_row, s_col, "NONE");
     bp_beep(Sfx_MenuCancel);
-}
-
-/* Returns the captured bind name, "" to cancel, or NULL while still waiting. */
-static const char* bp_capture(void)
-{
-    static char  name[32];
-    static Uint8 prevKeys[SDL_NUM_SCANCODES];
-    const Uint8* ks;
-    int          nk, sc;
-    Uint32       mb;
-    int          flags = s_rows[s_row].flags;
-
-    ks = SDL_GetKeyboardState(&nk);
-    mb = SDL_GetMouseState(NULL, NULL);
-
-    if (s_col >= BP_PAD1)
-    {
-        const char* pb = PsyX_Pad_HeldBindName();
-
-        if (ks && ks[SDL_SCANCODE_ESCAPE])
-            return "";
-        if (SDL_GetTicks() - s_listenStart > BP_LISTEN_PAD_MS || PsyX_Pad_ConnectedControllerName() == NULL)
-            return "";
-        if (!s_listenArmed)
-        {
-            if (pb == NULL)
-                s_listenArmed = 1;
-            return NULL;
-        }
-        if (pb == NULL)
-            return NULL;
-        snprintf(name, sizeof(name), "%s", pb);
-        return name;
-    }
-
-    if (!s_listenArmed)
-    {
-        int any = (mb & (SDL_BUTTON_LMASK | SDL_BUTTON_MMASK | SDL_BUTTON_RMASK |
-                         SDL_BUTTON_X1MASK | SDL_BUTTON_X2MASK)) != 0;
-        /* Lock keys are skipped here: some platforms report a toggled lock as
-         * held, which would keep the panel waiting forever. They can still be
-         * captured as binds below. */
-        for (sc = 1; ks && sc < nk && !any; sc++)
-            any = ks[sc] && sc != SDL_SCANCODE_CAPSLOCK && sc != SDL_SCANCODE_NUMLOCKCLEAR &&
-                  sc != SDL_SCANCODE_SCROLLLOCK;
-        if (!any)
-        {
-            s_listenArmed = 1;
-            if (ks)
-                memcpy(prevKeys, ks, (size_t)(nk < SDL_NUM_SCANCODES ? nk : SDL_NUM_SCANCODES));
-        }
-        return NULL;
-    }
-
-    if (ks && ks[SDL_SCANCODE_ESCAPE])
-        return "";
-
-    /* A key counts only on its press: a lock key that reads as held from the
-     * start is never taken. */
-    for (sc = 1; ks && sc < nk && sc < SDL_NUM_SCANCODES; sc++)
-    {
-        const char* kn;
-        const int   pressed = ks[sc] && !prevKeys[sc];
-
-        prevKeys[sc] = ks[sc];
-        if (!pressed)
-            continue;
-        kn = SDL_GetScancodeName((SDL_Scancode)sc);
-        if (kn == NULL || kn[0] == '\0')
-            continue;
-        snprintf(name, sizeof(name), "%s", kn);
-        return name;
-    }
-
-    if (flags & BPF_MOUSE)
-    {
-        static const struct { Uint32 mask; const char* id; } mouse[] = {
-            { SDL_BUTTON_LMASK, "Mouse1" },  { SDL_BUTTON_RMASK, "Mouse2" },
-            { SDL_BUTTON_MMASK, "Mouse3" },  { SDL_BUTTON_X1MASK, "Mouse4" },
-            { SDL_BUTTON_X2MASK, "Mouse5" },
-        };
-        int i;
-        for (i = 0; i < (int)(sizeof(mouse) / sizeof(mouse[0])); i++)
-        {
-            if (mb & mouse[i].mask)
-                return mouse[i].id;
-        }
-        if (flags & BPF_WHEEL)
-        {
-            if (g_PsyX_WheelUpFrames == 2)
-                return "MouseWheelUp";
-            if (g_PsyX_WheelDownFrames == 2)
-                return "MouseWheelDown";
-        }
-    }
-    return NULL;
 }
 
 static void bp_mouse(int* activate, int* clear)
@@ -673,7 +337,7 @@ static void bp_mouse(int* activate, int* clear)
             if (lclick) { s_row = row; *activate = 1; }
             return;
         }
-        for (c = 0; c < BP_COLS; c++)
+        for (c = 0; c < BC_COLS; c++)
         {
             if (px < s_geoColL[c + 1] || px > s_geoColR[c + 1])
                 continue;
@@ -689,7 +353,7 @@ static void bp_mouse(int* activate, int* clear)
 
 int Pc_BindPanel_Update(void)
 {
-    int held[BN_COUNT], pressed[BN_COUNT];
+    int pressed[BN_COUNT];
     int mActivate, mClear;
 
     if (s_phase == BP_CLOSED)
@@ -701,8 +365,7 @@ int Pc_BindPanel_Update(void)
     if (s_resetAsked)
     {
         int res;
-        bp_read_nav(held);
-        bp_nav_edges(held, pressed);
+        BindNav_Poll(&s_nav, pressed);
         if (!Pc_ConfirmDialog_IsOpen() && !pressed[BN_OK])
         {
             s_resetAsked = 0;
@@ -714,7 +377,7 @@ int Pc_BindPanel_Update(void)
         if (res == PC_CONFIRM_YES)
         {
             bp_beep(Sfx_MenuConfirm);
-            bp_reset_scheme();
+            BindCore_ResetScheme();
             s_resetAsked = 0;
         }
         else if (res == PC_CONFIRM_NO)
@@ -727,7 +390,7 @@ int Pc_BindPanel_Update(void)
 
     if (s_listen)
     {
-        const char* got = bp_capture();
+        const char* got = BindCapture_Update();
         if (got != NULL)
         {
             s_listen = 0;
@@ -737,16 +400,15 @@ int Pc_BindPanel_Update(void)
             }
             else
             {
-                bp_set(s_row, s_col, got);
+                BindCore_Set(s_row, s_col, got);
                 bp_beep(Sfx_MenuConfirm);
             }
-            bp_nav_reset(); /* the captured press must not also navigate */
+            BindNav_Reset(&s_nav); /* the captured press must not also navigate */
         }
         return 1;
     }
 
-    bp_read_nav(held);
-    bp_nav_edges(held, pressed);
+    BindNav_Poll(&s_nav, pressed);
     bp_mouse(&mActivate, &mClear);
 
     if (pressed[BN_BACK])
@@ -759,8 +421,8 @@ int Pc_BindPanel_Update(void)
     if (pressed[BN_DOWN])  { bp_move_row(+1); bp_beep(Sfx_MenuMove); }
     if (s_row < BP_ROWS)
     {
-        if (pressed[BN_LEFT])  { s_col = (s_col + BP_COLS - 1) % BP_COLS; bp_beep(Sfx_MenuMove); }
-        if (pressed[BN_RIGHT]) { s_col = (s_col + 1) % BP_COLS;           bp_beep(Sfx_MenuMove); }
+        if (pressed[BN_LEFT])  { s_col = (s_col + BC_COLS - 1) % BC_COLS; bp_beep(Sfx_MenuMove); }
+        if (pressed[BN_RIGHT]) { s_col = (s_col + 1) % BC_COLS;           bp_beep(Sfx_MenuMove); }
     }
     if (pressed[BN_UP] || pressed[BN_DOWN])
         bp_keep_visible();
@@ -1074,7 +736,7 @@ void Pc_BindPanel_Draw(void)
     GLint vp[4], prevVp[4];
     float vpW, vpH, panelW, panelH, panelL, panelR, panelT, panelB, dim = 1.0f;
     float pad, titleH, subH, headH, footH, rowH, listT, listB, listL, listR;
-    float colX[BP_COLS + 2];
+    float colX[BC_COLS + 2];
     int   pxTitle, pxRow, pxSmall, padType, i, c, shown;
     const char* padName;
     char  line[384];
@@ -1180,8 +842,8 @@ void Pc_BindPanel_Draw(void)
 
     colX[0] = listL;
     colX[1] = listL + (listR - listL) * 0.26f;
-    for (c = 1; c <= BP_COLS; c++)
-        colX[c + 1] = colX[1] + (listR - colX[1]) * ((float)c / (float)BP_COLS);
+    for (c = 1; c <= BC_COLS; c++)
+        colX[c + 1] = colX[1] + (listR - colX[1]) * ((float)c / (float)BC_COLS);
 
     padName = PsyX_Pad_ConnectedControllerName();
     padType = PsyX_Pad_ConnectedControllerType();
@@ -1226,7 +888,7 @@ void Pc_BindPanel_Draw(void)
     }
 
     /* Which binds these are, and which controller is live. */
-    if (s_scheme)
+    if (BindCore_Scheme())
         snprintf(line, sizeof(line), "%s", Pc_LangQuickFill("Editing: alternate camera binds (current camera: {camera})",
                                                             "{camera}", Pc_LangQuick(Pc_ControlStyleLabel(s_style))));
     else
@@ -1241,9 +903,9 @@ void Pc_BindPanel_Draw(void)
 
     /* Column headings. */
     {
-        static const char* heads[BP_COLS + 1] = { "Action", "Keyboard", "Keyboard 2", "Controller", "Controller 2" };
+        static const char* heads[BC_COLS + 1] = { "Action", "Keyboard", "Keyboard 2", "Controller", "Controller 2" };
         float hy = panelT - titleH - 2.0f * subH - headH * 0.5f;
-        for (c = 0; c <= BP_COLS; c++)
+        for (c = 0; c <= BC_COLS; c++)
             TEXT_AT(bp_text(Pc_LangQuick(heads[c]), pxRow), colX[c] + pad * 0.4f, hy, 0.62f, 0.62f, 0.68f);
         bp_quad(s_texWhite, NX(listL), NY(listT + 1.0f), NX(listR), NY(listT), 1.0f, 1.0f, 1.0f, 0.14f * dim);
     }
@@ -1256,7 +918,7 @@ void Pc_BindPanel_Draw(void)
         float rt = listT - (float)shown * rowH;
         float rb = rt - rowH;
         float ym = (rt + rb) * 0.5f;
-        int   enabled = bp_row_enabled(i);
+        int   enabled = BindCore_RowEnabled(i);
         int   selRow  = (i == s_row);
 
         if (s_geoRows < 64)
@@ -1286,10 +948,10 @@ void Pc_BindPanel_Draw(void)
 
         {
             float lc = enabled ? 0.88f : 0.42f;
-            TEXT_AT(bp_text(Pc_LangQuick(s_rows[i].label), pxRow), colX[0] + pad * 0.4f, ym, lc, lc * 0.97f, lc * 0.94f);
+            TEXT_AT(bp_text(Pc_LangQuick(BindCore_Row(i)->label), pxRow), colX[0] + pad * 0.4f, ym, lc, lc * 0.97f, lc * 0.94f);
         }
 
-        for (c = 0; c < BP_COLS; c++)
+        for (c = 0; c < BC_COLS; c++)
         {
             float       cl = colX[c + 1], cr = colX[c + 2];
             int         selCell = selRow && (c == s_col);
@@ -1302,11 +964,11 @@ void Pc_BindPanel_Draw(void)
                         0.42f, 0.16f, 0.12f, 0.85f * dim);
             }
             if (selCell && s_listen)
-                txt = Pc_LangQuick((c >= BP_PAD1) ? "Press a button..." : "Press a key...");
+                txt = Pc_LangQuick((c >= BC_PAD1) ? "Press a button..." : "Press a key...");
             else
                 txt = bp_cell_text(i, c, padType);
 
-            if (s_rows[i].key[c] == NULL || !enabled)
+            if (BindCore_Row(i)->key[c] == NULL || !enabled)
             {
                 r = g = b = 0.42f;
             }
@@ -1314,7 +976,7 @@ void Pc_BindPanel_Draw(void)
             {
                 r = g = b = 0.50f;
             }
-            else if (!(selCell && s_listen) && bp_is_duplicate(i, c))
+            else if (!(selCell && s_listen) && BindCore_IsDuplicate(i, c))
             {
                 r = 1.0f; g = 0.72f; b = 0.30f;
             }
@@ -1338,18 +1000,18 @@ void Pc_BindPanel_Draw(void)
         const char* hint2 = NULL;
         if (s_listen && s_row < BP_ROWS)
         {
-            if (s_col >= BP_PAD1)
+            if (s_col >= BC_PAD1)
             {
                 snprintf(line, sizeof(line), "%s", Pc_LangQuickFill("Press a controller button for {action}", "{action}",
-                                                                    Pc_LangQuick(s_rows[s_row].label)));
+                                                                    Pc_LangQuick(BindCore_Row(s_row)->label)));
                 hint2 = Pc_LangQuick("Esc, or wait a few seconds, to cancel");
             }
             else
             {
                 snprintf(line, sizeof(line), "%s",
-                         Pc_LangQuickFill((s_rows[s_row].flags & BPF_MOUSE) ? "Press a key or mouse button for {action}"
+                         Pc_LangQuickFill((BindCore_Row(s_row)->flags & BCF_MOUSE) ? "Press a key or mouse button for {action}"
                                                                             : "Press a key for {action}",
-                                          "{action}", Pc_LangQuick(s_rows[s_row].label)));
+                                          "{action}", Pc_LangQuick(BindCore_Row(s_row)->label)));
                 hint2 = Pc_LangQuick("Esc to cancel");
             }
             hint = line;
@@ -1368,7 +1030,7 @@ void Pc_BindPanel_Draw(void)
 
     /* Publish geometry for Update's mouse hit-test. */
     s_vpW = vpW; s_vpH = vpH;
-    for (c = 0; c <= BP_COLS; c++) { s_geoColL[c] = colX[c]; s_geoColR[c] = colX[c + 1]; }
+    for (c = 0; c <= BC_COLS; c++) { s_geoColL[c] = colX[c]; s_geoColR[c] = colX[c + 1]; }
     s_geoListL = listL;
     s_geoListR = listR;
     s_geoValid = (s_phase == BP_SHOWN);

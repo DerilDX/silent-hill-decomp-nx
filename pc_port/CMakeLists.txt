@@ -842,4 +842,11 @@ if(BUILD_TESTING)
         src/pc_ach_model.c)
     target_include_directories(pc_ach_model_test PRIVATE include)
     add_test(NAME pc_ach_model_test COMMAND pc_ach_model_test)
+
+    # Bind table logic (rows, usable cells, duplicates, set, toast text).
+    add_executable(pc_bind_core_test
+        tests/pc_bind_core_test.c
+        src/pc_bind_core.c)
+    target_include_directories(pc_bind_core_test PRIVATE include)
+    add_test(NAME pc_bind_core_test COMMAND pc_bind_core_test)
 endif()
