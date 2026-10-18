@@ -128,6 +128,46 @@ static void test_confirm(void)
     NmConfirm_Open(&c); in = (NmInput){0}; in.cancel = 1; assert(NmConfirm_Update(&c, &in) == NM_CONFIRM_NO);
 }
 
+enum { T_LOAD, T_CONT, T_START, T_OPTION, T_ACH, T_EXIT, T_COUNT };
+#define TB(e) (1u << (e))
+
+static void test_title_layout_retail_full(void)
+{
+    int order[T_COUNT];
+    int n = Nm_CompactRows(TB(T_LOAD) | TB(T_CONT) | TB(T_START) | TB(T_OPTION) | TB(T_EXIT), T_COUNT, order);
+    assert(n == 5 && Nm_SlotBase(n, 5) == 0);
+    assert(order[0] == T_LOAD && order[1] == T_CONT && order[2] == T_START &&
+           order[3] == T_OPTION && order[4] == T_EXIT);
+}
+static void test_title_layout_retail_nosave(void)
+{
+    int order[T_COUNT];
+    int n = Nm_CompactRows(TB(T_START) | TB(T_OPTION) | TB(T_EXIT), T_COUNT, order);
+    assert(n == 3 && Nm_SlotBase(n, 5) == 2);
+    assert(order[0] == T_START && 184 + (Nm_SlotBase(n, 5) + 0) * 20 == 224);
+}
+static void test_title_layout_nosave_ach(void)
+{
+    int order[T_COUNT];
+    int n = Nm_CompactRows(TB(T_START) | TB(T_OPTION) | TB(T_ACH) | TB(T_EXIT), T_COUNT, order);
+    assert(n == 4 && Nm_SlotBase(n, 5) == 1);
+    assert(order[0] == 2 && order[1] == 3 && order[2] == 4 && order[3] == 5);
+}
+static void test_title_layout_scroll(void)
+{
+    int      order[T_COUNT];
+    NmScroll s;
+    int      n = Nm_CompactRows(0x3Fu, T_COUNT, order), base;
+    assert(n == 6);
+    base = Nm_SlotBase(n, 5);
+    assert(base == 0);
+    NmScroll_Init(&s, n, n < 5 ? n : 5);
+    NmScroll_Select(&s, 5);
+    assert(order[5] == T_EXIT && s.top == 1);
+    assert(base + 5 - s.top == 4);
+    assert(order[0 - base + s.top] == T_CONT);
+}
+
 int main(void)
 {
     test_scroll_follow();
@@ -141,6 +181,10 @@ int main(void)
     test_date();
     test_page();
     test_confirm();
+    test_title_layout_retail_full();
+    test_title_layout_retail_nosave();
+    test_title_layout_nosave_ach();
+    test_title_layout_scroll();
     printf("pc_native_menu_test: all passed\n");
     return 0;
 }

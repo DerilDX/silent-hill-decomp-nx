@@ -2092,10 +2092,6 @@ void DbgOverlay_Render(void)
      * drawn before the quick menu so the menu stays on top. */
     { extern void Pc_FpsHud_Draw(void); Pc_FpsHud_Draw(); }
 
-    /* Main-menu achievement browser — same self-contained-GL arrangement as the
-     * toast above, and drawn after it so an unlock popup stays on top. */
-    { extern void Pc_RaBrowser_Draw(void); Pc_RaBrowser_Draw(); }
-
     /* In-game randomizer settings panel — same self-contained-GL arrangement,
      * opened by tapping the Map button during a run. */
     { extern void Pc_RandoSettings_Draw(void); Pc_RandoSettings_Draw(); }

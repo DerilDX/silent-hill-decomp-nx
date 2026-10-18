@@ -25,7 +25,6 @@
 #include <ctype.h>
 
 #include "pc_retroachievements.h"
-#include "pc_ra_browser.h"
 #include "pc_ach_screen.h"
 
 #ifdef SH_RETROACHIEVEMENTS
@@ -1318,14 +1317,12 @@ void Pc_Ra_Update(void)
         {
             /* Badge PNG: hand the bytes to whoever asked. Offered to EVERY
              * consumer unconditionally — each ignores a name it has no row or
-             * toast waiting on — because the browser and an unlock popup can
+             * toast waiting on — because the achievements screen and an unlock popup can
              * legitimately want the same badge at the same time. */
             if (done->status == 200 && done->body && done->body_len)
             {
                 Pc_RaToast_ProvideBadge(done->badge,
                                         (const unsigned char*)done->body, done->body_len);
-                Pc_RaBrowser_ProvideBadge(done->badge,
-                                          (const unsigned char*)done->body, done->body_len);
                 Pc_AchScreen_ProvideBadge(done->badge,
                                           (const unsigned char*)done->body, done->body_len);
             }

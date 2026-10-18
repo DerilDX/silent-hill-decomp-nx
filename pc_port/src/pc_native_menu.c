@@ -313,3 +313,18 @@ NmConfirmResult NmConfirm_Update(NmConfirm* c, const NmInput* in)
     }
     return NM_CONFIRM_PENDING;
 }
+
+/* ---- title layout ------------------------------------------------------ */
+
+int Nm_CompactRows(unsigned visibleFlags, int entryCount, int order[])
+{
+    int i, n = 0;
+    for (i = 0; i < entryCount; i++)
+        if (visibleFlags & (1u << i)) order[n++] = i;
+    return n;
+}
+
+int Nm_SlotBase(int n, int windowSlots)
+{
+    return n <= windowSlots ? windowSlots - n : 0;
+}

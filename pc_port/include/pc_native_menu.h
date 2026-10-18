@@ -47,4 +47,9 @@ typedef struct { int open, yes; } NmConfirm;
 void            NmConfirm_Open(NmConfirm* c);
 NmConfirmResult NmConfirm_Update(NmConfirm* c, const NmInput* in);
 
+/* Title menu: visible entry ids (bit i of visibleFlags) in order; returns n.
+ * Slot base bottom-aligns a list that fits the window, as retail does. */
+int Nm_CompactRows(unsigned visibleFlags, int entryCount, int order[]);
+int Nm_SlotBase(int n, int windowSlots);
+
 #endif
