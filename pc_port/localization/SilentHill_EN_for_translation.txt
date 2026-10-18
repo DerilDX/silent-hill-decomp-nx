@@ -4,7 +4,7 @@
  Every visible in-game English string that is NOT baked into an image:
  story/cutscene dialogue, examine/pickup prompts, the original menus, the PC
  port's own menus (PC Options, the F10 Quick Options menu, the Controls
- panel), item names and item descriptions.  Total entries: 1896.
+ panel), item names and item descriptions.  Total entries: 1938.
 
  HOW TO USE
  ----------
@@ -302,6 +302,201 @@ TR:
 [MENU.TYPE_3]
 NOTE: controller preset name
 EN: TYPE 3
+TR: 
+
+[MENU.ACHIEVEMENTS]
+NOTE: title menu row and Achievements screen heading
+EN: ACHIEVEMENTS
+TR: 
+
+[MENU.UNLOCKED]
+NOTE: Achievements screen, ": <date and time>" follows on the same line; max ~9 characters
+EN: UNLOCKED
+TR: 
+
+[MENU.LOCKED]
+NOTE: Achievements screen, an achievement not yet earned
+EN: LOCKED
+TR: 
+
+[MENU.Point]
+NOTE: Achievements screen, after "1"
+EN: Point
+TR: 
+
+[MENU.Points]
+NOTE: Achievements screen, after any other number; an abbreviation is fine
+EN: Points
+TR: 
+
+[MENU.points]
+NOTE: Achievements screen counter "(12/400 points)"; an abbreviation is fine
+EN: points
+TR: 
+
+[MENU.Gamepad_Icons]
+NOTE: Controls screen row; its value (Original / Xbox / Nintendo) shares the line
+EN: Gamepad Icons
+TR: 
+
+[MENU.Original]
+NOTE: Gamepad Icons value: the PlayStation icons
+EN: Original
+TR: 
+
+[MENU.Xbox]
+NOTE: Gamepad Icons value (brand name)
+EN: Xbox
+TR: 
+
+[MENU.Nintendo]
+NOTE: Gamepad Icons value (brand name)
+EN: Nintendo
+TR: 
+
+[MENU.Function]
+NOTE: Controls screen column heading over the action names; max ~12 characters
+EN: Function
+TR: 
+
+[MENU.Keyboard]
+NOTE: Controls screen column heading; max ~9 characters
+EN: Keyboard
+TR: 
+
+[MENU.Controller]
+NOTE: Controls screen column heading; max ~8 characters
+EN: Controller
+TR: 
+
+[MENU.Reset]
+NOTE: Controls screen row: reset every bind to its default
+EN: Reset
+TR: 
+
+[MENU.Reset_controls?]
+NOTE: Controls screen confirm question, Yes / No below
+EN: Reset controls?
+TR: 
+
+[MENU.Yes]
+NOTE: confirm answer
+EN: Yes
+TR: 
+
+[MENU.No]
+NOTE: confirm answer
+EN: No
+TR: 
+
+[MENU.Move_Up]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Move Up
+TR: 
+
+[MENU.Move_Down]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Move Down
+TR: 
+
+[MENU.Turn_Left]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Turn Left
+TR: 
+
+[MENU.Turn_Right]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Turn Right
+TR: 
+
+[MENU.Action_/_Shoot]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Action / Shoot
+TR: 
+
+[MENU.Run]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Run
+TR: 
+
+[MENU.Sidestep_Left]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Sidestep Left
+TR: 
+
+[MENU.Sidestep_Right]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Sidestep Right
+TR: 
+
+[MENU.View]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: View
+TR: 
+
+[MENU.Aim]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Aim
+TR: 
+
+[MENU.Pause]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Pause
+TR: 
+
+[MENU.Inventory]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Inventory
+TR: 
+
+[MENU.Reload]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Reload
+TR: 
+
+[MENU.Cycle_Weapons]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Cycle Weapons
+TR: 
+
+[MENU.Quick_Heal]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Quick Heal
+TR: 
+
+[MENU.Quick_Turn]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Quick Turn
+TR: 
+
+[MENU.Rear_Look]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Rear Look
+TR: 
+
+[MENU.Change_Camera]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Change Camera
+TR: 
+
+[MENU.Swap_Shoulder]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Swap Shoulder
+TR: 
+
+[MENU.Quick_Options]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Quick Options
+TR: 
+
+[MENU.Quick_Save]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Quick Save
+TR: 
+
+[MENU.Quick_Load]
+NOTE: Controls screen action, a colon follows; max ~12 characters
+EN: Quick Load
 TR: 
 
 [MENU.LOAD]
@@ -647,10 +842,6 @@ TR:
 
 [MENU.Unequip]
 EN: Unequip
-TR: 
-
-[MENU.Reload]
-EN: Reload
 TR: 
 
 [MENU.Detail]
@@ -1328,6 +1519,11 @@ NOTE: row name
 EN: Dream Blur Strength
 TR: 
 
+[QUICK.Crosshair_Style]
+NOTE: row name
+EN: Crosshair Style
+TR: 
+
 [QUICK.Speaker_Layout]
 NOTE: row name
 EN: Speaker Layout
@@ -1341,6 +1537,11 @@ TR:
 [QUICK.Effects_Volume]
 NOTE: row name
 EN: Effects Volume
+TR: 
+
+[QUICK.Dialog_Pause]
+NOTE: row name
+EN: Dialog Pause
 TR: 
 
 [QUICK.Disable_D-pad_for_Movement]
@@ -1406,6 +1607,11 @@ TR:
 [QUICK.Aim_Zoom]
 NOTE: row name
 EN: Aim Zoom
+TR: 
+
+[QUICK.Rest_Zoom]
+NOTE: row name
+EN: Rest Zoom
 TR: 
 
 [QUICK.Rest_X_(left/right)]
@@ -1632,6 +1838,11 @@ TR:
 [QUICK.Spawn]
 NOTE: cheat / debug row. Keep key names in brackets
 EN: Spawn
+TR: 
+
+[QUICK.FPS_Display]
+NOTE: cheat / debug row. Keep key names in brackets
+EN: FPS Display
 TR: 
 
 [QUICK.Log_Harry_position]

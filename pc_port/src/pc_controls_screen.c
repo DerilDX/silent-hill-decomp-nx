@@ -604,6 +604,11 @@ static void cs_row_draw(int row, int y)
     int         c;
 
     Nm_SanitizeGlyphs(BindCore_Row(row)->label, label, sizeof(label), 0);
+    /* Bare "Map" is the PC Options start-map row's key, which Japanese words
+     * as "start map". The leading space makes this row a key of its own and
+     * draws nothing in a right-aligned label. */
+    if (strcmp(label, "Map") == 0)
+        snprintf(label, sizeof(label), "_Map");
     shown = cs_fit(label, CS_LABEL_RX, fit, sizeof(fit));
     Nm_TextDrawRight(CS_LABEL_RX, y, NM_TEXT_TALL, color, shown);
     Nm_TextDraw(CS_LABEL_RX, y, NM_TEXT_TALL, color, ":");
