@@ -3,7 +3,9 @@
 
 #include <string.h>
 
+#include "bodyprog/bodyprog.h"
 #include "bodyprog/events/map_msg.h"
+#include "bodyprog/item_screens.h"
 #include "bodyprog/screen/screen_data.h"
 #include "bodyprog/text/text_draw.h"
 #include "screens/options.h"
@@ -12,6 +14,7 @@
 #include "pc_native_menu_draw.h"
 
 #define NM_OT_ARROW 10 /* LAYER_40 in options.c */
+#define NM_OT_SHADE 9  /* LAYER_36 in options.c */
 #define NM_OT_TEXT  8
 #define NM_OT_RULE  6  /* LAYER_24 in options.c */
 #define NM_OT_BACK  15
@@ -61,7 +64,6 @@ void Nm_TextDraw(int x, int y, int size, int color, const char* s)
 
     g_SysWork.enableHighResGlyphs = false;
     Gfx_StringsReset2dLayerIdx();
-    Gfx_StringSetColor(StringColorId_White);
 }
 
 int Nm_TextWidth(const char* s)
@@ -127,7 +129,33 @@ void Nm_HighlightDraw(int x0, int x1, int yBottom)
     line.vertex0.vy = nm_py(yBottom);
     line.vertex1.vx = nm_px(x1);
     line.vertex1.vy = line.vertex0.vy;
-    Options_Selection_HighlightDraw(&line, true, false);
+
+    if (!nm_interlaced())
+    {
+        Options_Selection_HighlightDraw(&line, true, false);
+        return;
+    }
+
+    /* The helper's shadow is a fixed 16 prim px, half a TALL row on the
+     * 448-line screen; same quad, colours and blend, at the doubled height. */
+    Options_Selection_HighlightDraw(&line, false, false);
+    {
+        POLY_G4* poly = (POLY_G4*)GsOUT_PACKET_P;
+        s16      top  = nm_py(yBottom - 16);
+
+        setPolyG4(poly);
+        setSemiTrans(poly, true);
+        setRGB0(poly, 0, 0, 0);
+        setRGB1(poly, Q8_COLOR(0.375f), Q8_COLOR(0.375f), Q8_COLOR(0.375f));
+        setRGB2(poly, 0, 0, 0);
+        setRGB3(poly, Q8_COLOR(0.375f), Q8_COLOR(0.375f), Q8_COLOR(0.375f));
+        setXY4(poly, line.vertex0.vx, top, line.vertex0.vx, line.vertex0.vy,
+               line.vertex1.vx, top, line.vertex1.vx, line.vertex1.vy);
+        addPrim(nm_ot(NM_OT_SHADE), poly);
+        GsOUT_PACKET_P = (PACKET*)(poly + 1);
+
+        Gfx_Primitive2dTextureSet(0, 0, NM_OT_SHADE, 2);
+    }
 }
 
 static void nm_quad(s_Quad2d* q, int x0, int y0, int x1, int y1)
@@ -226,13 +254,15 @@ void Nm_SpriteDraw(int x, int y, int w, int h, u16 clut, u8 rgb)
 void NmInput_FromGame(NmInput* out)
 {
     const s_ControllerConfig* cfg = &g_GameWorkPtr->config.controllerConfig;
-    /* The mouse reports its own clicks and wheel below; its bound pad bits
-     * would make one click act twice (see saveload.c). */
-    u32 mouseBits = Pc_MouseCursor_BoundPadBits();
+    int mx = 0;
+    int my = 0;
+    /* While the cursor is live the mouse reports its own clicks and wheel below,
+     * so its bound pad bits would make one click act twice (see saveload.c).
+     * With the cursor off those fields stay 0 and the binds are the only path. */
+    int mouseOk = Pc_MouseCursor_UiPos(&mx, &my);
+    u32 mouseBits = mouseOk ? Pc_MouseCursor_BoundPadBits() : 0;
     u32 pulsed    = g_Controller0->pulsedBtnFlags & ~mouseBits;
     u32 clicked   = g_Controller0->clickedBtnFlags & ~mouseBits;
-    int mx;
-    int my;
 
     memset(out, 0, sizeof(*out));
     out->up      = (pulsed & ControllerFlag_LStickUp) != 0;
@@ -243,7 +273,7 @@ void NmInput_FromGame(NmInput* out)
     out->cancel  = (clicked & cfg->cancel) != 0;
     out->wheel   = Pc_MouseCursor_WheelNotches();
 
-    if (Pc_MouseCursor_UiPos(&mx, &my))
+    if (mouseOk)
     {
         out->mouseOk = 1;
         out->mouseX  = mx;
