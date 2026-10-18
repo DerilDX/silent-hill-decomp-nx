@@ -828,4 +828,11 @@ if(BUILD_TESTING)
         "${DECOMP_DIR}/include" "${DECOMP_DIR}/include/decomp"
         "${PSYCROSS_DIR}/include/psx" "${PSYCROSS_DIR}/include")
     add_test(NAME pc_big_tmd_test COMMAND pc_big_tmd_test)
+
+    # Renderer-free native menu core (scroll, text fitting, row page).
+    add_executable(pc_native_menu_test
+        tests/pc_native_menu_test.c
+        src/pc_native_menu.c)
+    target_include_directories(pc_native_menu_test PRIVATE include)
+    add_test(NAME pc_native_menu_test COMMAND pc_native_menu_test)
 endif()
