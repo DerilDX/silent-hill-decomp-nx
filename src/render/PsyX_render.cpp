@@ -258,6 +258,11 @@ RECT16 g_PreviousOffscreen = { 0,0,0,0 };
 ShaderID g_PreviousShader = -1;
 
 TextureID g_vramTexturesDouble[2];
+/* VRAM textures whose feedback rects are known blank (GR_ClearAllFeedbackRects),
+ * and the rects they were blanked for. */
+static TextureID s_fbBlankTex[2];
+static int       s_fbBlankKey[13];
+static inline void GR_NoteVramTextureWrite(void) { s_fbBlankTex[0] = s_fbBlankTex[1] = 0; }
 TextureID g_vramTexture;
 int g_vramTextureIdx = 0;
 
@@ -1979,8 +1984,9 @@ void GR_BeginScene()
 	else
 		glClearDepthf(1.0f);
 #endif
-	glClear(GL_DEPTH_BUFFER_BIT);
-	glClear(GL_STENCIL_BUFFER_BIT);
+	/* One clear: a packed depth-stencil buffer clears both together, while a
+	 * stencil-only clear can take a slow read-modify-write path on iGPUs. */
+	glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 #endif
 
 	GR_UpdateVRAM();
@@ -3625,6 +3631,7 @@ int GR_InitialisePSX()
 		glGenFramebuffers(1, &g_glVRAMFramebuffer);
 		{
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+			GR_NoteVramTextureWrite();
 
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
@@ -4558,6 +4565,7 @@ static void GR_UploadVramRect(int x, int y, int w, int h)
 	{
 		glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[t]);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, VRAM_FORMAT, GL_UNSIGNED_BYTE, s_packed);
+		GR_NoteVramTextureWrite();
 	}
 	glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
 #endif
@@ -5275,6 +5283,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		// before drawing set source and target
 		{
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+			GR_NoteVramTextureWrite();
 
 			// rebind texture
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
@@ -5282,6 +5291,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			// setup draw and read framebuffers
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glOffscreenFramebuffer);					// source is backbuffer
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+			GR_NoteVramTextureWrite();
 
 			glBlitFramebuffer(0, 0, g_PreviousOffscreen.w, g_PreviousOffscreen.h,
 								g_PreviousOffscreen.x, g_PreviousOffscreen.y + g_PreviousOffscreen.h, g_PreviousOffscreen.x + g_PreviousOffscreen.w, g_PreviousOffscreen.y,
@@ -5999,10 +6009,14 @@ void GR_CaptureLastFrame(void)
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		g_freezeFrameValid = 0;
+
+		/* Attached only when the storage changes: re-attaching every frame
+		 * made the driver revalidate the FBO on each capture. */
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
 	}
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
-	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
@@ -6355,6 +6369,7 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 	glGetIntegerv(GL_VIEWPORT, vp);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+	GR_NoteVramTextureWrite();
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
 	GR_Viewport(x, y, w, h);
 
@@ -6485,11 +6500,38 @@ static void GR_ClearAllFeedbackRects(void)
 	if (!g_psxDispBufValid)
 		return;
 
+	/* Runs every present while the feedback store is off, but the rects stay
+	 * blank until something writes VRAM again (GR_NoteVramTextureWrite), so
+	 * repeat the 2-3 framebuffer switches only after a write, a texture swap,
+	 * or a change of rects. */
+	{
+		const int redirect = (g_sceneFbRedirectTtl > 0);
+		const int key[13] = {
+			g_psxDispBuf[0].x, g_psxDispBuf[0].y, g_psxDispBuf[0].w, g_psxDispBuf[0].h,
+			g_psxDispBuf[1].x, g_psxDispBuf[1].y, g_psxDispBuf[1].w, g_psxDispBuf[1].h,
+			redirect,
+			redirect ? g_sceneFbRedirect.x : 0, redirect ? g_sceneFbRedirect.y : 0,
+			redirect ? g_sceneFbRedirect.w : 0, redirect ? g_sceneFbRedirect.h : 0 };
+
+		if (memcmp(key, s_fbBlankKey, sizeof(key)) != 0)
+		{
+			memcpy(s_fbBlankKey, key, sizeof(key));
+			s_fbBlankTex[0] = s_fbBlankTex[1] = 0;
+		}
+		if (g_vramTexture != 0 && (s_fbBlankTex[0] == g_vramTexture || s_fbBlankTex[1] == g_vramTexture))
+			return;
+	}
+
 	GR_ClearVramRect(g_psxDispBuf[0].x, g_psxDispBuf[0].y, g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 	GR_ClearVramRect(g_psxDispBuf[1].x, g_psxDispBuf[1].y, g_psxDispBuf[1].w, g_psxDispBuf[1].h);
 
 	if (g_sceneFbRedirectTtl > 0)
 		GR_ClearVramRect(g_sceneFbRedirect.x, g_sceneFbRedirect.y, g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+
+	if (s_fbBlankTex[0] == 0)
+		s_fbBlankTex[0] = g_vramTexture;
+	else
+		s_fbBlankTex[1] = g_vramTexture;
 }
 
 /* Capture the frame as rendered so far into the (w x h) pack texture, mapped so
@@ -6881,6 +6923,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 		// before drawing set source and target
 		glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+		GR_NoteVramTextureWrite();
 
 		// rebind vram texture
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
@@ -6888,6 +6931,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 		// setup draw and read framebuffers
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glBlitFramebuffer);					// source is backbuffer
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+		GR_NoteVramTextureWrite();
 
 		glBlitFramebuffer(0, 0, w, h,
 			x, y + h, x + w, y,
@@ -6958,10 +7002,12 @@ static void GR_RestoreStoredFramebufferRegion(void)
 		return;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+	GR_NoteVramTextureWrite();
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glBlitFramebuffer);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+	GR_NoteVramTextureWrite();
 
 	glBlitFramebuffer(0, 0, w, h,
 		x, y + h, x + w, y,
@@ -7061,6 +7107,7 @@ void GR_UpdateVRAM()
 	glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
 #else
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
+	GR_NoteVramTextureWrite();
 #endif
 
 	GR_RestoreStoredFramebufferRegion();
@@ -7112,6 +7159,7 @@ void GR_DirectUploadVRAMRegion(int x, int y, int w, int h)
 	{
 		glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[i]);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, VRAM_FORMAT, GL_UNSIGNED_BYTE, block);
+		GR_NoteVramTextureWrite();
 	}
 	glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
 
