@@ -1918,6 +1918,7 @@ struct GPUDrawSplit
 	int				overrideHiresH;
 
 	int				isGlyph; /* see g_PsyX_TextGlyphTest */
+	int				mixed;   /* drawn with the all-format program (g_gte_shader_mix) */
 
 	const char*		debugText;
 };
@@ -2389,6 +2390,16 @@ static inline void SetUvLimits(GrVertex* vertex, int count)
 	}
 }
 
+/* Vertex page: tpage X/Y (bits 0-4) plus the tpage format (bits 7-8) moved to
+ * bits 5-6, so the all-format program can pick its sampler per vertex. The
+ * per-format programs only read bits 0-4. Untextured prims use
+ * TEXCOORD_PAGE_UNTEXTURED. */
+#define TEXCOORD_PAGE_UNTEXTURED 0x80
+static inline short TexcoordPage(int tpage)
+{
+	return (short)((tpage & 0x1F) | (((tpage >> 7) & 0x3) << 5));
+}
+
 void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, unsigned char* uv3, short page, short clut, unsigned char dither)
 {
 	assert(uv0);
@@ -2397,8 +2408,7 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv3);
 
 	const unsigned char bright = 2;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -2453,8 +2463,7 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv2);
 
 	const unsigned char bright = 2;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -2524,8 +2533,7 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv[0];
 	vertex[0].v = uv[1];
@@ -2608,28 +2616,28 @@ void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 
 	vertex[3].u = 0;
 	vertex[3].v = 0;
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = 0;
+	vertex[3].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[3].clut = 0;
 }
 
@@ -2641,21 +2649,21 @@ void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 }
 
@@ -2667,28 +2675,28 @@ void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 
 	vertex[3].u = 0;
 	vertex[3].v = 0;
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = 0;
+	vertex[3].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[3].clut = 0;
 }
 
@@ -3086,6 +3094,9 @@ static int PgxpEmitPoly(GrVertex* v, int count)
 
 //------------------------------------------------------------------------------------------------------------------------
 
+/* Console `mixshader 0|1`. Ok is set at startup only if the program built. */
+extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
@@ -3108,6 +3119,16 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	 * global: an ungated read would key untextured/white splits on override
 	 * state they never sample, fragmenting them once normal maps exist. */
 	TextureID normalTextureId = (textured && overrideTexture != 0) ? overrideNormalTexture : 0;
+
+	/* Every VRAM format and untextured prims share one program, so only a
+	 * hi-res override (its own texture) still splits on texture. Tpage format
+	 * 3 is reserved and keeps its old path. */
+	const int mixed = (g_PsxMixedShader && g_PsxMixedShaderOk && (!textured || texFormat <= TF_16_BIT)) ? 1 : 0;
+	if (mixed)
+	{
+		texFormat = TF_16_BIT;
+		textureId = g_vramTexture;
+	}
 
 	// FIXME: compare drawing environment too?
 	if (curSplit.kind == GPU_SPLIT_LEGACY &&
@@ -3132,6 +3153,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		curSplit.drawenv.clip.h == activeDrawEnv.clip.h &&
 		curSplit.drawenv.dfe == activeDrawEnv.dfe &&
 		curSplit.isGlyph == (textured ? s_curPrimIsGlyph : 0) &&
+		curSplit.mixed == mixed &&
 		curSplit.debugText == currentSplitDebugText)
 	{
 		return;
@@ -3166,6 +3188,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
 	split.isGlyph   = textured ? s_curPrimIsGlyph : 0;
+	split.mixed     = mixed;
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
@@ -3265,7 +3288,10 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetStencilMode(split.drawPrimMode);	// draw with mask 0x16
 
 	g_PsxSplitIsGlyph = split.isGlyph;
-	GR_SetTexture(split.textureId, split.texFormat);
+	if (split.mixed)
+		GR_SetTextureMixed(split.textureId);
+	else
+		GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,

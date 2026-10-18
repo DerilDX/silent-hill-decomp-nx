@@ -342,6 +342,8 @@ extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);
 extern void			GR_SetViewPort(int x, int y, int width, int height);
 extern void			GR_SetTexture(TextureID texture, TexFormat texFormat);
+extern void			GR_SetTextureMixed(TextureID texture);
+extern void			GR_InvalidateViewScissorCache(void);
 extern void			GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY, int hiresW, int hiresH);
 extern void			GR_SetWireframe(int enable);
 
