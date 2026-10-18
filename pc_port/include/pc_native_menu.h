@@ -51,5 +51,7 @@ NmConfirmResult NmConfirm_Update(NmConfirm* c, const NmInput* in);
  * Slot base bottom-aligns a list that fits the window, as retail does. */
 int Nm_CompactRows(unsigned visibleFlags, int entryCount, int order[]);
 int Nm_SlotBase(int n, int windowSlots);
+/* Compact index drawn on a window slot, or -1 when that slot is empty. */
+int Nm_SlotToIndex(int slot, int base, int top, int n);
 
 #endif

@@ -37,6 +37,8 @@ const char* Pc_Ra_StatusLine(void);
 const char* Pc_Ra_UnavailableReason(void);
 /* 1 when a set is loaded and Pc_Ra_SnapshotAchievements can return it. */
 int Pc_Ra_SetLoaded(void);
+/* 1 while login or the set load is still in flight, so the reason is not final. */
+int Pc_Ra_IsPending(void);
 
 /* One achievement, flattened out of rcheevos so UI TUs need no rcheevos
  * headers. Sizes follow RA's own limits with room to spare. */

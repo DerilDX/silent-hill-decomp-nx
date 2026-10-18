@@ -232,6 +232,11 @@ int Pc_AchScreen_IsOpen(void)
     return s_open;
 }
 
+void Pc_AchScreen_Close(void)
+{
+    s_open = 0;
+}
+
 static int ach_back_right(void)
 {
     return ACH_BACK_X + NM_BULLET_TEXT_DX + Nm_TextWidth("Back");
@@ -401,7 +406,7 @@ int Pc_AchScreen_Update(const NmInput* in)
     }
     else if (!ach_update_list(in))
     {
-        s_open = 0;
+        /* Stays open so the host can keep drawing it through its fade out. */
         return 0;
     }
 

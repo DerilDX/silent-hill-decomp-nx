@@ -269,16 +269,32 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
             {
                 g_MainMenu_VisibleEntryFlags |= 1 << MainMenuEntry_Achievements;
             }
-            else if (!achUnavailableToasted && g_PcConfig.retroAchievements)
+            else if (!achUnavailableToasted && g_PcConfig.retroAchievements && !Pc_Ra_IsPending())
             {
                 DbgOverlay_ToastLine(Pc_Ra_UnavailableReason());
                 achUnavailableToasted = true;
             }
 #endif
-            /* A set that unloads under the cursor; Exit is always visible. */
-            while (!(g_MainMenu_VisibleEntryFlags & (1 << g_MainMenu_SelectedEntry)))
+            /* A set that unloads under the cursor. Upward, so the cursor lands on
+             * Option rather than on Exit, where the next confirm quits. */
             {
-                g_MainMenu_SelectedEntry++;
+                s32 entry = g_MainMenu_SelectedEntry;
+
+                while (entry >= 0 && !(g_MainMenu_VisibleEntryFlags & (1 << entry)))
+                {
+                    entry--;
+                }
+
+                if (entry < 0)
+                {
+                    entry = g_MainMenu_SelectedEntry;
+                    while (!(g_MainMenu_VisibleEntryFlags & (1 << entry)))
+                    {
+                        entry++;
+                    }
+                }
+
+                g_MainMenu_SelectedEntry = entry;
             }
 #endif
 
@@ -328,14 +344,15 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
                     {
                         /* Same 3 px lead-in above the glyph top as Pc_MouseCursor_MenuRowHover. */
                         s32 top = rowY + (slot * MAINMENU_ROW_PITCH) - 3;
+                        s32 idx = Nm_SlotToIndex(slot, base, s_MainMenu_Scroll.top, s_MainMenu_RowCount);
                         s32 row;
 
-                        if (my < top || my >= top + MAINMENU_ROW_PITCH)
+                        if (idx < 0 || my < top || my >= top + MAINMENU_ROW_PITCH)
                         {
                             continue;
                         }
 
-                        row = s_MainMenu_Order[slot - base + s_MainMenu_Scroll.top];
+                        row = s_MainMenu_Order[idx];
                         if (Pc_MouseCursor_LeftClicked())
                         {
                             g_MainMenu_SelectedEntry        = row;
@@ -639,6 +656,7 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
                 default:
                     if (ScreenFade_IsFinished())
                     {
+                        Pc_AchScreen_Close();
                         g_MainMenuState = MenuState_Main;
                         ScreenFade_Start(true, true, false);
                     }
@@ -757,14 +775,7 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
 #ifdef SH_PC_PORT
         if (g_MainMenuState == MenuState_Achievements && achStep != 0)
         {
-            if (Pc_AchScreen_IsOpen())
-            {
-                Pc_AchScreen_Draw();
-            }
-            else
-            {
-                Nm_BlackBackgroundDraw();
-            }
+            Pc_AchScreen_Draw();
             Pc_MouseCursor_Draw();
             return;
         }
@@ -845,14 +856,22 @@ static void MainMenu_MainTextDraw(void) // 0x8003B568
 #ifdef SH_PC_PORT
     s32 base;
     s32 rowY;
+    s32 slot;
 
     MainMenu_LayoutSync();
     base = Nm_SlotBase(s_MainMenu_RowCount, MAINMENU_WINDOW_SLOTS);
     rowY = MainMenu_RowY();
 
-    for (i = s_MainMenu_Scroll.top; i < s_MainMenu_Scroll.top + s_MainMenu_Scroll.visible; i++)
+    for (slot = base; slot < base + s_MainMenu_Scroll.visible; slot++)
     {
-        s32 id = s_MainMenu_Order[i];
+        s32 id;
+
+        i = Nm_SlotToIndex(slot, base, s_MainMenu_Scroll.top, s_MainMenu_RowCount);
+        if (i < 0)
+        {
+            continue;
+        }
+        id = s_MainMenu_Order[i];
 
         /* Translated entries have different widths — recentre from the
          * actual string ('[' is 6px wide); untranslated keeps the constant. */
@@ -865,7 +884,7 @@ static void MainMenu_MainTextDraw(void) // 0x8003B568
             s32         offX = (tr == MAIN_MENU_ENTRY_STRINGS[id] && id < MainMenuEntry_Achievements)
                                    ? STR_OFFSETS_X[id]
                                    : ((Pc_LangMenuTextWidth(tr) + 6) >> 1);
-            Gfx_StringSetPosition(COLUMN_POS_X - offX, rowY + ((base + i - s_MainMenu_Scroll.top) * STR_OFFSET_Y));
+            Gfx_StringSetPosition(COLUMN_POS_X - offX, rowY + (slot * MAINMENU_ROW_PITCH));
         }
         Gfx_StringSetColor(StringColorId_White);
 

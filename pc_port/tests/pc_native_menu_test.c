@@ -164,8 +164,16 @@ static void test_title_layout_scroll(void)
     NmScroll_Init(&s, n, n < 5 ? n : 5);
     NmScroll_Select(&s, 5);
     assert(order[5] == T_EXIT && s.top == 1);
-    assert(base + 5 - s.top == 4);
-    assert(order[0 - base + s.top] == T_CONT);
+    assert(Nm_SlotToIndex(4, base, s.top, n) == 5);
+    assert(order[Nm_SlotToIndex(0, base, s.top, n)] == T_CONT);
+}
+static void test_title_slot_to_index_bounds(void)
+{
+    assert(Nm_SlotToIndex(1, 2, 0, 3) == -1);
+    assert(Nm_SlotToIndex(2, 2, 0, 3) == 0);
+    assert(Nm_SlotToIndex(4, 2, 0, 3) == 2);
+    assert(Nm_SlotToIndex(5, 2, 0, 3) == -1);
+    assert(Nm_SlotToIndex(-1, 0, 1, 6) == -1);
 }
 
 int main(void)
@@ -185,6 +193,7 @@ int main(void)
     test_title_layout_retail_nosave();
     test_title_layout_nosave_ach();
     test_title_layout_scroll();
+    test_title_slot_to_index_bounds();
     printf("pc_native_menu_test: all passed\n");
     return 0;
 }

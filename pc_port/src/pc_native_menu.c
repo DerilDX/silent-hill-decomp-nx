@@ -328,3 +328,9 @@ int Nm_SlotBase(int n, int windowSlots)
 {
     return n <= windowSlots ? windowSlots - n : 0;
 }
+
+int Nm_SlotToIndex(int slot, int base, int top, int n)
+{
+    int idx = slot - base + top;
+    return (slot >= base && idx >= 0 && idx < n) ? idx : -1;
+}
