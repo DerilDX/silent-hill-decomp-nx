@@ -10,6 +10,7 @@
 #include <errno.h>
 #include "pc_config.h"
 #include "hires_override.h"
+#include "pc_pad_icons.h"
 #include "tex_pack.h"
 #include "texpack_lazy.h"
 #include "pc_big_lm.h"
@@ -1830,6 +1831,14 @@ bool Fs_QueuePostLoadTim(s_FsQueueEntry* entry)
     }
 
     HiresOverride_SetForceNearestUpload(0);
+
+    /* Last, so the chosen icon set wins over any loose or pack override the
+     * upload above registered for the same atlas. */
+    if (FSQ_INFO_VALID(entry->info) &&
+        (int)(entry->info - &g_FileTable[0]) == FILE_TIM_OPTION2_TIM)
+    {
+        PadIcons_Apply();
+    }
 #endif
 
     return true;

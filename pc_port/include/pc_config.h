@@ -180,6 +180,8 @@ typedef struct {
     int bulletDecals;     /* 1 = bullet-hole decals where player gunfire hits world geometry
                            * (gamedata/decal.png; up to 64 FIFO, cleared on map load)
                            * (config key: bullet_decals) */
+    int gamepadIcons;     /* e_PadIconSet: 0 Original, 1 Xbox, 2 Nintendo controller icons
+                           * (gamedata/icons/pad_*.png; config key: gamepad_icons) */
     int globalCharaPool;  /* 1 = global chara/asset pool: every monster's model+anim+texture stays
                            * resident PC-side (virtual GL texture slots) and chara_global.dll backfills
                            * AI update funcs, so console SPAWN works for every type in any map. Native

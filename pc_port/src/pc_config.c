@@ -4,6 +4,7 @@
 #include "pc_title_style.h"
 #include "lang_text.h"
 #include "pc_binds.h"
+#include "pc_pad_icons.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,7 @@ s_PcConfig g_PcConfig = {
                          * 240Hz menu moved them four times too fast (reported). */
     .lowHealthGlow = 0, /* 1=pulsing red edge glow below 20 hp (SH2 remake style); off by default */
     .bulletDecals = 0, /* 1=bullet-hole decals at player gunshot impacts (gamedata/decal.png); off by default */
+    .gamepadIcons = 0,
     .globalCharaPool = 1, /* 1=all chara assets resident PC-side + chara_global.dll AI backfill (SPAWN anything anywhere) */
     .wholeMapExteriors = 2, /* auto: whole town drawn while fog_strength < 1.0, the only time it can be seen */
     .usePgxp        = 0, /* 0=affine textures (PSX look), 1=PGXP perspective correct (WIP) */
@@ -755,6 +757,11 @@ void PcConfig_Load(const char* path)
         else if (strcmp(key, "bullet_decals") == 0)
         {
             g_PcConfig.bulletDecals = (atoi(value) != 0);
+        }
+        else if (strcmp(key, "gamepad_icons") == 0)
+        {
+            int set = atoi(value);
+            g_PcConfig.gamepadIcons = (set >= 0 && set < PAD_ICONS_COUNT) ? set : PAD_ICONS_ORIGINAL;
         }
         else if (strcmp(key, "whole_map_exteriors") == 0)
         {
