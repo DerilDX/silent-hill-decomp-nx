@@ -2129,6 +2129,14 @@ void Pc_ConsoleExec(const char* line)
         else if (arg[0] == '0') g_PsxWorldDepthAlways = 0;
         else g_PsxWorldDepthAlways = !g_PsxWorldDepthAlways;
         cprintf("world depth: %s", g_PsxWorldDepthAlways ? "ALWAYS (paint order)" : "LEQUAL (nearer wins)");
+    } else if (strcmp(cmd, "MIXSHADER") == 0) {
+        /* mixshader 0|1 -- A/B for the all-format PSX program, which lets
+         * prims of different texture formats share one draw call. */
+        extern int g_PsxMixedShader;
+        if (arg[0] == '1') g_PsxMixedShader = 1;
+        else if (arg[0] == '0') g_PsxMixedShader = 0;
+        else g_PsxMixedShader = !g_PsxMixedShader;
+        cprintf("mixed-format shader: %s", g_PsxMixedShader ? "ON (fewer draw calls)" : "OFF (one program per format)");
     } else if (strcmp(cmd, "FLMODE") == 0) {
         /* flmode 0..3 | classic | classicshadows | modern | modernshadows */
         int mode = g_PcConfig.flashlightMode;
