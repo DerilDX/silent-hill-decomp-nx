@@ -210,3 +210,37 @@ void BindCore_FormatRebindToast(int row, int col, char* out, size_t n)
     snprintf(out, n, "Changing %s input for %s", (col == BC_KB2 || col == BC_PAD2) ? "Secondary" : "Primary",
              r ? r->label : "");
 }
+
+void BindCore_DisplayKey(const char* v, char* out, size_t n)
+{
+    static const struct { const char* id; const char* name; } mouse[] = {
+        { "Mouse1", "L-Mouse" },      { "Mouse2", "R-Mouse" }, { "Mouse3", "M-Mouse" },
+        { "MouseWheelUp", "Wheel Up" }, { "MouseWheelDown", "Wheel Down" },
+    };
+    static const struct { const char* prefix; const char* repl; } prefixes[] = {
+        { "Left ", "L-" }, { "Right ", "R-" }, { "Keypad ", "KP " },
+    };
+    size_t i;
+
+    if (v == NULL)
+        v = "";
+    for (i = 0; i < sizeof(mouse) / sizeof(mouse[0]); i++)
+    {
+        if (bc_ieq(v, mouse[i].id))
+        {
+            snprintf(out, n, "%s", mouse[i].name);
+            return;
+        }
+    }
+    for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+    {
+        size_t len = strlen(prefixes[i].prefix);
+
+        if (strncmp(v, prefixes[i].prefix, len) == 0 && v[len] != '\0')
+        {
+            snprintf(out, n, "%s%s", prefixes[i].repl, v + len);
+            return;
+        }
+    }
+    snprintf(out, n, "%s", v);
+}

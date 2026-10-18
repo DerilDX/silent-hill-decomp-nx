@@ -126,12 +126,39 @@ static void test_bind_toast(void)
     assert(!strcmp(buf, "Changing Secondary input for Action / Shoot"));
 }
 
+static void test_bind_display_key(void)
+{
+    char buf[32];
+
+    BindCore_DisplayKey("Left Shift", buf, sizeof buf);
+    assert(!strcmp(buf, "L-Shift"));
+    BindCore_DisplayKey("Right Ctrl", buf, sizeof buf);
+    assert(!strcmp(buf, "R-Ctrl"));
+    BindCore_DisplayKey("Keypad Enter", buf, sizeof buf);
+    assert(!strcmp(buf, "KP Enter"));
+    BindCore_DisplayKey("Left", buf, sizeof buf);
+    assert(!strcmp(buf, "Left"));
+    BindCore_DisplayKey("Right", buf, sizeof buf);
+    assert(!strcmp(buf, "Right"));
+    BindCore_DisplayKey("mouse2", buf, sizeof buf);
+    assert(!strcmp(buf, "R-Mouse"));
+    BindCore_DisplayKey("Mouse4", buf, sizeof buf);
+    assert(!strcmp(buf, "Mouse4"));
+    BindCore_DisplayKey("MouseWheelDown", buf, sizeof buf);
+    assert(!strcmp(buf, "Wheel Down"));
+    BindCore_DisplayKey("Space", buf, 3);
+    assert(!strcmp(buf, "Sp"));
+    BindCore_DisplayKey(NULL, buf, sizeof buf);
+    assert(!strcmp(buf, ""));
+}
+
 int main(void)
 {
     test_bind_cell_usable();
     test_bind_duplicate();
     test_bind_set_altcam_key();
     test_bind_toast();
+    test_bind_display_key();
     puts("pc_bind_core_test: ok");
     return 0;
 }

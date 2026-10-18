@@ -1186,7 +1186,7 @@ void Pc_Options_ResetToDefaults(void)
 #ifdef SH_PC_PORT
 #include <SDL.h>
 #include "pc_confirm_dialog.h"
-#include "pc_bind_panel.h"
+#include "pc_controls_screen.h"
 
 /* Shared with the header draw: 1 while the reset dialog is up (label turns red). */
 int g_PcOptResetConfirmActive = 0;
@@ -4279,9 +4279,9 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
     static s_ControllerMenu_SelectedEntries selectedEntries;
 
 #ifdef SH_PC_PORT
-    /* PC: this screen is the in-game controls panel (pc_bind_panel.c), a GL
-     * overlay over the PSX layout. It opens once per visit, and the screen
-     * leaves the way EXIT does when the panel closes. The PSX actions pane
+    /* PC: this screen is the native Controls screen (pc_controls_screen.c),
+     * drawn in place of the PSX layout. It opens once per visit, and the screen
+     * leaves the way EXIT does when it closes. The PSX actions pane
      * only ever re-mapped PSX buttons onto game actions, which on PC sits
      * under the launcher's physical binds and only confused them. */
     {
@@ -4306,11 +4306,13 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
         {
             if (!s_bindPanelShown)
             {
-                Pc_BindPanel_Open();
+                Pc_ControlsScreen_Open();
                 s_bindPanelShown = 1;
             }
-            if (Pc_BindPanel_Update())
+            if (Pc_ControlsScreen_Update())
             {
+                Pc_ControlsScreen_Draw();
+                Pc_MouseCursor_Draw();
                 ScreenFade_Start(false, true, false);
                 g_Controller0->clickedBtnFlags   = 0;
                 g_Controller0->pulsedBtnFlags    = 0;

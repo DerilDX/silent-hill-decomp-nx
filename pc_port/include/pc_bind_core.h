@@ -36,5 +36,8 @@ int          BindCore_IsDuplicate(int row, int col);
 void         BindCore_Set(int row, int col, const char* value);
 void         BindCore_ResetScheme(void);
 void         BindCore_FormatRebindToast(int row, int col, char* out, size_t n);
+/* Short on-screen name for a keyboard-column value. Display only: the saved
+ * value is never changed. */
+void         BindCore_DisplayKey(const char* v, char* out, size_t n);
 
 #endif
