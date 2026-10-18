@@ -45,12 +45,10 @@ extern int g_DebugThirdPersonCam;
 #define CS_RULE_X1      316
 #define CS_TEXT_X       28
 #define CS_VALUE_RX     300
-#define CS_LABEL_RX     118
+#define CS_LABEL_RX     129
 #define CS_HEAD_FUNC_X  70
-#define CS_HEAD_KB_X    160
-#define CS_HEAD_PAD_X   260
-#define CS_HL_X0        6
-#define CS_HL_X1        304
+#define CS_HL_X0        2
+#define CS_HL_X1        316
 #define CS_ARROW_X      160
 #define CS_ROW_H        16
 #define CS_ICON_DY      2
@@ -61,8 +59,12 @@ extern int g_DebugThirdPersonCam;
 #define CS_RGB_WHITE    128
 #define CS_RGB_DIM      64
 
-static const int s_colX[BC_COLS] = { 124, 182, 240, 270 };
-static const int s_colW[BC_COLS] = { 54, 54, 28, 28 };
+/* Widths from the FONT16 kerning table: the widest English label
+ * ("Change_Camera", 129) starts at x 0; "Space" (48) fits both keyboard
+ * cells; pad cells take "LS_U" (41) and "DP_U" (43), PAD2 ends at x 318.
+ * Advances carry the glyph's own right gap, so cells abut. */
+static const int s_colX[BC_COLS] = { 134, 182, 230, 275 };
+static const int s_colW[BC_COLS] = { 48, 48, 43, 43 };
 
 enum { CS_FOCUS_ICONS, CS_FOCUS_LIST, CS_FOCUS_RESET };
 enum { CS_HIT_NONE, CS_HIT_ICONS, CS_HIT_ROW, CS_HIT_RESET, CS_HIT_YES, CS_HIT_NO };
@@ -529,6 +531,8 @@ static void cs_pad_draw(int icon, const char* sdlName, int col, int y, int color
         return;
     }
     Nm_SanitizeGlyphs(PadIcons_Fallback(icon, sdlName), name, sizeof(name), 0);
+    if (Nm_TextWidth(name) > s_colW[col])
+        Nm_SanitizeGlyphs(PadIcons_FallbackShort(icon, sdlName), name, sizeof(name), 0);
     Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(name, s_colW[col], fit, sizeof(fit)));
 }
 
@@ -600,7 +604,7 @@ static void cs_row_draw(int row, int y)
     int         c;
 
     Nm_SanitizeGlyphs(BindCore_Row(row)->label, label, sizeof(label), 0);
-    shown = cs_fit(label, CS_LABEL_RX - CS_HL_X0, fit, sizeof(fit));
+    shown = cs_fit(label, CS_LABEL_RX, fit, sizeof(fit));
     Nm_TextDrawRight(CS_LABEL_RX, y, NM_TEXT_TALL, color, shown);
     Nm_TextDraw(CS_LABEL_RX, y, NM_TEXT_TALL, color, ":");
 
@@ -644,9 +648,9 @@ void Pc_ControlsScreen_Draw(void)
     padSel = (s_focus == CS_FOCUS_LIST && s_col >= BC_PAD1);
     Nm_RuleDraw(CS_RULE_X0, CS_RULE_X1, CS_RULE1_Y, 0);
     Nm_TextDrawCentered(CS_HEAD_FUNC_X, CS_HEAD_Y, NM_TEXT_TALL, StringColorId_LightGrey, "Function");
-    Nm_TextDrawCentered(CS_HEAD_KB_X, CS_HEAD_Y, NM_TEXT_TALL,
+    Nm_TextDrawCentered((s_colX[BC_KB1] + s_colX[BC_KB2] + s_colW[BC_KB2]) / 2, CS_HEAD_Y, NM_TEXT_TALL,
                         kbSel ? StringColorId_Gold : StringColorId_LightGrey, "Keyboard");
-    Nm_TextDrawCentered(CS_HEAD_PAD_X, CS_HEAD_Y, NM_TEXT_TALL,
+    Nm_TextDrawCentered((s_colX[BC_PAD1] + s_colX[BC_PAD2] + s_colW[BC_PAD2]) / 2, CS_HEAD_Y, NM_TEXT_TALL,
                         padSel ? StringColorId_Gold : StringColorId_LightGrey, "Controller");
     Nm_RuleDraw(CS_RULE_X0, CS_RULE_X1, CS_RULE2_Y, 0);
 

@@ -4285,13 +4285,13 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
      * only ever re-mapped PSX buttons onto game actions, which on PC sits
      * under the launcher's physical binds and only confused them. */
     {
-        static int s_bindPanelShown = 0;
+        static int s_controlsScreenShown = 0;
 
         if (g_GameWork.gameStateSteps[1] == ControllerMenuState_Leave)
         {
             /* The PSX leave path would draw the old layout under the fade-out;
              * leave the same way without drawing anything. */
-            s_bindPanelShown = 0;
+            s_controlsScreenShown = 0;
             if (ScreenFade_IsFinished())
             {
                 ScreenFade_Start(true, true, false);
@@ -4304,10 +4304,10 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
         }
         else
         {
-            if (!s_bindPanelShown)
+            if (!s_controlsScreenShown)
             {
                 Pc_ControlsScreen_Open();
-                s_bindPanelShown = 1;
+                s_controlsScreenShown = 1;
             }
             if (Pc_ControlsScreen_Update())
             {
@@ -4322,7 +4322,7 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
             ScreenFade_Start(false, false, false);
             g_GameWork.gameStateSteps[1] = ControllerMenuState_Leave;
             g_GameWork.gameStateSteps[2] = 0;
-            s_bindPanelShown             = 0;
+            s_controlsScreenShown             = 0;
 
             /* Return on the closing frame too. Without this the function ran on
              * into the stock controller layout below and drew it once, which is

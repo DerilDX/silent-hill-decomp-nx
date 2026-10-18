@@ -107,6 +107,15 @@ const char* PadIcons_Fallback(int icon, const char* sdlName)
     return buf;
 }
 
+const char* PadIcons_FallbackShort(int icon, const char* sdlName)
+{
+    static const char* const s_short[4] = { "DP_U", "DP_R", "DP_D", "DP_L" };
+
+    if (icon >= PI_DPAD_UP && icon <= PI_DPAD_LEFT)
+        return s_short[icon - PI_DPAD_UP];
+    return PadIcons_Fallback(icon, sdlName);
+}
+
 int PadIcons_CellHasArt(const unsigned char* rgba, int w, int h, int u, int v)
 {
     int sx, sy, x, y;

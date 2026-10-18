@@ -24,6 +24,9 @@ typedef enum
 int         PadIcons_ForBind(const char* sdlName);
 void        PadIcons_UV(int icon, int* u, int* v);
 const char* PadIcons_Fallback(int icon, const char* sdlName);
+/* Compact stand-in for a cell too narrow for PadIcons_Fallback: "DP_x" for
+ * the d-pad, otherwise the same text. Same static buffer rule. */
+const char* PadIcons_FallbackShort(int icon, const char* sdlName);
 int         PadIcons_CellHasArt(const unsigned char* rgba, int w, int h, int u, int v);
 int         PadIcons_HasArt(int icon);
 const char* PadIcons_SetLabel(int set);

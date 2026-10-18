@@ -43,6 +43,18 @@ static void test_pad_icons_fallback(void)
     assert(PadIcons_Fallback(-1, NULL)[0] == '\0');
 }
 
+static void test_pad_icons_fallback_short(void)
+{
+    assert(strcmp(PadIcons_FallbackShort(PI_DPAD_UP, "dpup"), "DP_U") == 0);
+    assert(strcmp(PadIcons_FallbackShort(PI_DPAD_RIGHT, NULL), "DP_R") == 0);
+    assert(strcmp(PadIcons_FallbackShort(PI_DPAD_DOWN, NULL), "DP_D") == 0);
+    assert(strcmp(PadIcons_FallbackShort(PI_DPAD_LEFT, "dpleft"), "DP_L") == 0);
+    assert(strcmp(PadIcons_FallbackShort(PI_LS_UP, NULL), "LS_U") == 0);
+    assert(strcmp(PadIcons_FallbackShort(PI_TRIANGLE, "y"), "Triangle") == 0);
+    assert(strcmp(PadIcons_FallbackShort(-1, "touchpad"), "Touchpad") == 0);
+    assert(PadIcons_FallbackShort(-1, NULL)[0] == '\0');
+}
+
 static void put_opaque(unsigned char* rgba, int w, int x, int y)
 {
     rgba[((size_t)y * (size_t)w + (size_t)x) * 4 + 3] = 255;
@@ -89,6 +101,7 @@ int main(void)
     test_pad_icons_map();
     test_pad_icons_uv();
     test_pad_icons_fallback();
+    test_pad_icons_fallback_short();
     test_pad_icons_has_art();
     test_pad_icons_labels();
     printf("pc_pad_icons_test: all passed\n");
