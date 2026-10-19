@@ -526,6 +526,20 @@ for _lit, _note in NATIVE_MENU:
 
 emit_plain_menu()
 
+# One entry per key, and the first section to claim a key keeps its note, so a
+# key several draw sites share spells out every use here. One translation
+# serves them all.
+SHARED_NOTES = {
+    'MENU.Map': 'used in three places: the inventory screen box that opens the map '
+                '(max ~10 characters); the PC Options Graphics row that picks the '
+                'New Game start map (max ~14 characters); the Controls screen action '
+                'that opens the map, a colon follows (max ~12 characters)',
+    'MENU.Reload': 'used in two places: the inventory command for a weapon '
+                   '(max ~10 characters); the Controls screen action, a colon '
+                   'follows (max ~12 characters)',
+}
+records = [(s, k, raw, rd, SHARED_NOTES.get(k, note)) for (s, k, raw, rd, note) in records]
+
 # ---- write outputs -----------------------------------------------------------
 OUT = os.path.join(ROOT, 'pc_port', 'localization')
 os.makedirs(OUT, exist_ok=True)

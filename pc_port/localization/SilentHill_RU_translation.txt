@@ -423,7 +423,7 @@ EN: Inventory
 RU: Инвентарь
 
 [MENU.Reload]
-NOTE: Controls screen action, a colon follows; max ~12 characters
+NOTE: used in two places: the inventory command for a weapon (max ~10 characters); the Controls screen action, a colon follows (max ~12 characters)
 EN: Reload
 RU: Зарядить
 
@@ -1032,7 +1032,7 @@ EN: Tone Mapping
 RU: Тонмаппинг
 
 [MENU.Map]
-NOTE: row name, Graphics page, max ~14 characters (also used in the original menus)
+NOTE: used in three places: the inventory screen box that opens the map (max ~10 characters); the PC Options Graphics row that picks the New Game start map (max ~14 characters); the Controls screen action that opens the map, a colon follows (max ~12 characters)
 EN: Map
 RU: Карта
 
