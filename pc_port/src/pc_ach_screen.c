@@ -484,7 +484,7 @@ static void ach_list_draw(void)
 
         Nm_SanitizeGlyphs(a->title, clean, sizeof(clean), 1);
         Nm_FitEllipsis(clean, line, sizeof(line), ACH_TEXT_W, Pc_LangMenuTextWidth);
-        Nm_TextDraw(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, line);
+        Nm_TextDrawVerbatim(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, line);
         if (sel)
         {
             Nm_HighlightDraw(ACH_BADGE_X - 1, ACH_TEXT_X + Pc_LangMenuTextWidth(line) + 4, y + ACH_UNDERLINE_DY);
@@ -492,7 +492,7 @@ static void ach_list_draw(void)
 
         Nm_SanitizeGlyphs(a->desc, clean, sizeof(clean), 0);
         Nm_FitEllipsis(clean, line, sizeof(line), ACH_TEXT_W, Pc_LangMenuTextWidth);
-        Nm_TextDraw(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, line);
+        Nm_TextDrawVerbatim(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, line);
     }
 
     if (s_list.count > ACH_VISIBLE)
@@ -522,7 +522,7 @@ static void ach_single_draw(void)
 
     Nm_SanitizeGlyphs(a->title, clean, sizeof(clean), 1);
     Nm_FitEllipsis(clean, line, sizeof(line), ACH_SV_RULE_X1 - ACH_SV_RULE_X0, Pc_LangMenuTextWidth);
-    Nm_TextDraw(160 - (Pc_LangMenuTextWidth(line) / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, line);
+    Nm_TextDrawVerbatim(160 - (Pc_LangMenuTextWidth(line) / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, line);
     Nm_RuleDraw(ACH_SV_RULE_X0, ACH_SV_RULE_X1, ACH_SV_RULE1_Y, 1);
 
     if (a->unlocked)
@@ -564,8 +564,8 @@ static void ach_single_draw(void)
     n = Nm_WrapLines(clean, lines, ACH_SV_DESC_LINES, ACH_SV_DESC_W, Pc_LangMenuTextWidth);
     for (i = 0; i < n; i++)
     {
-        Nm_TextDraw(ACH_SV_RULE_X0, ACH_SV_DESC_Y + (i * ACH_SV_DESC_PITCH), NM_TEXT_SMALL,
-                    StringColorId_White, lines[i]);
+        Nm_TextDrawVerbatim(ACH_SV_RULE_X0, ACH_SV_DESC_Y + (i * ACH_SV_DESC_PITCH), NM_TEXT_SMALL,
+                            StringColorId_White, lines[i]);
     }
 
     ach_back_draw(1);

@@ -66,6 +66,13 @@ void Nm_TextDraw(int x, int y, int size, int color, const char* s)
     Gfx_StringsReset2dLayerIdx();
 }
 
+void Nm_TextDrawVerbatim(int x, int y, int size, int color, const char* s)
+{
+    g_PcLangMenuVerbatim = 1;
+    Nm_TextDraw(x, y, size, color, s);
+    g_PcLangMenuVerbatim = 0;
+}
+
 int Nm_TextWidth(const char* s)
 {
     return Pc_LangMenuTextWidth(Pc_LangMenuText(s));

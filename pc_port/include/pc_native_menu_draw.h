@@ -17,6 +17,9 @@ enum { NM_TEXT_TALL, NM_TEXT_SMALL };
 #define NM_BULLET_TEXT_DX 24
 
 void Nm_TextDraw(int x, int y, int size, int color, const char* s);
+/* Draws `s` as is, without the menu localization; measure it with
+ * Pc_LangMenuTextWidth(s). */
+void Nm_TextDrawVerbatim(int x, int y, int size, int color, const char* s);
 int  Nm_TextWidth(const char* s);
 void Nm_TextDrawCentered(int cx, int y, int size, int color, const char* s);
 void Nm_TextDrawRight(int rx, int y, int size, int color, const char* s);

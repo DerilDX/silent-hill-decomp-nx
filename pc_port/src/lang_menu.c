@@ -443,6 +443,8 @@ static const s_MenuTranslation s_MenuTr[] = {
     { "Quick_Load",      { "Schnellladen",                  "Charg._rapide",                    "Carga_r\xE1pida",            "Caric._rapido"           } },
 };
 
+int g_PcLangMenuVerbatim = 0;
+
 const char* Pc_LangMenuText(const char* str)
 {
     int i;

@@ -308,7 +308,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
     /* Menu-translation chokepoint: every menu/UI string funnels through this
      * function, so a single exact-match lookup localizes them all (misses —
      * item text, digits, US discs — return the input untouched). */
-    strCpy  = (u8*)Pc_LangMenuText(str);
+    strCpy  = g_PcLangMenuVerbatim ? (u8*)str : (u8*)Pc_LangMenuText(str);
 #else
     strCpy  = str;
 #endif
