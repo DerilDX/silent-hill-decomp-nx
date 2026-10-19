@@ -275,6 +275,8 @@ static int cs_mouse(const NmInput* in)
     if (!in->mouseOk || !(in->mouseMoved || in->mouseLeft || in->mouseRight))
         return 1;
     hit = cs_hit(in, &row, &col);
+    if (hit != CS_HIT_NONE)
+        Nm_HighlightSnap();
 
     if (in->mouseMoved)
     {
@@ -364,6 +366,7 @@ static void cs_confirm_update(const int pressed[BN_COUNT], const NmInput* mouse)
 
             if (s_confirm.yes != yes)
                 cs_beep(Sfx_MenuMove);
+            Nm_HighlightSnap();
             s_confirm.yes = yes;
             in.confirm |= mouse->mouseLeft;
         }

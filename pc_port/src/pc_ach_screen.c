@@ -339,11 +339,13 @@ static int ach_update_list(const NmInput* in, int back)
     hit = ach_hit(in);
     if (in->mouseLeft && hit != ACH_HIT_NONE)
     {
+        Nm_HighlightSnap();
         ach_select(hit);
         return ach_activate();
     }
     if (in->mouseMoved && hit != ACH_HIT_NONE)
     {
+        Nm_HighlightSnap();
         ach_select(hit);
     }
 

@@ -28,6 +28,8 @@ void Nm_TextDrawRight(int rx, int y, int size, int color, const char* s);
 void Nm_ScrollArrowDraw(int cx, int y, int up, int enabled);
 /* Retail look: yBottom = row y + 14, x0 = bullet x - 1. */
 void Nm_HighlightDraw(int x0, int x1, int yBottom);
+/* The next Nm_HighlightDraw jumps to its row instead of gliding (mouse picks). */
+void Nm_HighlightSnap(void);
 /* x is the bullet's left edge, y the row y of its label. */
 void Nm_BulletDraw(int x, int y, int selected);
 void Nm_RuleDraw(int x0, int x1, int y, int gold);

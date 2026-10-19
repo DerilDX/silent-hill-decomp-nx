@@ -128,9 +128,72 @@ void Nm_ScrollArrowDraw(int cx, int y, int up, int enabled)
     GsOUT_PACKET_P = (PACKET*)(poly + 1);
 }
 
+/* The underline glides to a new row the way the options menus move theirs
+ * (Options_*_SelectionHighlightDraw): LINE_CURSOR_TIMER_MAX frames of a sine
+ * ease. A screen calls Nm_HighlightSnap when the mouse picked the row, which
+ * the options menus also leave unanimated. */
+#define NM_GLIDE_FRAMES 8
+
+static struct
+{
+    int fromX0, fromX1, fromY;
+    int toX0, toX1, toY;
+    int timer;
+    int snap;
+    s32 tick;
+    int drawn;
+} s_glide;
+
+void Nm_HighlightSnap(void)
+{
+    s_glide.snap = 1;
+}
+
+static int nm_glide_lerp(int from, int to, q3_12 alpha)
+{
+    return from + FP_FROM((to - from) * alpha, Q12_SHIFT);
+}
+
 void Nm_HighlightDraw(int x0, int x1, int yBottom)
 {
     s_Line2d line;
+    q3_12    alpha;
+
+    /* Not drawn last frame: a screen just opened or the underline was hidden,
+     * so there is no previous position worth gliding from. */
+    if (!s_glide.drawn || s_glide.snap ||
+        (g_TickCount != s_glide.tick && g_TickCount != s_glide.tick + 1))
+    {
+        s_glide.fromX0 = s_glide.toX0 = x0;
+        s_glide.fromX1 = s_glide.toX1 = x1;
+        s_glide.fromY  = s_glide.toY  = yBottom;
+        s_glide.timer  = NM_GLIDE_FRAMES;
+        s_glide.snap   = 0;
+        s_glide.drawn  = 1;
+    }
+    else if (x0 != s_glide.toX0 || x1 != s_glide.toX1 || yBottom != s_glide.toY)
+    {
+        alpha          = Math_Sin(s_glide.timer << 7);
+        s_glide.fromX0 = nm_glide_lerp(s_glide.fromX0, s_glide.toX0, alpha);
+        s_glide.fromX1 = nm_glide_lerp(s_glide.fromX1, s_glide.toX1, alpha);
+        s_glide.fromY  = nm_glide_lerp(s_glide.fromY, s_glide.toY, alpha);
+        s_glide.toX0   = x0;
+        s_glide.toX1   = x1;
+        s_glide.toY    = yBottom;
+        s_glide.timer  = 0;
+    }
+
+    if (g_TickCount != s_glide.tick)
+    {
+        s_glide.tick = g_TickCount;
+        if (s_glide.timer < NM_GLIDE_FRAMES)
+            s_glide.timer++;
+    }
+
+    alpha   = Math_Sin(s_glide.timer << 7);
+    x0      = nm_glide_lerp(s_glide.fromX0, s_glide.toX0, alpha);
+    x1      = nm_glide_lerp(s_glide.fromX1, s_glide.toX1, alpha);
+    yBottom = nm_glide_lerp(s_glide.fromY, s_glide.toY, alpha);
 
     line.vertex0.vx = nm_px(x0);
     line.vertex0.vy = nm_py(yBottom);
