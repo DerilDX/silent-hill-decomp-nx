@@ -104,6 +104,13 @@ static s32 MainMenu_RowY(void)
 {
     return (s_MainMenu_RowCount > MAINMENU_WINDOW_SLOTS) ? MAINMENU_SCROLL_ROW_Y : MAINMENU_ROW_Y;
 }
+
+/* True from the Achievements pick through both fades, which the screen's own
+ * open state does not cover: it opens only once the title has faded out. */
+int Pc_TitleAchievementsActive(void)
+{
+    return g_GameWork.gameState == GameState_MainMenu && g_MainMenuState == MenuState_Achievements;
+}
 #endif
 
 // ========================================
