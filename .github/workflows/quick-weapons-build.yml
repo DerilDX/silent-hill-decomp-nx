@@ -44,11 +44,20 @@ jobs:
       - name: Build test executable
         shell: msys2 {0}
         run: cmake --build pc_port/build --target SilentHillPC -j 2
-      - name: Package experimental executable
-        if: success()
+      - name: Package matching MinGW runtime
+        shell: msys2 {0}
+        run: |
+          mkdir -p quick-weapons-native-test
+          cp pc_port/build/SilentHillPC.exe quick-weapons-native-test/
+          # Windows must load the matching DLL from next to the EXE rather
+          # than an older copy that lacks clock_gettime64.
+          cp /mingw64/bin/libwinpthread-1.dll quick-weapons-native-test/
+          cp /mingw64/bin/libgcc_s_seh-1.dll quick-weapons-native-test/
+          cp /mingw64/bin/libstdc++-6.dll quick-weapons-native-test/
+          objdump -p pc_port/build/SilentHillPC.exe | grep 'DLL Name' || true
+      - name: Upload Windows test package
         uses: actions/upload-artifact@v4
         with:
           name: quick-weapons-native-test
-          path: |
-            pc_port/build/SilentHillPC.exe
+          path: quick-weapons-native-test/*
           if-no-files-found: error
