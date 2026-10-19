@@ -54,7 +54,22 @@ jobs:
           cp /mingw64/bin/libwinpthread-1.dll quick-weapons-native-test/
           cp /mingw64/bin/libgcc_s_seh-1.dll quick-weapons-native-test/
           cp /mingw64/bin/libstdc++-6.dll quick-weapons-native-test/
-          objdump -p pc_port/build/SilentHillPC.exe | grep 'DLL Name' || true
+          # Bundle matching DLLs recursively. The first executable test found
+          # a mismatched libopenal-1.dll from an older port installation.
+          # This keeps the entire MinGW runtime dependency set consistent.
+          shopt -s nullglob
+          queue=(quick-weapons-native-test/SilentHillPC.exe)
+          while (( ${#queue[@]} > 0 )); do
+            file="${queue[0]}"
+            queue=("${queue[@]:1}")
+            while IFS= read -r dll; do
+              if [[ -f "/mingw64/bin/$dll" && ! -f "quick-weapons-native-test/$dll" ]]; then
+                cp "/mingw64/bin/$dll" quick-weapons-native-test/
+                queue+=("quick-weapons-native-test/$dll")
+              fi
+            done < <(objdump -p "$file" | sed -n 's/^[[:space:]]*DLL Name: //p' | tr -d '\r')
+          done
+          ls -lh quick-weapons-native-test/
       - name: Upload Windows test package
         uses: actions/upload-artifact@v4
         with:
