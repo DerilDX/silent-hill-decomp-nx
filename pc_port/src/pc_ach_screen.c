@@ -457,7 +457,7 @@ static void ach_counter_draw(void)
     snprintf(points, sizeof(points), "(%u/%u_%s)", s_list.pts, s_list.ptsTotal, Pc_LangMenuText("points"));
     wc = Pc_LangMenuTextWidth(count);
     wp = Pc_LangMenuTextWidth(points);
-    x  = 160 - ((wc + wp) / 2);
+    x  = 320 - ACH_BACK_X - (wc + wp);
     if (x < ach_back_right() + 12)
     {
         x = ach_back_right() + 12;
