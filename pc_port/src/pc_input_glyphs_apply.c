@@ -17,7 +17,7 @@
 #define ATLAS_PATH   "gamedata/icons/input_glyphs.png"
 #define ATLAS_W      256
 #define ATLAS_H      512
-#define ATLAS_VRAM_X 448
+#define ATLAS_VRAM_X INPUT_GLYPHS_VRAM_X
 #define ATLAS_VRAM_Y 0
 #define ATLAS_VRAM_W 32
 #define ATLAS_VRAM_H 256
@@ -63,7 +63,7 @@ void InputGlyphs_Load(void)
     file = read_file(ATLAS_PATH, &size);
     if (file == NULL)
     {
-        reason = ATLAS_PATH " missing";
+        reason = "atlas " ATLAS_PATH " missing";
     }
     else if (HiresOverride_DecodeToRGBA(file, size, &rgba, &w, &h) != 0 || rgba == NULL)
     {
@@ -87,7 +87,7 @@ void InputGlyphs_Load(void)
         if (ok)
             s_ready = 1;
         else
-            reason = "registration failed";
+            reason = "atlas registration failed";
     }
     free(file);
     free(rgba);
@@ -95,7 +95,7 @@ void InputGlyphs_Load(void)
     if (s_ready)
         SH_DBG("[GLYPHS] atlas registered");
     else
-        SH_DBG("[GLYPHS] atlas %s, drawing text", reason);
+        SH_DBG("[GLYPHS] %s, drawing text", reason);
 }
 
 int InputGlyphs_Ready(void)

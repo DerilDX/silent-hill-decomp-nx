@@ -37,7 +37,9 @@ Auto looks at the first controller the game finds and picks a set:
 - A Steam Controller or a Steam Deck (Game Mode sets `SteamDeck=1`): Steam.
 - A pad that Steam Input presents as its own virtual pad is not counted as
   Valve hardware. The game uses the type SDL reports for it, which is the real
-  pad underneath when Steam says so.
+  pad underneath when Steam says so. The one exception is a Steam Deck
+  (`SteamDeck=1`): there the virtual pad (0x28DE:0x11FF) counts as Steam when
+  SDL reports its type as unknown, Xbox 360, Xbox One or virtual.
 - Anything else, or no controller: Xbox.
 
 The row shows just `Auto`; the pictures themselves show what was detected.
@@ -54,13 +56,14 @@ The pictures live in one PNG in the game folder:
 - Columns 0 to 7 hold the **light** version of each picture (used for the
   selected cell). Columns 8 to 15 hold the **dark** version (every other cell).
   A dark picture sits exactly 8 columns to the right of its light one.
-- Wide pictures (Enter, Space, Shift and so on) take two cells side by side.
+- Wide pictures (Enter, Shift, Ctrl, Backspace) take two cells side by side. Space
+  and every other picture take one cell.
 - Use transparency (alpha 0) for everything that is not part of a picture.
 
-The game registers the atlas over a small unused part of video memory
-(VRAM x 448, 32 x 256 texels, texture page 7) as a high-resolution override,
-keyed by one CLUT cell no other picture uses, (1008, 511). It never writes to
-VRAM, so nothing else on screen is touched.
+The game registers the atlas as a high-resolution override over a VRAM
+rectangle it never writes (VRAM x 448, 32 x 256 texels, texture page 7). The
+override is keyed by one CLUT cell no TIM uses, (1008, 511), so the game's own
+lookups in that rectangle are left untouched.
 
 ## Repainting
 
@@ -96,8 +99,8 @@ Do not run the script after hand-editing the PNG, or the edits are lost.
 
 With debug logging on, `SilentHill_<date>.log` has:
 
-- `[GLYPHS] atlas registered` once, or `[GLYPHS] atlas <reason>, drawing text`
-  when it could not be loaded (for example `atlas gamedata/icons/input_glyphs.png missing`).
+- `[GLYPHS] atlas registered` once, or `[GLYPHS] <reason>, drawing text`
+  when it could not be loaded (for example `[GLYPHS] atlas gamedata/icons/input_glyphs.png missing, drawing text`).
 - `[GLYPHS] auto: <label>` each time Auto settles on a different set, for
   example `[GLYPHS] auto: PS_Modern`.
 

@@ -27,6 +27,7 @@ typedef enum {
 } e_GlyphDir;
 
 #define INPUT_GLYPH_PX 16 /* one cell in 320x240 screen space */
+#define INPUT_GLYPHS_VRAM_X 448 /* tpage 7, u 0 */
 
 int         InputGlyphs_ClampSet(int set);
 const char* InputGlyphs_SetLabel(int set);

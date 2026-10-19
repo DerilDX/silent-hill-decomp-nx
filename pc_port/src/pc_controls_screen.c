@@ -512,7 +512,7 @@ static void cs_glyph_draw(int glyph, int dark, int x, int y, int rgb)
     setRGB0(poly, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
     setXY4(poly, x - 160, y0, x - 160 + screenW, y0, x - 160, y1, x - 160 + screenW, y1);
     setUV4(poly, u, v, u + texW, v, u, v + texH, u + texW, v + texH);
-    poly->tpage = getTPage(0, 0, 448, 0);
+    poly->tpage = getTPage(0, 0, INPUT_GLYPHS_VRAM_X, 0);
     poly->clut  = getClut(INPUT_GLYPHS_CLUT_X, INPUT_GLYPHS_CLUT_Y);
     addPrim(ot, poly);
     GsOUT_PACKET_P = (PACKET*)(poly + 1);

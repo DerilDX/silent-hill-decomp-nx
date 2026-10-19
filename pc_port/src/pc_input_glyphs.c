@@ -21,7 +21,7 @@ enum {
 
 /* The atlas is registered over tpage 7 at tpage u 0 (VRAM x 448) at 2x: at u 128
  * the dark half's last column would end at u 256, past a u8 UV. */
-#define ATLAS_U0 0
+#define ATLAS_U0 (INPUT_GLYPHS_VRAM_X % 64 * 4)
 
 static const char* const s_setLabels[GLYPH_SET_COUNT] = {
     "Auto", "PS_Classic", "PS_Modern", "Xbox", "Nintendo", "Steam"
@@ -204,20 +204,20 @@ int InputGlyphs_ForPad(int set, const char* sdlName)
         set = GLYPH_SET_XBOX;
 
     for (i = 0; i < PB_COUNT; i++) {
-        if (strcmp(sdlName, s_padNames[i]) == 0)
+        if (ci_equal(sdlName, s_padNames[i]))
             return s_padGlyphs[set][i];
     }
-    if (strcmp(sdlName, "leftstick") == 0)
+    if (ci_equal(sdlName, "leftstick"))
         return IG_L3;
-    if (strcmp(sdlName, "rightstick") == 0)
+    if (ci_equal(sdlName, "rightstick"))
         return IG_R3;
-    if (strcmp(sdlName, "dpup") == 0)
+    if (ci_equal(sdlName, "dpup"))
         return InputGlyphs_ForStick(set, GLYPH_DIR_UP, 1);
-    if (strcmp(sdlName, "dpright") == 0)
+    if (ci_equal(sdlName, "dpright"))
         return InputGlyphs_ForStick(set, GLYPH_DIR_RIGHT, 1);
-    if (strcmp(sdlName, "dpdown") == 0)
+    if (ci_equal(sdlName, "dpdown"))
         return InputGlyphs_ForStick(set, GLYPH_DIR_DOWN, 1);
-    if (strcmp(sdlName, "dpleft") == 0)
+    if (ci_equal(sdlName, "dpleft"))
         return InputGlyphs_ForStick(set, GLYPH_DIR_LEFT, 1);
     return IG_PAD_EMPTY;
 }

@@ -27,6 +27,8 @@ static void test_glyphs_auto_types(void)
     assert(InputGlyphs_ResolveAuto(2, 0x045E, 0x0B12, 0) == GLYPH_SET_XBOX);
     assert(InputGlyphs_ResolveAuto(5, 0x057E, 0x2009, 0) == GLYPH_SET_NINTENDO);
     assert(InputGlyphs_ResolveAuto(13, 0x057E, 0x200E, 0) == GLYPH_SET_NINTENDO);
+    assert(InputGlyphs_ResolveAuto(11, 0x057E, 0x2006, 0) == GLYPH_SET_NINTENDO);
+    assert(InputGlyphs_ResolveAuto(12, 0x057E, 0x2007, 0) == GLYPH_SET_NINTENDO);
     assert(InputGlyphs_ResolveAuto(10, 0x0955, 0x7214, 0) == GLYPH_SET_XBOX);
 }
 static void test_glyphs_auto_steam(void)
@@ -49,6 +51,7 @@ static void test_glyphs_key(void)
     assert(InputGlyphs_ForKey("Return") == IG_KEY_ENTER);
     assert(InputGlyphs_ForKey("Keypad Enter") == IG_KEY_ENTER);
     assert(InputGlyphs_ForKey("Keypad 5") == IG_KEY_5);
+    assert(InputGlyphs_ForKey("Keypad .") == IG_KEY_PERIOD);
     assert(InputGlyphs_ForKey("Left Shift") == IG_KEY_SHIFT);
     assert(InputGlyphs_ForKey("Right Shift") == IG_KEY_SHIFT);
     assert(InputGlyphs_ForKey("Right Ctrl") == IG_KEY_CTRL);
@@ -69,6 +72,8 @@ static void test_glyphs_mouse(void)
 {
     assert(InputGlyphs_ForKey("Mouse1") == IG_MOUSE_LEFT);
     assert(InputGlyphs_ForKey("Mouse3") == IG_MOUSE_MIDDLE);
+    assert(InputGlyphs_ForKey("Mouse2") == IG_MOUSE_RIGHT);
+    assert(InputGlyphs_ForKey("MouseWheelUp") == IG_MOUSE_WHEEL_UP);
     assert(InputGlyphs_ForKey("MouseWheelDown") == IG_MOUSE_WHEEL_DOWN);
     assert(InputGlyphs_ForKey("Mouse4") == IG_MOUSE);
     assert(strcmp(InputGlyphs_KeySuffix("Mouse5"), "5") == 0);
@@ -78,6 +83,10 @@ static void test_glyphs_mouse(void)
 static void test_glyphs_pad(void)
 {
     assert(InputGlyphs_ForPad(GLYPH_SET_XBOX, "a") == IG_XBOX_A);
+    assert(InputGlyphs_ForPad(GLYPH_SET_XBOX, "A") == IG_XBOX_A);
+    assert(InputGlyphs_ForPad(GLYPH_SET_STEAM, "a") == IG_DECK_A);
+    assert(InputGlyphs_ForPad(GLYPH_SET_XBOX, "leftstick") == IG_L3);
+    assert(InputGlyphs_ForPad(GLYPH_SET_XBOX, "rightstick") == IG_R3);
     assert(InputGlyphs_ForPad(GLYPH_SET_PS_MODERN, "a") == IG_PS_CROSS);
     assert(InputGlyphs_ForPad(GLYPH_SET_PS_MODERN, "b") == IG_PS_CIRCLE);
     assert(InputGlyphs_ForPad(GLYPH_SET_NINTENDO, "a") == IG_NIN_A);
@@ -115,6 +124,11 @@ static void test_glyphs_uv(void)
     assert(tw == 16 && sw == 32);
     InputGlyphs_UV(IG_KEY_SPACE, 0, &u, &v, &tw, &sw);
     assert(tw == 8 && sw == 16);
+    InputGlyphs_UV(IG_PAD_EMPTY, 0, &u, &v, &tw, &sw);
+    InputGlyphs_UV(-1, 0, &ud, &vd, &tw, &sw);
+    assert(ud == u && vd == v);
+    InputGlyphs_UV(IG_COUNT, 0, &ud, &vd, &tw, &sw);
+    assert(ud == u && vd == v);
 }
 
 int main(void)
