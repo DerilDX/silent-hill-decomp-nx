@@ -112,6 +112,7 @@ pair("IG_PS_R2", 18, 18)
 pair("IG_PSC_SELECT", 18, 20)
 pair("IG_PSC_START", 19, 20)
 pair("IG_PS_SHARE", 6, 18)
+# The pack has one three-line tile; PS Options and Xbox Menu share it.
 pair("IG_PS_OPTIONS", 5, 18)
 
 for i, n in enumerate("ABXY"):
@@ -138,6 +139,7 @@ pair("IG_DECK_L1", 19, 18)
 pair("IG_DECK_R1", 20, 18)
 pair("IG_DECK_L2", 21, 18)
 pair("IG_DECK_R2", 22, 18)
+# The pack has one two-squares tile; Deck View and Xbox View share it.
 pair("IG_DECK_VIEW", 4, 18)
 pair("IG_DECK_MENU", 20, 22)
 
@@ -271,7 +273,10 @@ def preview(placed, atlas, path):
 def main():
     placed, atlas = build()
     if "--preview" in sys.argv:
-        preview(placed, atlas, sys.argv[sys.argv.index("--preview") + 1])
+        i = sys.argv.index("--preview")
+        if i + 1 >= len(sys.argv):
+            sys.exit("usage: build_input_glyphs.py [--preview <out.png>]")
+        preview(placed, atlas, sys.argv[i + 1])
         return
     write_outputs(placed, atlas)
 
