@@ -41,6 +41,9 @@ q19_12 g_PcBulletRadMul    = Q12(1.0f); /* horizontal radius added = 1x collisio
  * Player_LogicUpdate (native state machine or the movement shim). */
 int g_PcQuickTurnRequest = 0;
 
+/* Optional native quick weapon hotkeys and bidirectional wheel (off by default). */
+int g_PcQuickWeaponsEnabled = 0;
+
 /* PC-only: 1 while the Rear Look bind is HELD in a TPS/OTS camera. Set every
  * frame by Pc_RearLookUpdate; consumed by Pc_TpsCamera_Apply (orbit +180) and
  * the head-look override in Player_Update. */
@@ -354,6 +357,68 @@ void Pc_CycleWeapons(void)
     }
 }
 
+/* Direct-number and scroll controls share the port's native equip routine. */
+static const u8 s_quickWeaponOrder[] = {
+    InvItemId_KitchenKnife, InvItemId_SteelPipe, InvItemId_Handgun,
+    InvItemId_Shotgun, InvItemId_HuntingRifle, InvItemId_Hammer,
+    InvItemId_Axe, InvItemId_Chainsaw, InvItemId_Katana,
+    InvItemId_RockDrill, InvItemId_HyperBlaster
+};
+
+extern int g_PcQuickOptionsActive;
+static void Pc_QuickWeaponInputUpdate(void)
+{
+    static const SDL_Scancode keys[] = {
+        SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
+        SDL_SCANCODE_4, SDL_SCANCODE_5, SDL_SCANCODE_6,
+        SDL_SCANCODE_7, SDL_SCANCODE_8, SDL_SCANCODE_9,
+        SDL_SCANCODE_0, SDL_SCANCODE_MINUS
+    };
+    static unsigned char prev[11];
+    static int previousWheel;
+    const unsigned char *keyboard = SDL_GetKeyboardState(NULL);
+    int target = -1, delta, i, j, start = -1;
+    /* Read the shared PsyCross wheel counter every frame. While menus are
+     * active, consume movement without applying it later in gameplay. */
+    extern int g_PsyX_WheelTotal;
+    int wheel = g_PsyX_WheelTotal;
+    delta = wheel - previousWheel;
+    previousWheel = wheel;
+    for (i = 0; i < 11; ++i) {
+        int down = keyboard && keyboard[keys[i]];
+        if (down && !prev[i]) target = i;
+        prev[i] = (unsigned char)(down != 0);
+    }
+    if (!g_PcQuickWeaponsEnabled || !g_SavegamePtr || !Pc_ActionSafe() ||
+        Pc_ConsoleIsOpen() || g_PcQuickOptionsActive) return;
+    if (target >= 0) {
+        s32 slot = Pc_FindItemSlot(s_quickWeaponOrder[target]);
+        if (slot != NO_VALUE && g_SavegamePtr->equippedWeapon != s_quickWeaponOrder[target])
+            Pc_EquipWeapon(s_quickWeaponOrder[target], slot);
+    } else if (delta != 0) {
+        int steps = delta > 0 ? delta : -delta;
+        int direction = delta > 0 ? -1 : 1;
+        u8 current = g_SavegamePtr->equippedWeapon;
+        if (steps > 11) steps = 11;
+        for (j = 0; j < steps; ++j) {
+            int index = -1, k;
+            for (i = 0; i < 11; ++i)
+                if (s_quickWeaponOrder[i] == current) { index = i; break; }
+            if (index < 0) index = direction > 0 ? -1 : 0;
+            for (k = 1; k <= 11; ++k) {
+                int next = (index + direction * k + 22) % 11;
+                if (Pc_FindItemSlot(s_quickWeaponOrder[next]) != NO_VALUE) {
+                    current = s_quickWeaponOrder[next]; break;
+                }
+            }
+        }
+        if (current != g_SavegamePtr->equippedWeapon) {
+            s32 slot = Pc_FindItemSlot(current);
+            if (slot != NO_VALUE) Pc_EquipWeapon(current, slot);
+        }
+    }
+}
+
 /* Quantity in the first slot holding this id, 0 if absent.
  *
  * Pc_FindItemSlot matches on id_0 alone, which is right for weapons (a knife
@@ -638,6 +703,7 @@ void Pc_ExtraActionsUpdate(void)
                    (s_padQt[sch]    >= 0 && PC_RawControllerButtonClicked(s_padQt[sch]));
 
     Pc_ManualReloadSample(sch);
+    /* Declared above for the optional F10 input gate. */
 
     /* Reload is an AIMING action, so it must NOT be subject to Pc_ActionSafe's
      * movement-state ceiling (Aim=19 outranks SidestepRightStumble=18, so that
@@ -658,6 +724,7 @@ void Pc_ExtraActionsUpdate(void)
     /* Typing in the console presses these keys too: the quick-heal letter fired
      * mid-command. Pc_ConsoleIsOpen also covers the apply window after Enter,
      * when input is briefly unfrozen but the panel is still up. */
+    Pc_QuickWeaponInputUpdate();
     if (Pc_ConsoleIsOpen())
     {
         g_PcQuickTurnRequest = 0;
