@@ -1,0 +1,31 @@
+name: Quick Weapons native build check
+
+on:
+  push:
+    branches: [feature/quick-weapons]
+  workflow_dispatch:
+
+jobs:
+  windows-compile:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-openal
+            mingw-w64-x86_64-libjpeg-turbo
+      - name: Configure port
+        shell: msys2 {0}
+        run: cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=OFF
+      - name: Build port executable
+        shell: msys2 {0}
+        run: cmake --build pc_port/build --target SilentHillPC -j 2
