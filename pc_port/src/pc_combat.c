@@ -396,8 +396,7 @@ static void Pc_QuickWeaponInputUpdate(void)
         watchRegistered = 1;
     }
     /* Consume changes even if a menu is open to prevent deferred switching. */
-    delta = SDL_AtomicGet(&s_quickWheel);
-    SDL_AtomicSet(&s_quickWheel, 0);
+    delta = SDL_AtomicSet(&s_quickWheel, 0);
     for (i = 0; i < 11; ++i) {
         int down = keyboard && keyboard[keys[i]];
         if (down && !prev[i]) target = i;
