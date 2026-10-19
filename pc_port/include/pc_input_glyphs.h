@@ -37,4 +37,16 @@ int         InputGlyphs_ForPad(int set, const char* sdlName);
 int         InputGlyphs_ForStick(int set, int dir, int dpad);
 void        InputGlyphs_UV(int glyph, int dark, int* u, int* v, int* texW, int* screenW);
 
+/* Game side (pc_input_glyphs_apply.c). */
+
+/* Last CLUT cell in VRAM, used by no TIM: the override keyed on it stands
+ * over OPTION2's pixel rect without touching OPTION2's own lookups. */
+#define INPUT_GLYPHS_CLUT_X 1008
+#define INPUT_GLYPHS_CLUT_Y 511
+
+void InputGlyphs_Load(void);
+int  InputGlyphs_Ready(void);
+int  InputGlyphs_ActiveSet(void);
+void InputGlyphs_Step(int dir);
+
 #endif
