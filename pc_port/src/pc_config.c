@@ -1126,6 +1126,11 @@ void PcConfig_Load(const char* path)
         {
             g_PcConfig.mouseCursor = (atoi(value) != 0);
         }
+        else if (strcmp(key, "quick_weapon_switch") == 0)
+        {
+            extern int g_PcQuickWeaponsEnabled;
+            g_PcQuickWeaponsEnabled = (atoi(value) != 0);
+        }
         else if (strcmp(key, "aim_assist") == 0)
         {
             g_PcConfig.aimAssist = (atoi(value) != 0);
