@@ -271,10 +271,10 @@ void NmInput_FromGame(NmInput* out)
     out->right   = (pulsed & ControllerFlag_LStickRight) != 0;
     out->confirm = (clicked & (cfg->enter | cfg->action)) != 0;
     out->cancel  = (clicked & cfg->cancel) != 0;
-    out->wheel   = Pc_MouseCursor_WheelNotches();
 
     if (mouseOk)
     {
+        out->wheel   = Pc_MouseCursor_WheelNotches();
         out->mouseOk = 1;
         out->mouseX  = mx;
         /* UiPos reports the 448-line authoring space (-112..336) on the title. */
