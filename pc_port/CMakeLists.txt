@@ -856,4 +856,10 @@ if(BUILD_TESTING)
         src/pc_pad_icons.c)
     target_include_directories(pc_pad_icons_test PRIVATE include)
     add_test(NAME pc_pad_icons_test COMMAND pc_pad_icons_test)
+
+    add_executable(pc_input_glyphs_test
+        tests/pc_input_glyphs_test.c
+        src/pc_input_glyphs.c)
+    target_include_directories(pc_input_glyphs_test PRIVATE include)
+    add_test(NAME pc_input_glyphs_test COMMAND pc_input_glyphs_test)
 endif()
