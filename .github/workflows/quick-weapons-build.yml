@@ -26,13 +26,29 @@ jobs:
       - name: Configure port
         shell: msys2 {0}
         run: cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=OFF
-      # Compile the modified engine sources independently. The upstream PsyCross
-      # submodule currently fails a full MinGW build on conflicting PSX libc
-      # declarations (open/read/write/lseek), unrelated to this feature.
-      - name: Compile modified sources
+      # MinGW exposes CRT prototypes that collide with PsyCross's PSX card
+      # shims. Adapt only the runner's disposable submodule copy; this is NOT
+      # a source change to the upstream PsyCross submodule.
+      - name: Work around MinGW/PsyCross PSX libc prototypes
         shell: msys2 {0}
         run: |
-          ninja -C pc_port/build \
-            CMakeFiles/SilentHillPC.dir/src/pc_combat.c.obj \
-            CMakeFiles/SilentHillPC.dir/src/pc_config.c.obj \
-            CMakeFiles/SilentHillPC.dir/src/pc_quick_options.c.obj
+          f=pc_port/PsyCross/src/psx/libapi.c
+          sed -i 's/^int open(char\* path, unsigned int flags)$/int open(const char* path, int flags, ...)/' "$f"
+          sed -i 's/^int lseek(int handle, int offset, int whence)$/long lseek(int handle, long offset, int whence)/' "$f"
+          sed -i 's/^int read(int handle, void\* buf, int bytes)$/int read(int handle, void* buf, unsigned int bytes)/' "$f"
+          sed -i 's/^int write(int handle, void\* buf, int bytes)$/int write(int handle, const void* buf, unsigned int bytes)/' "$f"
+          grep -q '^int open(const char\* path, int flags, ...)' "$f"
+          grep -q '^long lseek(int handle, long offset, int whence)' "$f"
+          grep -q '^int read(int handle, void\* buf, unsigned int bytes)' "$f"
+          grep -q '^int write(int handle, const void\* buf, unsigned int bytes)' "$f"
+      - name: Build test executable
+        shell: msys2 {0}
+        run: cmake --build pc_port/build --target SilentHillPC -j 2
+      - name: Package experimental executable
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-weapons-native-test
+          path: |
+            pc_port/build/SilentHillPC.exe
+          if-no-files-found: error
