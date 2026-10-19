@@ -19,8 +19,9 @@ enum {
 
 #define VID_VALVE 0x28DE
 
-/* The atlas is registered over tpage 7 at tpage u 128 (VRAM x 480) at 2x. */
-#define ATLAS_U0 128
+/* The atlas is registered over tpage 7 at tpage u 0 (VRAM x 448) at 2x: at u 128
+ * the dark half's last column would end at u 256, past a u8 UV. */
+#define ATLAS_U0 0
 
 static const char* const s_setLabels[GLYPH_SET_COUNT] = {
     "Auto", "PS_Classic", "PS_Modern", "Xbox", "Nintendo", "Steam"

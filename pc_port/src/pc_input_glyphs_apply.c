@@ -17,7 +17,7 @@
 #define ATLAS_PATH   "gamedata/icons/input_glyphs.png"
 #define ATLAS_W      256
 #define ATLAS_H      512
-#define ATLAS_VRAM_X 480
+#define ATLAS_VRAM_X 448
 #define ATLAS_VRAM_Y 0
 #define ATLAS_VRAM_W 32
 #define ATLAS_VRAM_H 256

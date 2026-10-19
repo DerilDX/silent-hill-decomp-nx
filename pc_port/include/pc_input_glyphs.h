@@ -40,7 +40,7 @@ void        InputGlyphs_UV(int glyph, int dark, int* u, int* v, int* texW, int* 
 /* Game side (pc_input_glyphs_apply.c). */
 
 /* Last CLUT cell in VRAM, used by no TIM: the override keyed on it stands
- * over OPTION2's pixel rect without touching OPTION2's own lookups. */
+ * over tpage 7's pixels without touching any TIM's own lookups there. */
 #define INPUT_GLYPHS_CLUT_X 1008
 #define INPUT_GLYPHS_CLUT_Y 511
 

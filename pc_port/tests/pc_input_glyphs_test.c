@@ -107,7 +107,7 @@ static void test_glyphs_uv(void)
     InputGlyphs_UV(IG_KEY_A, 0, &u, &v, &tw, &sw);
     InputGlyphs_UV(IG_KEY_A, 1, &ud, &vd, &tw, &sw);
     assert(ud == u + 64 && vd == v);
-    assert(u >= 128 && u < 128 + 64 && v >= 0 && v < 256 && u % 8 == 0 && v % 8 == 0);
+    assert(u >= 0 && u < 64 && v >= 0 && v < 256 && u % 8 == 0 && v % 8 == 0);
     assert(tw == 8 && sw == 16);
     InputGlyphs_UV(IG_KEY_SHIFT, 0, &u, &v, &tw, &sw);
     assert(tw == 16 && sw == 32);
