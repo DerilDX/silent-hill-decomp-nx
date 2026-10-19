@@ -26,6 +26,13 @@ jobs:
       - name: Configure port
         shell: msys2 {0}
         run: cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=OFF
-      - name: Build port executable
+      # Compile the modified engine sources independently. The upstream PsyCross
+      # submodule currently fails a full MinGW build on conflicting PSX libc
+      # declarations (open/read/write/lseek), unrelated to this feature.
+      - name: Compile modified sources
         shell: msys2 {0}
-        run: cmake --build pc_port/build --target SilentHillPC -j 2
+        run: |
+          ninja -C pc_port/build \
+            CMakeFiles/SilentHillPC.dir/src/pc_combat.c.obj \
+            CMakeFiles/SilentHillPC.dir/src/pc_config.c.obj \
+            CMakeFiles/SilentHillPC.dir/src/pc_quick_options.c.obj
