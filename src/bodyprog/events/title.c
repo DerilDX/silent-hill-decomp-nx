@@ -8,7 +8,6 @@
 #include "map_registry.h"
 #include "lang_text.h" /* menu translations + width for recentred entries */
 #include "pc_title_style.h"
-#include "dbg_overlay.h"
 #include "pc_ach_screen.h"
 #include "pc_mouse_cursor.h"
 #include "pc_native_menu_draw.h"
@@ -162,7 +161,7 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
     static s32  prevSavegameCount            = 0;
 #ifdef SH_PC_PORT
     static s32  achStep                      = 0;
-    static bool achUnavailableToasted        = false;
+    static bool achUnavailableLogged         = false;
 #endif
 #ifdef SH_PC_PORT
     /* skip_intros=2 drives the stock New Game path rather than duplicating it:
@@ -276,10 +275,10 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
             {
                 g_MainMenu_VisibleEntryFlags |= 1 << MainMenuEntry_Achievements;
             }
-            else if (!achUnavailableToasted && g_PcConfig.retroAchievements && !Pc_Ra_IsPending())
+            else if (!achUnavailableLogged && g_PcConfig.retroAchievements && !Pc_Ra_IsPending())
             {
-                DbgOverlay_ToastLine(Pc_Ra_UnavailableReason());
-                achUnavailableToasted = true;
+                SH_DBG("[RA] ACHIEVEMENTS row hidden: %s", Pc_Ra_UnavailableReason());
+                achUnavailableLogged = true;
             }
 #endif
             /* A set that unloads under the cursor. Upward, so the cursor lands on
