@@ -38,7 +38,7 @@ extern int g_DebugThirdPersonCam;
 #define CS_VISIBLE      8
 #define CS_ARROW_DOWN_Y 189
 #define CS_RULE3_Y      198
-#define CS_RESET_Y      202
+#define CS_FOOTER_Y     202
 #define CS_CONFIRM_Y    96
 
 #define CS_RULE_X0      4
@@ -67,8 +67,8 @@ extern int g_DebugThirdPersonCam;
 static const int s_colX[BC_COLS] = { 134, 182, 230, 275 };
 static const int s_colW[BC_COLS] = { 48, 48, 43, 43 };
 
-enum { CS_FOCUS_ICONS, CS_FOCUS_LIST, CS_FOCUS_RESET };
-enum { CS_HIT_NONE, CS_HIT_ICONS, CS_HIT_ROW, CS_HIT_RESET, CS_HIT_YES, CS_HIT_NO };
+enum { CS_FOCUS_ICONS, CS_FOCUS_LIST, CS_FOCUS_BACK, CS_FOCUS_RESET };
+enum { CS_HIT_NONE, CS_HIT_ICONS, CS_HIT_ROW, CS_HIT_BACK, CS_HIT_RESET, CS_HIT_YES, CS_HIT_NO };
 
 static int       s_open;
 static int       s_focus;
@@ -132,14 +132,14 @@ static void cs_move_row(int dir)
             if (dir > 0)
                 cs_focus_list(0);
             else
-                s_focus = CS_FOCUS_RESET;
+                s_focus = CS_FOCUS_BACK;
             break;
 
         case CS_FOCUS_LIST:
             if (s_list.sel + dir < 0)
                 s_focus = CS_FOCUS_ICONS;
             else if (s_list.sel + dir > last)
-                s_focus = CS_FOCUS_RESET;
+                s_focus = CS_FOCUS_BACK;
             else
                 cs_focus_list(s_list.sel + dir);
             break;
@@ -206,6 +206,11 @@ static void cs_open_reset(void)
     NmConfirm_Open(&s_confirm);
 }
 
+static int cs_footer_reset_x(void)
+{
+    return CS_VALUE_RX - Nm_TextWidth("Reset");
+}
+
 static int cs_value_left(void)
 {
     return CS_VALUE_RX - Nm_TextWidth(InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
@@ -230,8 +235,14 @@ static int cs_hit(const NmInput* in, int* outRow, int* outCol)
     }
     if (cs_in_row(in->mouseY, CS_ICONS_Y))
         return CS_HIT_ICONS;
-    if (cs_in_row(in->mouseY, CS_RESET_Y))
-        return CS_HIT_RESET;
+    if (cs_in_row(in->mouseY, CS_FOOTER_Y))
+    {
+        if (in->mouseX >= CS_TEXT_X - NM_BULLET_TEXT_DX - 1 && in->mouseX < CS_TEXT_X + Nm_TextWidth("Back") + 4)
+            return CS_HIT_BACK;
+        if (in->mouseX >= cs_footer_reset_x() - NM_BULLET_TEXT_DX - 1 && in->mouseX < CS_VALUE_RX + 4)
+            return CS_HIT_RESET;
+        return CS_HIT_NONE;
+    }
     if (in->mouseY < CS_LIST_Y)
         return CS_HIT_NONE;
     i = (in->mouseY - CS_LIST_Y) / CS_PITCH;
@@ -249,12 +260,21 @@ static int cs_hit(const NmInput* in, int* outRow, int* outCol)
     return CS_HIT_ROW;
 }
 
-static void cs_mouse(const NmInput* in)
+static int cs_close(void)
+{
+    cs_beep(Sfx_MenuCancel);
+    s_open = 0;
+    SH_DBG("[BINDS] controls screen closed");
+    return 0;
+}
+
+/* 0 when a click closed the screen. */
+static int cs_mouse(const NmInput* in)
 {
     int row, col, hit;
 
     if (!in->mouseOk || !(in->mouseMoved || in->mouseLeft || in->mouseRight))
-        return;
+        return 1;
     hit = cs_hit(in, &row, &col);
 
     if (in->mouseMoved)
@@ -263,6 +283,8 @@ static void cs_mouse(const NmInput* in)
 
         if (hit == CS_HIT_ICONS)
             s_focus = CS_FOCUS_ICONS;
+        else if (hit == CS_HIT_BACK)
+            s_focus = CS_FOCUS_BACK;
         else if (hit == CS_HIT_RESET)
             s_focus = CS_FOCUS_RESET;
         else if (hit == CS_HIT_ROW)
@@ -284,6 +306,10 @@ static void cs_mouse(const NmInput* in)
             s_focus = CS_FOCUS_ICONS;
             InputGlyphs_Step((in->mouseX < left && in->mouseX >= left - 16) ? -1 : 1);
             cs_beep(Sfx_MenuMove);
+        }
+        else if (hit == CS_HIT_BACK)
+        {
+            return cs_close();
         }
         else if (hit == CS_HIT_RESET)
         {
@@ -314,6 +340,7 @@ static void cs_mouse(const NmInput* in)
             cs_beep(Sfx_MenuError);
         }
     }
+    return 1;
 }
 
 static void cs_confirm_update(const int pressed[BN_COUNT], const NmInput* mouse)
@@ -419,12 +446,7 @@ int Pc_ControlsScreen_Update(void)
     }
 
     if (pressed[BN_BACK])
-    {
-        cs_beep(Sfx_MenuCancel);
-        s_open = 0;
-        SH_DBG("[BINDS] controls screen closed");
-        return 0;
-    }
+        return cs_close();
 
     if (in.wheel != 0)
     {
@@ -432,7 +454,8 @@ int Pc_ControlsScreen_Update(void)
         if (s_focus == CS_FOCUS_LIST)
             s_col = cs_resolve_col(s_list.sel, s_wantCol);
     }
-    cs_mouse(&in);
+    if (!cs_mouse(&in))
+        return 0;
     if (s_listen || s_confirm.open)
         return 1;
 
@@ -454,6 +477,11 @@ int Pc_ControlsScreen_Update(void)
         {
             cs_move_col(dir);
         }
+        else
+        {
+            s_focus = (s_focus == CS_FOCUS_BACK) ? CS_FOCUS_RESET : CS_FOCUS_BACK;
+            cs_beep(Sfx_MenuMove);
+        }
     }
 
     if (pressed[BN_OK])
@@ -466,6 +494,10 @@ int Pc_ControlsScreen_Update(void)
         else if (s_focus == CS_FOCUS_LIST)
         {
             cs_activate();
+        }
+        else if (s_focus == CS_FOCUS_BACK)
+        {
+            return cs_close();
         }
         else
         {
@@ -657,12 +689,12 @@ static void cs_row_draw(int row, int y)
         Nm_HighlightDraw(CS_HL_X0, CS_HL_X1, y + 14);
 }
 
-static void cs_bullet_row_draw(int y, int selected, const char* label)
+static void cs_bullet_draw(int x, int y, int selected, const char* label)
 {
-    Nm_BulletDraw(CS_TEXT_X - NM_BULLET_TEXT_DX, y, selected);
-    Nm_TextDraw(CS_TEXT_X, y, NM_TEXT_TALL, StringColorId_White, label);
+    Nm_BulletDraw(x - NM_BULLET_TEXT_DX, y, selected);
+    Nm_TextDraw(x, y, NM_TEXT_TALL, StringColorId_White, label);
     if (selected)
-        Nm_HighlightDraw(CS_TEXT_X - NM_BULLET_TEXT_DX - 1, CS_TEXT_X + Nm_TextWidth(label) + 4, y + 14);
+        Nm_HighlightDraw(x - NM_BULLET_TEXT_DX - 1, x + Nm_TextWidth(label) + 4, y + 14);
 }
 
 void Pc_ControlsScreen_Draw(void)
@@ -682,7 +714,7 @@ void Pc_ControlsScreen_Draw(void)
 
     s_set = InputGlyphs_ActiveSet();
 
-    cs_bullet_row_draw(CS_ICONS_Y, s_focus == CS_FOCUS_ICONS, "Gamepad_Icons");
+    cs_bullet_draw(CS_TEXT_X, CS_ICONS_Y, s_focus == CS_FOCUS_ICONS, "Gamepad_Icons");
     Nm_TextDrawRight(CS_VALUE_RX, CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White,
                      InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
     Nm_ValueArrowsDraw(cs_value_left(), CS_VALUE_RX, CS_ICONS_Y);
@@ -707,5 +739,6 @@ void Pc_ControlsScreen_Draw(void)
     }
 
     Nm_RuleDraw(CS_RULE_X0, CS_RULE_X1, CS_RULE3_Y, 0);
-    cs_bullet_row_draw(CS_RESET_Y, s_focus == CS_FOCUS_RESET, "Reset");
+    cs_bullet_draw(CS_TEXT_X, CS_FOOTER_Y, s_focus == CS_FOCUS_BACK, "Back");
+    cs_bullet_draw(cs_footer_reset_x(), CS_FOOTER_Y, s_focus == CS_FOCUS_RESET, "Reset");
 }
