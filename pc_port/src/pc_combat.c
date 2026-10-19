@@ -366,6 +366,19 @@ static const u8 s_quickWeaponOrder[] = {
 };
 
 extern int g_PcQuickOptionsActive;
+/* SDL event watch retains wheel events even when the window grabs the mouse. */
+static SDL_atomic_t s_quickWheel = {0};
+static int SDLCALL Pc_QuickWeaponWheelWatch(void* userdata, SDL_Event* event)
+{
+    int delta;
+    (void)userdata;
+    if (event->type != SDL_MOUSEWHEEL) return 1;
+    delta = event->wheel.y;
+    if (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) delta = -delta;
+    if (delta) SDL_AtomicAdd(&s_quickWheel, delta);
+    return 1;
+}
+
 static void Pc_QuickWeaponInputUpdate(void)
 {
     static const SDL_Scancode keys[] = {
@@ -375,15 +388,16 @@ static void Pc_QuickWeaponInputUpdate(void)
         SDL_SCANCODE_0, SDL_SCANCODE_MINUS
     };
     static unsigned char prev[11];
-    static int previousWheel;
+    static int watchRegistered;
     const unsigned char *keyboard = SDL_GetKeyboardState(NULL);
-    int target = -1, delta, i, j, start = -1;
-    /* Read the shared PsyCross wheel counter every frame. While menus are
-     * active, consume movement without applying it later in gameplay. */
-    extern int g_PsyX_WheelTotal;
-    int wheel = g_PsyX_WheelTotal;
-    delta = wheel - previousWheel;
-    previousWheel = wheel;
+    int target = -1, delta, i, j;
+    if (!watchRegistered) {
+        SDL_AddEventWatch(Pc_QuickWeaponWheelWatch, NULL);
+        watchRegistered = 1;
+    }
+    /* Consume changes even if a menu is open to prevent deferred switching. */
+    delta = SDL_AtomicGet(&s_quickWheel);
+    SDL_AtomicSet(&s_quickWheel, 0);
     for (i = 0; i < 11; ++i) {
         int down = keyboard && keyboard[keys[i]];
         if (down && !prev[i]) target = i;
