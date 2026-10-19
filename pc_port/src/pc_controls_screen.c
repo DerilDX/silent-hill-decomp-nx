@@ -20,9 +20,9 @@
 #include "pc_bind_input.h"
 #include "pc_config.h"
 #include "pc_controls_screen.h"
+#include "pc_input_glyphs.h"
 #include "pc_native_menu.h"
 #include "pc_native_menu_draw.h"
-#include "pc_pad_icons.h"
 #include "sh_log.h"
 
 extern int g_DebugThirdPersonCam;
@@ -51,9 +51,9 @@ extern int g_DebugThirdPersonCam;
 #define CS_HL_X1        316
 #define CS_ARROW_X      160
 #define CS_ROW_H        16
-#define CS_ICON_DY      2
+#define CS_ICON_DY      0
 
-/* After the text (NM_OT_TEXT 8), so each icon's DR_TPAGE cannot touch a glyph. */
+/* After the text (NM_OT_TEXT 8), so each glyph quad's tpage cannot touch a font glyph. */
 #define CS_OT_ICON      7
 
 #define CS_RGB_WHITE    128
@@ -76,6 +76,7 @@ static int       s_listen;
 static NmScroll  s_list;
 static NmConfirm s_confirm;
 static BindNav   s_nav;
+static int       s_set;
 
 static void cs_beep(int sfxId)
 {
@@ -204,9 +205,23 @@ static void cs_open_reset(void)
     NmConfirm_Open(&s_confirm);
 }
 
+/* "Auto" and the resolved set are two strings so "Auto" stays an exact
+ * localization key. NULL when the setting is not Auto. */
+static const char* cs_auto_suffix(char* out, size_t outSize)
+{
+    if (InputGlyphs_ClampSet(g_PcConfig.gamepadIcons) != GLYPH_SET_AUTO)
+        return NULL;
+    snprintf(out, outSize, "_(%s)", InputGlyphs_SetLabel(s_set));
+    return out;
+}
+
 static int cs_value_left(void)
 {
-    return CS_VALUE_RX - Nm_TextWidth(PadIcons_SetLabel(g_PcConfig.gamepadIcons));
+    char        buf[32];
+    const char* suffix = cs_auto_suffix(buf, sizeof(buf));
+
+    return CS_VALUE_RX - Nm_TextWidth(InputGlyphs_SetLabel(g_PcConfig.gamepadIcons)) -
+           (suffix != NULL ? Nm_TextWidth(suffix) : 0);
 }
 
 static int cs_in_row(int my, int y)
@@ -280,7 +295,7 @@ static void cs_mouse(const NmInput* in)
             int left = cs_value_left();
 
             s_focus = CS_FOCUS_ICONS;
-            PadIcons_Step((in->mouseX < left && in->mouseX >= left - 16) ? -1 : 1);
+            InputGlyphs_Step((in->mouseX < left && in->mouseX >= left - 16) ? -1 : 1);
             cs_beep(Sfx_MenuMove);
         }
         else if (hit == CS_HIT_RESET)
@@ -365,6 +380,7 @@ void Pc_ControlsScreen_Open(void)
     s_listen  = 0;
     memset(&s_confirm, 0, sizeof(s_confirm));
     BindNav_Reset(&s_nav);
+    InputGlyphs_Load();
     s_open = 1;
     SH_DBG("[BINDS] controls screen open: %s scheme", BindCore_Scheme() ? "altcam" : "classic");
 }
@@ -444,7 +460,7 @@ int Pc_ControlsScreen_Update(void)
 
         if (s_focus == CS_FOCUS_ICONS)
         {
-            PadIcons_Step(dir);
+            InputGlyphs_Step(dir);
             cs_beep(Sfx_MenuMove);
         }
         else if (s_focus == CS_FOCUS_LIST)
@@ -457,7 +473,7 @@ int Pc_ControlsScreen_Update(void)
     {
         if (s_focus == CS_FOCUS_ICONS)
         {
-            PadIcons_Step(1);
+            InputGlyphs_Step(1);
             cs_beep(Sfx_MenuMove);
         }
         else if (s_focus == CS_FOCUS_LIST)
@@ -493,79 +509,114 @@ static const char* cs_fit(const char* key, int maxW, char* out, size_t outSize)
     return out;
 }
 
-static void cs_icon_draw(int icon, int x, int y, int color)
+static void cs_glyph_draw(int glyph, int dark, int x, int y, int rgb)
 {
-    GsOT_TAG*  ot    = &g_OrderingTable2[g_ActiveBufferIdx].org[CS_OT_ICON];
-    SPRT*      prim  = (SPRT*)GsOUT_PACKET_P;
-    DR_TPAGE*  tpage = (DR_TPAGE*)(prim + 1);
-    int        py    = (g_GameWork.gsScreenHeight == FRAMEBUFFER_HEIGHT_INTERLACED) ? (y - 112) * 2 : (y - 112);
-    int        u, v, r, g, b;
+    GsOT_TAG* ot   = &g_OrderingTable2[g_ActiveBufferIdx].org[CS_OT_ICON];
+    POLY_FT4* poly = (POLY_FT4*)GsOUT_PACKET_P;
+    int       tall = (g_GameWork.gsScreenHeight == FRAMEBUFFER_HEIGHT_INTERLACED);
+    int       y0   = tall ? (y - 112) * 2 : (y - 112);
+    int       y1   = tall ? (y + INPUT_GLYPH_PX - 112) * 2 : (y + INPUT_GLYPH_PX - 112);
+    int       u, v, texW, screenW, texH;
+
+    InputGlyphs_UV(glyph, dark, &u, &v, &texW, &screenW);
+    texH = texW * INPUT_GLYPH_PX / screenW;
+
+    setPolyFT4(poly);
+    setRGB0(poly, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    setXY4(poly, x - 160, y0, x - 160 + screenW, y0, x - 160, y1, x - 160 + screenW, y1);
+    setUV4(poly, u, v, u + texW, v, u, v + texH, u + texW, v + texH);
+    poly->tpage = getTPage(0, 0, 448, 0);
+    poly->clut  = getClut(INPUT_GLYPHS_CLUT_X, INPUT_GLYPHS_CLUT_Y);
+    addPrim(ot, poly);
+    GsOUT_PACKET_P = (PACKET*)(poly + 1);
+}
+
+/* Selected cells draw the light glyph untinted; every other cell the dark one. */
+static void cs_glyph_cell_draw(int glyph, int x, int y, int color)
+{
+    int rgb;
 
     switch (color)
     {
-        case StringColorId_Gold:     r = 160; g = 128; b = 64; break;
-        case StringColorId_Red:      r = 128; g = 0;   b = 0;  break;
-        case StringColorId_DarkGrey: r = g = b = CS_RGB_DIM;   break;
-        default:                     r = g = b = CS_RGB_WHITE; break;
+        case StringColorId_Red:      rgb = CS_RGB_WHITE << 16;      break;
+        case StringColorId_DarkGrey: rgb = CS_RGB_DIM * 0x010101;   break;
+        default:                     rgb = CS_RGB_WHITE * 0x010101; break;
     }
-    PadIcons_UV(icon, &u, &v);
-
-    setSprt(prim);
-    setRGB0(prim, r, g, b);
-    setXY0(prim, x - 160, py);
-    setWH(prim, PAD_ICON_SIZE, PAD_ICON_SIZE);
-    setUV0(prim, u, v);
-    setClut(prim, g_ControllerButtonAtlasImg.clutX, g_ControllerButtonAtlasImg.clutY);
-    addPrim(ot, prim);
-
-    setDrawTPage(tpage, 0, 1, getTPageN(0, 0, 7, 0));
-    addPrim(ot, tpage);
-    GsOUT_PACKET_P = (PACKET*)(tpage + 1);
+    cs_glyph_draw(glyph, color != StringColorId_Gold, x, y + CS_ICON_DY, rgb);
 }
 
-static void cs_pad_draw(int icon, const char* sdlName, int col, int y, int color)
+static void cs_pad_draw(int glyph, const char* text, int col, int y, int color)
 {
     char name[NM_LINE_MAX], fit[NM_LINE_MAX];
 
-    if (icon >= 0 && PadIcons_HasArt(icon))
+    if (InputGlyphs_Ready())
     {
-        cs_icon_draw(icon, s_colX[col], y + CS_ICON_DY, color);
+        cs_glyph_cell_draw(glyph, s_colX[col], y, color);
         return;
     }
-    Nm_SanitizeGlyphs(PadIcons_Fallback(icon, sdlName), name, sizeof(name), 0);
-    if (Nm_TextWidth(name) > s_colW[col])
-        Nm_SanitizeGlyphs(PadIcons_FallbackShort(icon, sdlName), name, sizeof(name), 0);
+    Nm_SanitizeGlyphs(text, name, sizeof(name), 0);
     Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(name, s_colW[col], fit, sizeof(fit)));
 }
 
-/* The left-stick and d-pad icons for a Move row's direction. */
-static int cs_stick_icon(int row, int col)
+/* A Move row's direction, in e_GlyphDir order, or -1. */
+static int cs_stick_dir(int row)
 {
-    static const struct { const char* key; int ls, dpad; } dirs[] = {
-        { "key_up", PI_LS_UP, PI_DPAD_UP },         { "key_down", PI_LS_DOWN, PI_DPAD_DOWN },
-        { "key_left", PI_LS_LEFT, PI_DPAD_LEFT },   { "key_right", PI_LS_RIGHT, PI_DPAD_RIGHT },
-    };
+    static const char* const keys[] = { "key_up", "key_right", "key_down", "key_left" };
     const char* key = BindCore_Row(row)->key[BC_KB1];
     int         i;
 
-    for (i = 0; i < (int)(sizeof(dirs) / sizeof(dirs[0])); i++)
+    for (i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); i++)
     {
-        if (strcmp(key, dirs[i].key) == 0)
-            return (col == BC_PAD1) ? dirs[i].ls : dirs[i].dpad;
+        if (strcmp(key, keys[i]) == 0)
+            return i;
     }
     return -1;
 }
 
-static void cs_cell_draw(int row, int col, int y, int selected)
+/* The left-stick and d-pad glyphs for a Move row's direction. */
+static int cs_stick_icon(int row, int col)
+{
+    return InputGlyphs_ForStick(s_set, cs_stick_dir(row), col != BC_PAD1);
+}
+
+static void cs_stick_draw(int row, int col, int y)
+{
+    char text[8];
+    int  dir = cs_stick_dir(row);
+
+    if (dir < 0)
+        return;
+    snprintf(text, sizeof(text), "%s_%c", (col == BC_PAD1) ? "LS" : "DP", "URDL"[dir]);
+    cs_pad_draw(cs_stick_icon(row, col), text, col, y, StringColorId_DarkGrey);
+}
+
+static void cs_key_draw(const char* v, int col, int y, int color)
 {
     char        name[NM_LINE_MAX], clean[NM_LINE_MAX], fit[NM_LINE_MAX];
+    int         glyph  = InputGlyphs_Ready() ? InputGlyphs_ForKey(v) : -1;
+    const char* suffix = InputGlyphs_KeySuffix(v);
+
+    if (glyph >= 0)
+    {
+        cs_glyph_cell_draw(glyph, s_colX[col], y, color);
+        if (suffix != NULL)
+            Nm_TextDraw(s_colX[col] + INPUT_GLYPH_PX + 1, y, NM_TEXT_TALL, color, suffix);
+        return;
+    }
+    BindCore_DisplayKey(v, name, sizeof(name));
+    Nm_SanitizeGlyphs(name, clean, sizeof(clean), 0);
+    Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(clean, s_colW[col], fit, sizeof(fit)));
+}
+
+static void cs_cell_draw(int row, int col, int y, int selected)
+{
     const char* v;
     int         color;
 
     if (!cs_cell_exists(row, col))
     {
         if (cs_stick_cell(row, col))
-            cs_pad_draw(cs_stick_icon(row, col), NULL, col, y, StringColorId_DarkGrey);
+            cs_stick_draw(row, col, y);
         return;
     }
     if (selected && s_listen)
@@ -590,13 +641,9 @@ static void cs_cell_draw(int row, int col, int y, int selected)
         return;
     }
     if (col >= BC_PAD1)
-    {
-        cs_pad_draw(PadIcons_ForBind(v), v, col, y, color);
-        return;
-    }
-    BindCore_DisplayKey(v, name, sizeof(name));
-    Nm_SanitizeGlyphs(name, clean, sizeof(clean), 0);
-    Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(clean, s_colW[col], fit, sizeof(fit)));
+        cs_pad_draw(InputGlyphs_ForPad(s_set, v), v, col, y, color);
+    else
+        cs_key_draw(v, col, y, color);
 }
 
 static void cs_row_draw(int row, int y)
@@ -634,7 +681,8 @@ static void cs_bullet_row_draw(int y, int selected, const char* label)
 
 void Pc_ControlsScreen_Draw(void)
 {
-    const char* setLabel;
+    char        buf[32];
+    const char* suffix;
     int         kbSel, padSel, i;
 
     if (!s_open)
@@ -648,9 +696,14 @@ void Pc_ControlsScreen_Draw(void)
         return;
     }
 
+    s_set = InputGlyphs_ActiveSet();
+
     cs_bullet_row_draw(CS_ICONS_Y, s_focus == CS_FOCUS_ICONS, "Gamepad_Icons");
-    setLabel = PadIcons_SetLabel(g_PcConfig.gamepadIcons);
-    Nm_TextDrawRight(CS_VALUE_RX, CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White, setLabel);
+    Nm_TextDraw(cs_value_left(), CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White,
+                InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
+    suffix = cs_auto_suffix(buf, sizeof(buf));
+    if (suffix != NULL)
+        Nm_TextDrawRight(CS_VALUE_RX, CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White, suffix);
     Nm_ValueArrowsDraw(cs_value_left(), CS_VALUE_RX, CS_ICONS_Y);
 
     kbSel  = (s_focus == CS_FOCUS_LIST && s_col <= BC_KB2);

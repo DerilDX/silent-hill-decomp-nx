@@ -850,13 +850,7 @@ if(BUILD_TESTING)
     target_include_directories(pc_bind_core_test PRIVATE include)
     add_test(NAME pc_bind_core_test COMMAND pc_bind_core_test)
 
-    # Gamepad icon sets (bind mapping, atlas cells, text fallback, art detection).
-    add_executable(pc_pad_icons_test
-        tests/pc_pad_icons_test.c
-        src/pc_pad_icons.c)
-    target_include_directories(pc_pad_icons_test PRIVATE include)
-    add_test(NAME pc_pad_icons_test COMMAND pc_pad_icons_test)
-
+    # Input glyphs (bind mapping, set labels, Auto detection, atlas cells).
     add_executable(pc_input_glyphs_test
         tests/pc_input_glyphs_test.c
         src/pc_input_glyphs.c)
