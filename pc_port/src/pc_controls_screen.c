@@ -263,7 +263,6 @@ static int cs_hit(const NmInput* in, int* outRow, int* outCol)
 static int cs_close(void)
 {
     cs_beep(Sfx_MenuCancel);
-    s_open = 0;
     SH_DBG("[BINDS] controls screen closed");
     return 0;
 }
@@ -397,6 +396,11 @@ void Pc_ControlsScreen_Open(void)
     InputGlyphs_Load();
     s_open = 1;
     SH_DBG("[BINDS] controls screen open: %s scheme", BindCore_Scheme() ? "altcam" : "classic");
+}
+
+void Pc_ControlsScreen_Close(void)
+{
+    s_open = 0;
 }
 
 int Pc_ControlsScreen_IsOpen(void)

@@ -12,8 +12,10 @@
  * use selects (g_DebugThirdPersonCam). */
 void Pc_ControlsScreen_Open(void);
 int  Pc_ControlsScreen_IsOpen(void);
-/* 1 while open, 0 once the player leaves. */
+/* 1 while open, 0 once the player leaves. The screen stays open (and
+ * drawable) until Pc_ControlsScreen_Close. */
 int  Pc_ControlsScreen_Update(void);
+void Pc_ControlsScreen_Close(void);
 void Pc_ControlsScreen_Draw(void);
 
 #endif

@@ -4294,9 +4294,12 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
         if (g_GameWork.gameStateSteps[1] == ControllerMenuState_Leave)
         {
             /* The PSX leave path would draw the old layout under the fade-out;
-             * leave the same way without drawing anything. */
+             * leave the same way, fading out the native screen instead. */
+            Pc_ControlsScreen_Draw();
+            Pc_MouseCursor_Show();
             if (ScreenFade_IsFinished())
             {
+                Pc_ControlsScreen_Close();
                 ScreenFade_Start(true, true, false);
                 g_GameWork.gameStateSteps[0] = OptionsMenuState_LeaveController;
                 g_SysWork.counters_1C[1]     = 0;
@@ -4307,10 +4310,12 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
         }
         else
         {
-            if (Pc_ControlsScreen_Update())
+            int open = Pc_ControlsScreen_Update();
+
+            Pc_ControlsScreen_Draw();
+            Pc_MouseCursor_Show();
+            if (open)
             {
-                Pc_ControlsScreen_Draw();
-                Pc_MouseCursor_Show();
                 ScreenFade_Start(false, true, false);
                 g_Controller0->clickedBtnFlags   = 0;
                 g_Controller0->pulsedBtnFlags    = 0;
@@ -4325,7 +4330,7 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
              * into the stock controller layout below and drew it once, which is
              * the old screen flashing up for a frame as the panel exits. The
              * Leave branch above handles every frame after this one and draws
-             * nothing. */
+             * only the native screen. */
             return;
         }
     }
