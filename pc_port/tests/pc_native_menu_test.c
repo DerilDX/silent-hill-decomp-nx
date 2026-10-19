@@ -120,6 +120,29 @@ static void test_page(void)
     memset(&in, 0, sizeof in); in.mouseRight = 1;
     assert(NmPage_Update(&p, &in, -1) == NM_EV_BACK);
 }
+static void test_page_wheel_info(void)
+{
+    static const NmRow rows[5] = {
+        { "A0", NM_ROW_ACTION, NULL, NULL, pg_act },
+        { "I1", NM_ROW_INFO,   NULL, NULL, NULL   },
+        { "I2", NM_ROW_INFO,   NULL, NULL, NULL   },
+        { "A3", NM_ROW_ACTION, NULL, NULL, pg_act },
+        { "A4", NM_ROW_ACTION, NULL, NULL, pg_act },
+    };
+    NmPage p = { "Page", rows, 5, NULL, {0} };
+    NmInput in;
+    NmPage_Init(&p, 2);
+    assert(p.scroll.sel == 0 && p.scroll.top == 0);
+
+    memset(&in, 0, sizeof in); in.wheel = -1;
+    assert(NmPage_Update(&p, &in, -1) == NM_EV_MOVED && p.scroll.sel == 3);
+    assert(p.scroll.top <= 3 && 3 < p.scroll.top + p.scroll.visible);
+
+    memset(&in, 0, sizeof in); in.wheel = +1;
+    NmPage_Update(&p, &in, -1);
+    assert(p.scroll.sel >= p.scroll.top && p.scroll.sel < p.scroll.top + p.scroll.visible);
+    assert(rows[p.scroll.sel].kind != NM_ROW_INFO);
+}
 static void test_confirm(void)
 {
     NmConfirm c; NmInput in = {0}; NmConfirm_Open(&c); assert(c.open && !c.yes);
@@ -188,6 +211,7 @@ int main(void)
     test_wrap();
     test_date();
     test_page();
+    test_page_wheel_info();
     test_confirm();
     test_title_layout_retail_full();
     test_title_layout_retail_nosave();

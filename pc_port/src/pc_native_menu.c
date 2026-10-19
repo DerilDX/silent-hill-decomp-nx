@@ -259,7 +259,7 @@ NmEvent NmPage_Update(NmPage* p, const NmInput* in, int hoverRow)
             int s = p->scroll.sel, i;
             for (i = s; i < p->rowCount && !row_selectable(p, i); i++) {}
             if (i >= p->rowCount) for (i = s; i >= 0 && !row_selectable(p, i); i--) {}
-            if (i >= 0 && i < p->rowCount) p->scroll.sel = i;
+            if (i >= 0 && i < p->rowCount) NmScroll_Select(&p->scroll, i);
         }
         if (p->scroll.sel != old) ev = NM_EV_MOVED;
     }
