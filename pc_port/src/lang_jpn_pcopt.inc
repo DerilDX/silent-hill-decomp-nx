@@ -75,7 +75,8 @@
 /* Title menu ACHIEVEMENTS row, Achievements and Controls screens. The
  * Controls action labels are right-aligned into the 129 px before their colon
  * (ten cells); "_Map" is that screen's Map row, since "Map" above is the
- * start-map row. Xbox and Nintendo stay in Latin, as their own names. */
+ * start-map row. PS_Classic, PS_Modern, Xbox, Nintendo and Steam stay in
+ * Latin, as their own names. */
 { "ACHIEVEMENTS",        "\216\300\220\321",                      }, /* 実績 */
 { "UNLOCKED",            "\211\360\217\234\215\317\202\335",      }, /* 解除済み */
 { "LOCKED",              "\226\242\211\360\217\234",              }, /* 未解除 */
@@ -83,7 +84,6 @@
 { "Points",              "\203\174\203\103\203\223\203\147",      }, /* ポイント */
 { "points",              "\203\174\203\103\203\223\203\147",      }, /* ポイント */
 { "Gamepad_Icons",       "\203\173\203\136\203\223\203\101\203\103\203\122\203\223", }, /* ボタンアイコン */
-{ "Original",            "\203\111\203\212\203\127\203\151\203\213", }, /* オリジナル */
 { "Function",            "\213\100\224\134",                      }, /* 機能 */
 { "Keyboard",            "\203\114\201\133\203\173\201\133\203\150", }, /* キーボード */
 { "Controller",          "\203\122\203\223\203\147\203\215\201\133\203\211\201\133", }, /* コントローラー */

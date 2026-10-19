@@ -293,14 +293,24 @@ EN: points
 RU: очк.
 
 [MENU.Gamepad_Icons]
-NOTE: Controls screen row; its value (Original / Xbox / Nintendo) shares the line
+NOTE: Controls screen row; its value (Auto / PS Classic / PS Modern / Xbox / Nintendo / Steam) shares the line
 EN: Gamepad Icons
 RU: Значки_геймпада
 
-[MENU.Original]
-NOTE: Gamepad Icons value: the PlayStation icons
-EN: Original
-RU: Оригинал
+[MENU.Auto]
+NOTE: Gamepad Icons value: follows the connected controller
+EN: Auto
+RU: Авто
+
+[MENU.PS_Classic]
+NOTE: Gamepad Icons value (brand name)
+EN: PS Classic
+RU: ПС_Классик
+
+[MENU.PS_Modern]
+NOTE: Gamepad Icons value (brand name)
+EN: PS Modern
+RU: ПС_Модерн
 
 [MENU.Xbox]
 NOTE: Gamepad Icons value (brand name)
@@ -311,6 +321,11 @@ RU: Иксбокс
 NOTE: Gamepad Icons value (brand name)
 EN: Nintendo
 RU: Нинтендо
+
+[MENU.Steam]
+NOTE: Gamepad Icons value (brand name)
+EN: Steam
+RU: Стим
 
 [MENU.Function]
 NOTE: Controls screen column heading over the action names; max ~12 characters

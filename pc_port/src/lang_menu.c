@@ -411,7 +411,7 @@ static const s_MenuTranslation s_MenuTr[] = {
     { "Points",          { "Punkte",                        NULL,                               "Puntos",                     "Punti"                   } },
     { "points",          { "Punkte",                        NULL,                               "puntos",                     "punti"                   } },
     { "Gamepad_Icons",   { "Gamepad-Symbole",               "Ic\xF4nes_manette",                "Iconos_del_mando",           "Icone_controller"        } },
-    { "Original",        { NULL,                            "Originales",                       "Originales",                 "Originali"               } },
+    { "Auto",            { NULL,                            NULL,                               "Auto.",                      NULL                      } },
     { "Function",        { "Funktion",                      "Fonction",                         "Funci\xF3n",                 "Funzione"                } },
     { "Keyboard",        { "Tastatur",                      "Clavier",                          "Teclado",                    "Tastiera"                } },
     { "Controller",      { NULL,                            "Manette",                          "Mando",                      NULL                      } },

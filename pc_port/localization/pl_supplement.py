@@ -30,7 +30,7 @@ SAME = {
     'MENU.Aniso_16x', 'MENU.30_Hz', 'MENU.60_Hz',
     'QUICK.FOV', 'QUICK.Stereo', 'QUICK.HRTF', 'QUICK.Noclip',
     'ITEM_NAME.68', 'ITEM_NAME.93', 'ITEM_NAME.102', 'ITEM_NAME.131',
-    'MENU.Xbox', 'MENU.Nintendo',
+    'MENU.PS_Classic', 'MENU.PS_Modern', 'MENU.Xbox', 'MENU.Nintendo', 'MENU.Steam',
     # The translator typed these out as the English rather than leaving them
     # blank, so it is their decision and not an oversight -- and the right one:
     # these are the words Polish software uses. Not overridden here.
@@ -89,7 +89,7 @@ MENU = {
     'Points':          'pkt',
     'points':          'pkt',
     'Gamepad_Icons':   'Ikony_kontrolera',
-    'Original':        'Oryginalne',
+    'Auto':            'Automatyczne',
     'Function':        'Funkcja',
     'Keyboard':        'Klawiatura',
     'Controller':      'Kontroler',

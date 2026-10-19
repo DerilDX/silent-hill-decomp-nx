@@ -28,7 +28,7 @@ SAME = {
     'QUICK.HUD', 'QUICK.FOV', 'QUICK.Quad', 'QUICK.HRTF', 'QUICK.Noclip',
     # Proper nouns.
     'ITEM_NAME.68', 'ITEM_NAME.93', 'ITEM_NAME.102', 'ITEM_NAME.131',
-    'MENU.Xbox', 'MENU.Nintendo',
+    'MENU.PS_Classic', 'MENU.PS_Modern', 'MENU.Xbox', 'MENU.Nintendo', 'MENU.Steam',
 }
 
 # --- The Language row, which Portuguese can now appear on ------------------
@@ -52,7 +52,7 @@ MENU = {
     'Points':          'Pontos',
     'points':          'pontos',
     'Gamepad_Icons':   'Ícones_do_controle',
-    'Original':        'Originais',
+    'Auto':            'Automático',
     'Function':        'Função',
     'Keyboard':        'Teclado',
     'Controller':      'Controle',

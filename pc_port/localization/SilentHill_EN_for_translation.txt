@@ -4,7 +4,7 @@
  Every visible in-game English string that is NOT baked into an image:
  story/cutscene dialogue, examine/pickup prompts, the original menus, the PC
  port's own menus (PC Options, the F10 Quick Options menu, the Controls
- panel), item names and item descriptions.  Total entries: 1938.
+ panel), item names and item descriptions.  Total entries: 1941.
 
  HOW TO USE
  ----------
@@ -335,13 +335,23 @@ EN: points
 TR: 
 
 [MENU.Gamepad_Icons]
-NOTE: Controls screen row; its value (Original / Xbox / Nintendo) shares the line
+NOTE: Controls screen row; its value (Auto / PS Classic / PS Modern / Xbox / Nintendo / Steam) shares the line
 EN: Gamepad Icons
 TR: 
 
-[MENU.Original]
-NOTE: Gamepad Icons value: the PlayStation icons
-EN: Original
+[MENU.Auto]
+NOTE: Gamepad Icons value: follows the connected controller
+EN: Auto
+TR: 
+
+[MENU.PS_Classic]
+NOTE: Gamepad Icons value (brand name)
+EN: PS Classic
+TR: 
+
+[MENU.PS_Modern]
+NOTE: Gamepad Icons value (brand name)
+EN: PS Modern
 TR: 
 
 [MENU.Xbox]
@@ -352,6 +362,11 @@ TR:
 [MENU.Nintendo]
 NOTE: Gamepad Icons value (brand name)
 EN: Nintendo
+TR: 
+
+[MENU.Steam]
+NOTE: Gamepad Icons value (brand name)
+EN: Steam
 TR: 
 
 [MENU.Function]
