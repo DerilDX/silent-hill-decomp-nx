@@ -58,6 +58,7 @@ extern int g_DebugThirdPersonCam;
 
 #define CS_RGB_WHITE    128
 #define CS_RGB_DIM      64
+#define CS_RGB_RED      0x800000
 
 /* Widths from the FONT16 kerning table: the widest English label
  * ("Change_Camera", 129) starts at x 0; "Space" (48) fits both keyboard
@@ -205,23 +206,9 @@ static void cs_open_reset(void)
     NmConfirm_Open(&s_confirm);
 }
 
-/* "Auto" and the resolved set are two strings so "Auto" stays an exact
- * localization key. NULL when the setting is not Auto. */
-static const char* cs_auto_suffix(char* out, size_t outSize)
-{
-    if (InputGlyphs_ClampSet(g_PcConfig.gamepadIcons) != GLYPH_SET_AUTO)
-        return NULL;
-    snprintf(out, outSize, "_(%s)", InputGlyphs_SetLabel(s_set));
-    return out;
-}
-
 static int cs_value_left(void)
 {
-    char        buf[32];
-    const char* suffix = cs_auto_suffix(buf, sizeof(buf));
-
-    return CS_VALUE_RX - Nm_TextWidth(InputGlyphs_SetLabel(g_PcConfig.gamepadIcons)) -
-           (suffix != NULL ? Nm_TextWidth(suffix) : 0);
+    return CS_VALUE_RX - Nm_TextWidth(InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
 }
 
 static int cs_in_row(int my, int y)
@@ -531,14 +518,13 @@ static void cs_glyph_draw(int glyph, int dark, int x, int y, int rgb)
     GsOUT_PACKET_P = (PACKET*)(poly + 1);
 }
 
-/* Selected cells draw the light glyph untinted; every other cell the dark one. */
 static void cs_glyph_cell_draw(int glyph, int x, int y, int color)
 {
     int rgb;
 
     switch (color)
     {
-        case StringColorId_Red:      rgb = CS_RGB_WHITE << 16;      break;
+        case StringColorId_Red:      rgb = CS_RGB_RED;              break;
         case StringColorId_DarkGrey: rgb = CS_RGB_DIM * 0x010101;   break;
         default:                     rgb = CS_RGB_WHITE * 0x010101; break;
     }
@@ -681,9 +667,7 @@ static void cs_bullet_row_draw(int y, int selected, const char* label)
 
 void Pc_ControlsScreen_Draw(void)
 {
-    char        buf[32];
-    const char* suffix;
-    int         kbSel, padSel, i;
+    int kbSel, padSel, i;
 
     if (!s_open)
         return;
@@ -699,11 +683,8 @@ void Pc_ControlsScreen_Draw(void)
     s_set = InputGlyphs_ActiveSet();
 
     cs_bullet_row_draw(CS_ICONS_Y, s_focus == CS_FOCUS_ICONS, "Gamepad_Icons");
-    Nm_TextDraw(cs_value_left(), CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White,
-                InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
-    suffix = cs_auto_suffix(buf, sizeof(buf));
-    if (suffix != NULL)
-        Nm_TextDrawRight(CS_VALUE_RX, CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White, suffix);
+    Nm_TextDrawRight(CS_VALUE_RX, CS_ICONS_Y, NM_TEXT_TALL, StringColorId_White,
+                     InputGlyphs_SetLabel(g_PcConfig.gamepadIcons));
     Nm_ValueArrowsDraw(cs_value_left(), CS_VALUE_RX, CS_ICONS_Y);
 
     kbSel  = (s_focus == CS_FOCUS_LIST && s_col <= BC_KB2);
