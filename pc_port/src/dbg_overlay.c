@@ -2112,6 +2112,10 @@ void DbgOverlay_Render(void)
 
     { extern void Pc_ConfirmDialog_Draw(void); Pc_ConfirmDialog_Draw(); }
 
+    /* Mouse pointer above every panel. Before the early-out below, which skips
+     * the rest of this function on nearly every frame. */
+    { extern void Pc_MouseCursor_GlDraw(void); Pc_MouseCursor_GlDraw(); }
+
     /* Console is hidden once fully slid off-screen (toggled by `~`); the ring
      * buffer keeps filling while hidden. The collision panel draws whenever it's
      * toggled on (`'`), independent of the console. The anim panel draws while the

@@ -776,7 +776,7 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
         if (g_MainMenuState == MenuState_Achievements && achStep != 0)
         {
             Pc_AchScreen_Draw();
-            Pc_MouseCursor_Draw();
+            Pc_MouseCursor_Show();
             return;
         }
 #endif
@@ -792,14 +792,14 @@ void GameState_MainMenu_Update(void) // 0x8003AB28
         {
             MainMenu_MainTextDraw();
 #ifdef SH_PC_PORT
-            Pc_MouseCursor_Draw();
+            Pc_MouseCursor_Show();
 #endif
             return;
         }
 
         MainMenu_DifficultyTextDraw(newGameSelectedDifficultyIdx);
 #ifdef SH_PC_PORT
-        Pc_MouseCursor_Draw();
+        Pc_MouseCursor_Show();
 #endif
         return;
     }

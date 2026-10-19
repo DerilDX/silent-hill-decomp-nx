@@ -2624,7 +2624,7 @@ void SaveScreen_ScreenDraw(void) // 0x801E70C8
     /* No pointer on the input-less auto-load flow. */
     if (g_GameWork.gameState != GameState_AutoLoadSavegame)
     {
-        Pc_MouseCursor_Draw();
+        Pc_MouseCursor_Show();
     }
 #endif
 }

@@ -1269,7 +1269,7 @@ void Options_PcOptionsMenu_Control(void)
     Options_PcOptionsMenu_SelectionHighlightDraw();
     Options_Menu_VignetteDraw();
     Screen_BackgroundImgDraw(&g_ItemInspectionImg);
-    Pc_MouseCursor_Draw();
+    Pc_MouseCursor_Show();
 
     if (g_GameWork.gameStateSteps[0] != OptionsMenuState_PcOptions)
         return;
@@ -1871,7 +1871,7 @@ void Options_ExtraOptionsMenu_Control(void) // 0x801E318C
     Options_Menu_VignetteDraw();
     Screen_BackgroundImgDraw(&g_ItemInspectionImg);
 #ifdef SH_PC_PORT
-    Pc_MouseCursor_Draw();
+    Pc_MouseCursor_Show();
 #endif
 
     if (g_GameWork.gameStateSteps[0] != OptionsMenuState_ExtraOptions)
@@ -2134,7 +2134,7 @@ void Options_MainOptionsMenu_Control(void) // 0x801E3770
     Options_MainOptionsMenu_SfxVolumeBarDraw();
 #ifdef SH_PC_PORT
     Options_MainOptionsMenu_FmvVolumeBarDraw();
-    Pc_MouseCursor_Draw();
+    Pc_MouseCursor_Show();
 #endif
 
     if (g_GameWork.gameStateSteps[0] != OptionsMenuState_MainOptions)
@@ -3900,7 +3900,7 @@ void Options_BrightnessMenu_Control(void) // 0x801E6018
     Options_BrightnessMenu_ArrowsDraw();
     Options_BrightnessMenu_ConfigDraw();
 #ifdef SH_PC_PORT
-    Pc_MouseCursor_Draw();
+    Pc_MouseCursor_Show();
 #endif
 }
 
@@ -4310,7 +4310,7 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
             if (Pc_ControlsScreen_Update())
             {
                 Pc_ControlsScreen_Draw();
-                Pc_MouseCursor_Draw();
+                Pc_MouseCursor_Show();
                 ScreenFade_Start(false, true, false);
                 g_Controller0->clickedBtnFlags   = 0;
                 g_Controller0->pulsedBtnFlags    = 0;
@@ -4395,7 +4395,7 @@ void Options_ControllerMenu_Control(void) // 0x801E69BC
                 }
             }
         }
-        Pc_MouseCursor_Draw();
+        Pc_MouseCursor_Show();
     }
 #endif
 
