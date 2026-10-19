@@ -56,8 +56,9 @@ The pictures live in one PNG in the game folder:
 - Columns 0 to 7 hold the **light** version of each picture (used for the
   selected cell). Columns 8 to 15 hold the **dark** version (every other cell).
   A dark picture sits exactly 8 columns to the right of its light one.
-- Wide pictures (Enter, Shift, Ctrl, Backspace) take two cells side by side. Space
-  and every other picture take one cell.
+- The long keys (Enter, Backspace, Shift, Ctrl, Alt, Tab, Caps, Del, Insert, Home,
+  End, Page Up, Page Down, Print, Scroll, Pause, Num) take two cells side by side.
+  Space and every other picture take one cell.
 - Use transparency (alpha 0) for everything that is not part of a picture.
 
 The game registers the atlas as a high-resolution override over a VRAM
