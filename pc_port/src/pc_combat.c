@@ -716,7 +716,6 @@ void Pc_ExtraActionsUpdate(void)
                    (s_padQt[sch]    >= 0 && PC_RawControllerButtonClicked(s_padQt[sch]));
 
     Pc_ManualReloadSample(sch);
-    /* Declared above for the optional F10 input gate. */
 
     /* Reload is an AIMING action, so it must NOT be subject to Pc_ActionSafe's
      * movement-state ceiling (Aim=19 outranks SidestepRightStumble=18, so that
