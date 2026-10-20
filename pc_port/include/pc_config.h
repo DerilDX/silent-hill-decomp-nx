@@ -532,6 +532,12 @@ typedef struct {
      * itself is never slowed, the new area just waits. 0 = no minimum.
      * (config key: load_screen_min; console: loadmin) */
     float loadScreenMin;
+
+    /* 1 = in FPS, show the crosshair only while aiming (weapon raised), like
+     * TPS/OTS. 0 = always shown in FPS (default, the previous behaviour).
+     * Appended last so plugins built against the earlier layout still read the
+     * fields above. (config key: crosshair_fps_aim_only) */
+    int crosshairFpsAimOnly;
 } s_PcConfig;
 
 extern s_PcConfig g_PcConfig;
