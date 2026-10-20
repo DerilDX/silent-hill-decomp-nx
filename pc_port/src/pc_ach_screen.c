@@ -487,14 +487,14 @@ static void ach_list_draw(void)
         ach_badge_draw(a->badge, ACH_BADGE_X, y - 1, ACH_BADGE_SIZE, !a->unlocked);
 
         Nm_SanitizeGlyphs(a->title, clean, sizeof(clean), 1);
-        w = Nm_TextDrawMarquee(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, clean, ACH_TEXT_W);
+        w = Nm_TextDrawMarquee(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, clean, ACH_TEXT_W, sel);
         if (sel)
         {
             Nm_HighlightDraw(ACH_BADGE_X - 1, ACH_TEXT_X + w + 4, y + ACH_UNDERLINE_DY);
         }
 
         Nm_SanitizeGlyphs(a->desc, clean, sizeof(clean), 0);
-        Nm_TextDrawMarquee(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, clean, ACH_TEXT_W);
+        Nm_TextDrawMarquee(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, clean, ACH_TEXT_W, sel);
     }
 
     if (s_list.count > ACH_VISIBLE)
@@ -526,7 +526,7 @@ static void ach_single_draw(void)
     w = Pc_LangMenuTextWidth(clean);
     if (w > ACH_SV_RULE_X1 - ACH_SV_RULE_X0)
         w = ACH_SV_RULE_X1 - ACH_SV_RULE_X0;
-    Nm_TextDrawMarquee(160 - (w / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, clean, w);
+    Nm_TextDrawMarquee(160 - (w / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, clean, w, 1);
     Nm_RuleDraw(ACH_SV_RULE_X0, ACH_SV_RULE_X1, ACH_SV_RULE1_Y, 1);
 
     if (a->unlocked)
@@ -580,7 +580,7 @@ static void ach_single_draw(void)
             snprintf(rest + len, sizeof(rest) - len, "_%s", lines[i]);
         }
         Nm_TextDrawMarquee(ACH_SV_RULE_X0, ACH_SV_DESC_Y + ((ACH_SV_DESC_LINES - 1) * ACH_SV_DESC_PITCH),
-                           NM_TEXT_SMALL, StringColorId_White, rest, ACH_SV_DESC_W);
+                           NM_TEXT_SMALL, StringColorId_White, rest, ACH_SV_DESC_W, 1);
     }
 
     ach_back_draw(1);

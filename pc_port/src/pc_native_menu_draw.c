@@ -127,12 +127,21 @@ static int nm_marquee_offset(int overflow)
     return overflow - (int)((t * (Uint32)overflow) / move);
 }
 
-int Nm_TextDrawMarquee(int x, int y, int size, int color, const char* s, int maxW)
+int Nm_TextDrawMarquee(int x, int y, int size, int color, const char* s, int maxW, int pan)
 {
     char   chunk[NM_MARQUEE_CHUNK + 1];
     size_t left = strlen(s);
     int    w    = Pc_LangMenuTextWidth(s);
     int    cx;
+
+    if (w > maxW && !pan)
+    {
+        char fit[NM_LINE_MAX];
+
+        Nm_FitEllipsis(s, fit, sizeof(fit), maxW, Pc_LangMenuTextWidth);
+        Nm_TextDrawVerbatim(x, y, size, color, fit);
+        return Pc_LangMenuTextWidth(fit);
+    }
 
     if (w <= maxW && left <= NM_MARQUEE_CHUNK)
     {

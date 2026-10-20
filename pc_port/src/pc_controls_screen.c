@@ -524,10 +524,11 @@ int Pc_ControlsScreen_Update(void)
 /* ---- draw ---------------------------------------------------------------- */
 
 /* Localized here rather than by Gfx_StringDraw so a translation too wide for
- * its space is measured, and pans, as drawn. */
+ * its space is measured, and pans, as drawn. Gold is the selected cell, the
+ * only one that pans. */
 static void cs_fit_draw(int x, int y, int color, const char* key, int maxW)
 {
-    Nm_TextDrawMarquee(x, y, NM_TEXT_TALL, color, Pc_LangMenuText(key), maxW);
+    Nm_TextDrawMarquee(x, y, NM_TEXT_TALL, color, Pc_LangMenuText(key), maxW, color == StringColorId_Gold);
 }
 
 static void cs_glyph_draw(int glyph, int dark, int x, int y, int rgb)
@@ -670,7 +671,7 @@ static void cs_row_draw(int row, int y)
 {
     const int   selRow = (s_focus == CS_FOCUS_LIST && row == s_list.sel);
     const int   color  = BindCore_RowEnabled(row) ? StringColorId_White : StringColorId_DarkGrey;
-    char        label[NM_LINE_MAX];
+    char        label[NM_LINE_MAX], fit[NM_LINE_MAX];
     const char* shown;
     int         w;
     int         c;
@@ -682,10 +683,12 @@ static void cs_row_draw(int row, int y)
     if (strcmp(label, "Map") == 0)
         snprintf(label, sizeof(label), "_Map");
     shown = Pc_LangMenuText(label);
-    w     = Pc_LangMenuTextWidth(shown);
+    if (!selRow && Nm_FitEllipsis(shown, fit, sizeof(fit), CS_LABEL_RX, Pc_LangMenuTextWidth))
+        shown = fit;
+    w = Pc_LangMenuTextWidth(shown);
     if (w > CS_LABEL_RX)
         w = CS_LABEL_RX;
-    Nm_TextDrawMarquee(CS_LABEL_RX - w, y, NM_TEXT_TALL, color, shown, w);
+    Nm_TextDrawMarquee(CS_LABEL_RX - w, y, NM_TEXT_TALL, color, shown, w, 1);
     Nm_TextDraw(CS_LABEL_RX, y, NM_TEXT_TALL, color, ":");
 
     for (c = 0; c < BC_COLS; c++)
