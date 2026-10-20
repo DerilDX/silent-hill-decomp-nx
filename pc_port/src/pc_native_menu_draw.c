@@ -95,8 +95,14 @@ void Nm_TextDrawRight(int rx, int y, int size, int color, const char* s)
 /* Gfx_StringDraw stops at DEFAULT_MAP_MESSAGE_LENGTH characters. */
 #define NM_MARQUEE_CHUNK 96
 
+/* Pans on screen together share one cycle: each runs to its end and holds
+ * there until the longest has arrived, then all start over at once. The
+ * longest is last frame's, so a text drawn early in a frame still knows it. */
 static Uint32 s_marqueeEpoch;
 static Uint32 s_marqueeLast;
+static Uint32 s_marqueeMove;
+static Uint32 s_marqueeMovePrev;
+static s32    s_marqueeTick;
 
 static void nm_marquee_restart(void)
 {
@@ -107,24 +113,34 @@ static int nm_marquee_offset(int overflow)
 {
     const Uint32 now  = SDL_GetTicks();
     const Uint32 move = ((Uint32)overflow * 1000u) / NM_MARQUEE_PX_PER_S;
+    Uint32       groupMove;
     Uint32       t;
+
+    if (g_TickCount != s_marqueeTick)
+    {
+        s_marqueeTick     = g_TickCount;
+        s_marqueeMovePrev = s_marqueeMove;
+        s_marqueeMove     = 0;
+    }
+    if (move > s_marqueeMove)
+        s_marqueeMove = move;
+    groupMove = (s_marqueeMovePrev > s_marqueeMove) ? s_marqueeMovePrev : s_marqueeMove;
 
     /* A screen that was closed starts its pans over when it reopens. */
     if (now - s_marqueeLast > 250u)
         s_marqueeEpoch = now;
     s_marqueeLast = now;
 
-    t = (now - s_marqueeEpoch) % (2u * (NM_MARQUEE_HOLD_MS + move));
+    if (now - s_marqueeEpoch >= (2u * NM_MARQUEE_HOLD_MS) + groupMove)
+        s_marqueeEpoch = now;
+
+    t = now - s_marqueeEpoch;
     if (t < NM_MARQUEE_HOLD_MS)
         return 0;
     t -= NM_MARQUEE_HOLD_MS;
     if (t < move)
         return (int)((t * (Uint32)overflow) / move);
-    t -= move;
-    if (t < NM_MARQUEE_HOLD_MS)
-        return overflow;
-    t -= NM_MARQUEE_HOLD_MS;
-    return overflow - (int)((t * (Uint32)overflow) / move);
+    return overflow;
 }
 
 int Nm_TextDrawMarquee(int x, int y, int size, int color, const char* s, int maxW, int pan)

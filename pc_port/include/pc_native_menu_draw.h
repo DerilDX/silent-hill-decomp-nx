@@ -23,10 +23,11 @@ void Nm_TextDrawVerbatim(int x, int y, int size, int color, const char* s);
 int  Nm_TextWidth(const char* s);
 void Nm_TextDrawCentered(int cx, int y, int size, int color, const char* s);
 void Nm_TextDrawRight(int rx, int y, int size, int color, const char* s);
-/* Draws `s` verbatim in x..x+maxW. Text wider than that pans back and forth
- * through the space when `pan` is set (the selected row, or text that cannot
- * be selected) and is cut with "..." otherwise; every pan restarts from its
- * left end when the highlight moves. Returns the width drawn, at most maxW. */
+/* Draws `s` verbatim in x..x+maxW. Text wider than that pans to its end
+ * and starts over, in step with any other pan on screen, when `pan` is set
+ * (the selected row, or text that cannot be selected), and is cut with "..."
+ * otherwise. Every pan restarts from its left end when the highlight moves.
+ * Returns the width drawn, at most maxW. */
 int  Nm_TextDrawMarquee(int x, int y, int size, int color, const char* s, int maxW, int pan);
 
 /* y is the arrow's vertical centre. */
