@@ -59,6 +59,13 @@ void Nm_TextDraw(int x, int y, int size, int color, const char* s)
     {
         Gfx_StringSetPosition(x, y);
     }
+    /* Gfx_StringSetPosition reads x == NO_VALUE as "keep x", and a panning
+     * line passes through -1: it drew where the last string ended. */
+    if (x == NO_VALUE)
+    {
+        g_StringPosition.vx = x - SCREEN_POSITION_X(50.0f);
+        g_StringPositionX1  = g_StringPosition.vx;
+    }
 
     Gfx_Strings2dLayerIdxSet(NM_OT_TEXT);
     Gfx_StringDraw((char*)s, DEFAULT_MAP_MESSAGE_LENGTH);
