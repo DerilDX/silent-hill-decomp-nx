@@ -48,6 +48,8 @@
 #define ACH_SV_DESC_PITCH  9
 #define ACH_SV_DESC_LINES  8
 #define ACH_SV_DESC_W      260
+/* Wrap depth for a description; past ACH_SV_DESC_LINES the rest pans on the last line. */
+#define ACH_SV_DESC_WRAP   32
 
 /* Nm_SpriteDraw spans UV 0..255, so the slot's UV denominator is 256 whatever
  * size the PNG decodes to. */
@@ -471,7 +473,6 @@ static void ach_counter_draw(void)
 static void ach_list_draw(void)
 {
     char clean[512];
-    char line[NM_LINE_MAX];
     int  i;
 
     for (i = 0; i < ACH_VISIBLE && s_scroll.top + i < s_list.count; i++)
@@ -481,20 +482,19 @@ static void ach_list_draw(void)
         int            y     = ACH_LIST_Y + (i * ACH_PITCH);
         int            sel   = !s_onBack && idx == s_scroll.sel;
         int            color = a->unlocked ? StringColorId_White : StringColorId_DarkGrey;
+        int            w;
 
         ach_badge_draw(a->badge, ACH_BADGE_X, y - 1, ACH_BADGE_SIZE, !a->unlocked);
 
         Nm_SanitizeGlyphs(a->title, clean, sizeof(clean), 1);
-        Nm_FitEllipsis(clean, line, sizeof(line), ACH_TEXT_W, Pc_LangMenuTextWidth);
-        Nm_TextDrawVerbatim(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, line);
+        w = Nm_TextDrawMarquee(ACH_TEXT_X, y, NM_TEXT_TALL, sel ? StringColorId_Gold : color, clean, ACH_TEXT_W);
         if (sel)
         {
-            Nm_HighlightDraw(ACH_BADGE_X - 1, ACH_TEXT_X + Pc_LangMenuTextWidth(line) + 4, y + ACH_UNDERLINE_DY);
+            Nm_HighlightDraw(ACH_BADGE_X - 1, ACH_TEXT_X + w + 4, y + ACH_UNDERLINE_DY);
         }
 
         Nm_SanitizeGlyphs(a->desc, clean, sizeof(clean), 0);
-        Nm_FitEllipsis(clean, line, sizeof(line), ACH_TEXT_W, Pc_LangMenuTextWidth);
-        Nm_TextDrawVerbatim(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, line);
+        Nm_TextDrawMarquee(ACH_TEXT_X, y + ACH_DESC_DY, NM_TEXT_SMALL, color, clean, ACH_TEXT_W);
     }
 
     if (s_list.count > ACH_VISIBLE)
@@ -511,8 +511,8 @@ static void ach_single_draw(void)
 {
     const PcRaAch* a = &s_list.items[s_scroll.sel];
     char           clean[512];
-    char           line[NM_LINE_MAX];
-    char           lines[ACH_SV_DESC_LINES][NM_LINE_MAX];
+    char           rest[512];
+    char           lines[ACH_SV_DESC_WRAP][NM_LINE_MAX];
     char           text[64];
     const char*    word;
     int            w;
@@ -523,8 +523,10 @@ static void ach_single_draw(void)
     ach_badge_draw(a->badge, 160 - (ACH_SV_BADGE_SIZE / 2), ACH_SV_BADGE_Y, ACH_SV_BADGE_SIZE, !a->unlocked);
 
     Nm_SanitizeGlyphs(a->title, clean, sizeof(clean), 1);
-    Nm_FitEllipsis(clean, line, sizeof(line), ACH_SV_RULE_X1 - ACH_SV_RULE_X0, Pc_LangMenuTextWidth);
-    Nm_TextDrawVerbatim(160 - (Pc_LangMenuTextWidth(line) / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, line);
+    w = Pc_LangMenuTextWidth(clean);
+    if (w > ACH_SV_RULE_X1 - ACH_SV_RULE_X0)
+        w = ACH_SV_RULE_X1 - ACH_SV_RULE_X0;
+    Nm_TextDrawMarquee(160 - (w / 2), ACH_SV_TITLE_Y, NM_TEXT_TALL, StringColorId_Gold, clean, w);
     Nm_RuleDraw(ACH_SV_RULE_X0, ACH_SV_RULE_X1, ACH_SV_RULE1_Y, 1);
 
     if (a->unlocked)
@@ -563,11 +565,22 @@ static void ach_single_draw(void)
     Nm_RuleDraw(ACH_SV_RULE_X0, ACH_SV_RULE_X1, ACH_SV_RULE2_Y, 1);
 
     Nm_SanitizeGlyphs(a->desc, clean, sizeof(clean), 0);
-    n = Nm_WrapLines(clean, lines, ACH_SV_DESC_LINES, ACH_SV_DESC_W, Pc_LangMenuTextWidth);
-    for (i = 0; i < n; i++)
+    n = Nm_WrapLines(clean, lines, ACH_SV_DESC_WRAP, ACH_SV_DESC_W, Pc_LangMenuTextWidth);
+    for (i = 0; i < n && i < ACH_SV_DESC_LINES - 1; i++)
     {
         Nm_TextDrawVerbatim(ACH_SV_RULE_X0, ACH_SV_DESC_Y + (i * ACH_SV_DESC_PITCH), NM_TEXT_SMALL,
                             StringColorId_White, lines[i]);
+    }
+    if (i < n)
+    {
+        snprintf(rest, sizeof(rest), "%s", lines[i]);
+        while (++i < n)
+        {
+            size_t len = strlen(rest);
+            snprintf(rest + len, sizeof(rest) - len, "_%s", lines[i]);
+        }
+        Nm_TextDrawMarquee(ACH_SV_RULE_X0, ACH_SV_DESC_Y + ((ACH_SV_DESC_LINES - 1) * ACH_SV_DESC_PITCH),
+                           NM_TEXT_SMALL, StringColorId_White, rest, ACH_SV_DESC_W);
     }
 
     ach_back_draw(1);

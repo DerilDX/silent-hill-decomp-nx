@@ -402,7 +402,7 @@ static const s_MenuTranslation s_MenuTr[] = {
 
     /* --- Title menu ACHIEVEMENTS row, Achievements and Controls screens. The
      * Controls action labels are right-aligned into the 129 px before their
-     * colon ("Change_Camera"); wider ones are cut with "...". "_Map" is that
+     * colon ("Change_Camera"); wider ones pan through that space. "_Map" is that
      * screen's Map row: bare "Map" is also the PC Options start-map row. --- */
     { "ACHIEVEMENTS",    { "ERRUNGENSCHAFTEN",              "SUCCES",                           "LOGROS",                     "OBIETTIVI"               } },
     { "UNLOCKED",        { "ERREICHT",                      "OBTENU",                           "LOGRADO",                    "OTTENUTO"                } },

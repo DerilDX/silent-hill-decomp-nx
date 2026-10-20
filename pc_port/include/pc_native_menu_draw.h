@@ -23,6 +23,10 @@ void Nm_TextDrawVerbatim(int x, int y, int size, int color, const char* s);
 int  Nm_TextWidth(const char* s);
 void Nm_TextDrawCentered(int cx, int y, int size, int color, const char* s);
 void Nm_TextDrawRight(int rx, int y, int size, int color, const char* s);
+/* Draws `s` verbatim in x..x+maxW. Text wider than that pans back and forth
+ * through the space instead of being cut; every pan restarts from its left
+ * end when the highlight moves. Returns the width drawn, at most maxW. */
+int  Nm_TextDrawMarquee(int x, int y, int size, int color, const char* s, int maxW);
 
 /* y is the arrow's vertical centre. */
 void Nm_ScrollArrowDraw(int cx, int y, int up, int enabled);

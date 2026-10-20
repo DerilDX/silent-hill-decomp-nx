@@ -523,16 +523,11 @@ int Pc_ControlsScreen_Update(void)
 
 /* ---- draw ---------------------------------------------------------------- */
 
-/* A translated string too wide for the space is cut; a fitting one is drawn
- * by its key so Gfx_StringDraw still localizes it. */
-static const char* cs_fit(const char* key, int maxW, char* out, size_t outSize)
+/* Localized here rather than by Gfx_StringDraw so a translation too wide for
+ * its space is measured, and pans, as drawn. */
+static void cs_fit_draw(int x, int y, int color, const char* key, int maxW)
 {
-    const char* t = Pc_LangMenuText(key);
-
-    if (Pc_LangMenuTextWidth(t) <= maxW)
-        return key;
-    Nm_FitEllipsis(t, out, outSize, maxW, Pc_LangMenuTextWidth);
-    return out;
+    Nm_TextDrawMarquee(x, y, NM_TEXT_TALL, color, Pc_LangMenuText(key), maxW);
 }
 
 static void cs_glyph_draw(int glyph, int dark, int x, int y, int rgb)
@@ -572,7 +567,7 @@ static void cs_glyph_cell_draw(int glyph, int x, int y, int color)
 
 static void cs_pad_draw(int glyph, const char* text, int col, int y, int color)
 {
-    char name[NM_LINE_MAX], fit[NM_LINE_MAX];
+    char name[NM_LINE_MAX];
 
     if (InputGlyphs_Ready())
     {
@@ -580,7 +575,7 @@ static void cs_pad_draw(int glyph, const char* text, int col, int y, int color)
         return;
     }
     Nm_SanitizeGlyphs(text, name, sizeof(name), 0);
-    Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(name, s_colW[col], fit, sizeof(fit)));
+    cs_fit_draw(s_colX[col], y, color, name, s_colW[col]);
 }
 
 /* A Move row's direction, in e_GlyphDir order, or -1. */
@@ -617,7 +612,7 @@ static void cs_stick_draw(int row, int col, int y)
 
 static void cs_key_draw(const char* v, int col, int y, int color)
 {
-    char        name[NM_LINE_MAX], clean[NM_LINE_MAX], fit[NM_LINE_MAX];
+    char        name[NM_LINE_MAX], clean[NM_LINE_MAX];
     int         glyph  = InputGlyphs_Ready() ? InputGlyphs_ForKey(v) : -1;
     const char* suffix = InputGlyphs_KeySuffix(v);
 
@@ -630,7 +625,7 @@ static void cs_key_draw(const char* v, int col, int y, int color)
     }
     BindCore_DisplayKey(v, name, sizeof(name));
     Nm_SanitizeGlyphs(name, clean, sizeof(clean), 0);
-    Nm_TextDraw(s_colX[col], y, NM_TEXT_TALL, color, cs_fit(clean, s_colW[col], fit, sizeof(fit)));
+    cs_fit_draw(s_colX[col], y, color, clean, s_colW[col]);
 }
 
 static void cs_cell_draw(int row, int col, int y, int selected)
@@ -675,8 +670,9 @@ static void cs_row_draw(int row, int y)
 {
     const int   selRow = (s_focus == CS_FOCUS_LIST && row == s_list.sel);
     const int   color  = BindCore_RowEnabled(row) ? StringColorId_White : StringColorId_DarkGrey;
-    char        label[NM_LINE_MAX], fit[NM_LINE_MAX];
+    char        label[NM_LINE_MAX];
     const char* shown;
+    int         w;
     int         c;
 
     Nm_SanitizeGlyphs(BindCore_Row(row)->label, label, sizeof(label), 0);
@@ -685,8 +681,11 @@ static void cs_row_draw(int row, int y)
      * draws nothing in a right-aligned label. */
     if (strcmp(label, "Map") == 0)
         snprintf(label, sizeof(label), "_Map");
-    shown = cs_fit(label, CS_LABEL_RX, fit, sizeof(fit));
-    Nm_TextDrawRight(CS_LABEL_RX, y, NM_TEXT_TALL, color, shown);
+    shown = Pc_LangMenuText(label);
+    w     = Pc_LangMenuTextWidth(shown);
+    if (w > CS_LABEL_RX)
+        w = CS_LABEL_RX;
+    Nm_TextDrawMarquee(CS_LABEL_RX - w, y, NM_TEXT_TALL, color, shown, w);
     Nm_TextDraw(CS_LABEL_RX, y, NM_TEXT_TALL, color, ":");
 
     for (c = 0; c < BC_COLS; c++)
