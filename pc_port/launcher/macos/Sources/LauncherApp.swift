@@ -164,7 +164,7 @@ final class LauncherModel: ObservableObject {
 
         busy = true
         statusMessage = "Copying \(disc.fileName)…"
-        Task.detached {
+        Task.detached { [src] in
             let result = Result { try FileManager.default.copyItem(at: src, to: dest) }
             await MainActor.run {
                 self.busy = false
