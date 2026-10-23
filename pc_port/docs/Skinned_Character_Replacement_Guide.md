@@ -82,7 +82,10 @@ follow automatically.
 - **Format:** glTF Binary (`.glb`)
 - **Include:** Selected Objects. Select the armature and every mesh that belongs to the
   character, and nothing else: no lights, no cameras.
-- **Data > Mesh:** Apply Modifiers **on**, UVs **on**, Normals **on**
+- **Data > Mesh:** Apply Modifiers **off**, UVs **on**, Normals **on**. Blender cannot
+  export shape keys with Apply Modifiers on, and the Armature modifier does not need
+  applying: the skin is exported from the armature either way. If you use another
+  modifier, such as Mirror or Subdivision, apply it by hand before adding shape keys.
 - **Data > Shape Keys:** **on** if you want blinking (see below)
 - **Data > Armature / Skinning:** **on**
 - **Animation:** **off**. The game animates the model.
@@ -102,6 +105,9 @@ when the model loads:
   lower segments are stretched or squashed along their length to match Harry's.
 - **Torso, head, clavicles and feet** keep your model's own shape and only turn about
   Harry's pivots, so the neck, waist and feet are not stretched.
+- **Shoulders** keep your model's own width. Modern bodies are broader than Harry's,
+  so the upper arm stays out at your shoulder and the forearm angles in to reach
+  Harry's wrist.
 - **Hips and knees** keep your model's own spacing side to side.
 
 ### Proportions
@@ -115,6 +121,8 @@ slightly off in game:
 - **Legs look bowed:** Harry's own stance has the feet apart and the left leg slightly
   back, and your model copies it. Slimming the lower legs and turning the feet in
   slightly in Edit mode helps.
+- **Arms sink into a bulky coat at the hips:** Harry's hands hang close to his
+  thighs. Slim the coat's lower sides and pockets in Edit mode.
 - **Arms too long or short:** do not resize the arm bones. The game already matches
   Harry's arm lengths. Reshape the sleeves instead.
 

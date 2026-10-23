@@ -96,8 +96,12 @@ static const u8 s_scaled[PC_SKIN_BONES] = { 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 
  * clavicles and feet only turn about the game's pivots: their joints sit at
  * different heights on a modern rig (Mixamo's Hips is the pelvis, the game's
  * is the waist), and moving them there lifted the pelvis, stretched the neck
- * and stood the feet off the floor. */
-static const u8 s_pinned[PC_SKIN_BONES] = { 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
+ * and stood the feet off the floor.
+ * Upper arms are not pinned either: a modern torso is broader than Harry's,
+ * and pulling the sleeve onto his narrower shoulder sank it into the coat.
+ * The forearm instead runs from the shoulder-shifted elbow to Harry's wrist,
+ * so the hand still lands on a held weapon. */
+static const u8 s_pinned[PC_SKIN_BONES] = { 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
 
 /* Mixamo base name -> game bone. The game's "L" parts sit at -X, which is the
  * model's own right side, so Mixamo "Right" drives them. */
@@ -763,6 +767,9 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             anchor[0][0] = anchor[0][1] = anchor[0][2] = 0.0f;
             continue;
         }
+        if (b == 5 || b == 9)
+            for (i = 0; i < 3; i++)
+                anchor[b][i] -= anchor[b - 1][i] - s_heroRest[b - 1].T[i];
         if (s_childA[b] >= 0)
         {
             const PcSkinRestBone* ca = &s_heroRest[(int)s_childA[b]];
