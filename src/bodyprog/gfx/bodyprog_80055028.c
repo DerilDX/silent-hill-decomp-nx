@@ -264,8 +264,16 @@ static void Pc_FarOtAdd(void* prim, u32 key)
         else                                                                    \
             addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim)); \
     } while (0)
+extern int  g_PsxActorDepth;
+extern void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, unsigned short s2,
+                                    unsigned short s3, int n);
+/* A triangle repeats its last corner (i2 == i3). */
 #define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3)               \
     do {                                                                        \
+        if (g_PsxActorDepth)                                                    \
+            PsyX_SetNextPrimSzActor((sd)->screenZ_168[i0], (sd)->screenZ_168[i1], \
+                                    (sd)->screenZ_168[i2], (sd)->screenZ_168[i3], \
+                                    (i2) == (i3) ? 3 : 4);                      \
         if (s_pcFarOtActive && (depth) == SH_OT_LAST_DEPTH(shift))              \
             Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->screenZ_168[i0], (u16)(sd)->screenZ_168[i1], \
                                           (u16)(sd)->screenZ_168[i2], (u16)(sd)->screenZ_168[i3])); \

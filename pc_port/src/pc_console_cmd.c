@@ -1962,8 +1962,7 @@ void Pc_ConsoleExec(const char* line)
         else g_PsxPgxpWorldDepth = !g_PsxPgxpWorldDepth;
         cprintf("PGXP world depth channel: %s", g_PsxPgxpWorldDepth ? "ON" : "OFF");
     } else if (strcmp(cmd, "PGXPACTORDEPTH") == 0) {
-        /* OFF puts characters back on their flat bucket depth (painter order
-         * inside a bucket), the stock PGXP look. */
+        /* OFF gives each character prim one flat depth again. */
         extern int g_PsxPgxpActorDepth;
         if (arg[0] == '1') g_PsxPgxpActorDepth = 1;
         else if (arg[0] == '0') g_PsxPgxpActorDepth = 0;
