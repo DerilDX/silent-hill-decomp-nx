@@ -129,6 +129,21 @@ slightly off in game:
 Change the mesh, not the bones. Moving joints changes where your model bends, but
 not where Harry's animation bends.
 
+## Hair and other cutouts
+
+Texels with alpha below 50% are not drawn, so hair cards, eyelashes and lace need
+an **alpha channel in the PNG itself**. Some ripped models paint hair strands on
+solid black and rely on a separate opacity map. Those show as black squares in
+game until you add the alpha:
+
+1. Open the hair texture in an image editor such as GIMP.
+2. Add an alpha channel and make the black background transparent. In GIMP:
+   **Colors > Color to Alpha**, colour black.
+3. Save it as PNG, then load that PNG in the hair material in Blender. Connect its
+   **Alpha** output to the Principled BSDF **Alpha** input, so the exporter keeps it.
+
+The cut is hard-edged. Soft, blended alpha is not supported.
+
 ## Blinking
 
 Add a shape key that closes both eyes and name it `blink`. `eyeBlink`, `eyesClosed`, or
