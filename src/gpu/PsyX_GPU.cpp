@@ -960,12 +960,16 @@ int g_DrawPrimMode = 0;
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
 enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 };
-/* ACTOR: a character's skeleton is being drawn (g_PsxActorDepth, set by the
- * game around each bone). Its flat bucket seed ties every prim of a bucket, so
- * a belt and the jacket hem over it, or a mouth behind the lips, resolved by
- * submission order and swapped as the pose moved. These take true per-vertex
- * depth from the PGXP W instead (shader, a_extra.w == 2), without the world's
- * far-push so they still win against the floor they stand on. */
+/* ACTOR: a character prim armed with its own per-vertex SZ by the game's
+ * skeleton drawers (PsyX_SetNextPrimSzActor while g_PsxActorDepth is set).
+ * Unarmed, those drawers reach the capture with the GTE FIFO's SZ, which the
+ * lighting steps have clobbered: with PGXP off each prim took a stale flat
+ * depth, and with it on the flat bucket seed tied every prim of a bucket. Either
+ * way overlapping surfaces (Harry's belt under the jacket hem, a high-poly
+ * model's mouth behind its lips) flickered as the pose moved. Armed prims take
+ * per-vertex depth instead -- from the PGXP W when it exists (shader,
+ * a_extra.w == 2, without the world's far-push so they still win against the
+ * floor they stand on), else from the SZ. */
 extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
 /* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
  * bucket shares that one bucket, so painter order cannot sort the distant town
@@ -1149,6 +1153,18 @@ extern "C" void PsyX_NoteItemDepthSz(unsigned int sz)
 	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
 }
 
+/* Corners in prim order; a triangle passes n = 3 (the parse reads a triangle's
+ * corners from slots 1..3, the FIFO's SZ1..SZ3). */
+extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int n)
+{
+	if (n == 3) { s3 = s2; s2 = s1; s1 = s0; }
+	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
+	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
+	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_ACTOR;
+	g_primSzNextFar = 0;
+}
+
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
 {
 	uint32_t mx = s0 > s1 ? s0 : s1;
@@ -1208,7 +1224,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
-		kind = g_PsxActorDepth ? SZ_KIND_ACTOR : SZ_KIND_NONE;
+		kind = SZ_KIND_NONE;
 	}
 
 	// Track per-frame SZ maximum for global depth calibration
@@ -1430,17 +1446,6 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	 * it (s_primAlphaPending) and reset it to 255. */
 	s_primAlphaPending = (g_PsxPgxpDbg & 4) ? 255 : PsyX_LookupGteAlpha(polyTag);
 
-	/* The SZ payload is FIFO garbage for these drawers; only the mark is used,
-	 * and z keeps the bucket seed for verts PGXP has no W for. */
-	if (kind == SZ_KIND_ACTOR)
-	{
-		if (pgxpWorldPath && g_PsxPgxpActorDepth)
-		{
-			vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = 2;
-			if (isQuad) vertex[3]._p1 = 2;
-		}
-		return;
-	}
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
@@ -1453,6 +1458,29 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
+
+	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
+	{
+		const float sv[4] = { sv0, sv1, sv2, sv3 };
+		const int n = isQuad ? 4 : 3;
+		for (int i = 0; i < n; i++)
+		{
+			float z;
+			if (pgxpWorldPath)
+			{
+				z = PgxpNdcFromViewZ(sv[i]);
+				vertex[i]._p1 = 2;
+			}
+			else
+			{
+				z = 1.0f - 2.0f * sv[i] / (float)g_szMaxPrevFrame;
+				if (z < -1.0f) z = -1.0f;
+				if (z >  1.0f) z =  1.0f;
+			}
+			vertex[i].z = z;
+		}
+		return;
+	}
 
 	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
 	 * per-poly average cannot order a large foreshortened face against
