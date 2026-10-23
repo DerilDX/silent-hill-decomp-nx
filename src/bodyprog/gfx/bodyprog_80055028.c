@@ -255,6 +255,13 @@ static void Pc_FarOtAdd(void* prim, u32 key)
 
 #define SH_ADDPRIM_MESH(tag, sd, shift, prim)                                    \
     do {                                                                        \
+        if (g_PsxActorDepth)                                                    \
+            PsyX_SetNextPrimSzActor((sd)->field_18C[(sd)->field_380.s_0.field_10], \
+                (sd)->field_18C[(sd)->field_380.s_0.field_11],                  \
+                (sd)->field_18C[(sd)->field_380.s_0.field_12],                  \
+                (sd)->field_18C[(sd)->field_380.s_0.field_13 == 0xFF            \
+                    ? (sd)->field_380.s_0.field_12 : (sd)->field_380.s_0.field_13], \
+                (sd)->field_380.s_0.field_13 == 0xFF ? 3 : 4);                  \
         if (s_pcFarOtActive && (sd)->field_380.s_0.field_18 == SH_OT_LAST_DEPTH(shift)) \
             Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->field_18C[(sd)->field_380.s_0.field_10], \
                 (u16)(sd)->field_18C[(sd)->field_380.s_0.field_11],              \

@@ -25,6 +25,7 @@
 #include "bodyprog/chara/chara_model.h"
 #include "bodyprog/gfx/world.h"
 #include "bodyprog/formats/lm.h"
+#include "bodyprog/math/math.h"
 #include "main/fileinfo.h"
 
 #include "cgltf.h"
@@ -136,6 +137,16 @@ typedef struct
     int             outCount[2];
 } PcSkinMat;
 
+/* A shape key the game drives, kept sparse: only the vertices it moves. */
+typedef struct
+{
+    int    count;
+    u32*   v;
+    float (*d)[3]; /* game-space bind delta */
+} PcSkinMorph;
+
+enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_COUNT };
+
 typedef struct
 {
     char        name[16];
@@ -155,6 +166,13 @@ typedef struct
     float       rw[PC_SKIN_BONES][9]; /* bone -> world, for the ragdoll */
     float       tw[PC_SKIN_BONES][3];
     int         isPlayer;
+
+    /* retarget, kept for shape keys (delta -> bone-local per influence) */
+    float       rt[PC_SKIN_BONES][9]; /* R^T */
+    float       ax[PC_SKIN_BONES][3];
+    float       kk[PC_SKIN_BONES];
+    PcSkinMorph morph[PC_SKIN_MORPH_COUNT];
+    float       blinkClock, blinkNext;
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -355,6 +373,81 @@ static void Skin_LoadImage(PcSkinMat* mat, const cgltf_material* m, const char* 
     }
     if (owned)
         free(bytes);
+}
+
+
+/* Which driven key a target name is, or -1. A sided blink ("eyeBlink_L") only
+ * counts when the mesh has no both-eyes one, or both would apply. */
+static int Skin_MorphKind(const char* name, int haveBothBlink)
+{
+    char l[64];
+    size_t i;
+    int sided;
+
+    if (name == NULL)
+        return -1;
+    for (i = 0; i + 1 < sizeof(l) && name[i]; i++)
+        l[i] = (char)((name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i]);
+    l[i] = '\0';
+    if (strstr(l, "blink") || strstr(l, "eyesclosed") || strstr(l, "eyes_closed") || strstr(l, "eyeclose"))
+    {
+        sided = strstr(l, "left") || strstr(l, "right") || (i > 2 && l[i - 2] == '_' && (l[i - 1] == 'l' || l[i - 1] == 'r'));
+        return (sided && haveBothBlink) ? -1 : PC_SKIN_MORPH_BLINK;
+    }
+    if (strstr(l, "jawopen") || strstr(l, "mouthopen") || strstr(l, "mouth_open") || strstr(l, "viseme_aa"))
+        return PC_SKIN_MORPH_MOUTH;
+    return -1;
+}
+
+static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf_primitive* p, int vbase, float scale)
+{
+    int haveBoth = 0;
+    size_t t, a, v;
+
+    if (p->targets_count == 0 || mesh->target_names_count != p->targets_count)
+        return;
+    for (t = 0; t < p->targets_count; t++)
+    {
+        const char* n = mesh->target_names[t];
+        if (Skin_MorphKind(n, 0) == PC_SKIN_MORPH_BLINK && Skin_MorphKind(n, 1) == PC_SKIN_MORPH_BLINK)
+            haveBoth = 1;
+    }
+    for (t = 0; t < p->targets_count; t++)
+    {
+        int kind = Skin_MorphKind(mesh->target_names[t], haveBoth);
+        const cgltf_accessor* acc = NULL;
+        PcSkinMorph* m;
+
+        if (kind < 0)
+            continue;
+        for (a = 0; a < p->targets[t].attributes_count; a++)
+            if (p->targets[t].attributes[a].type == cgltf_attribute_type_position)
+                acc = p->targets[t].attributes[a].data;
+        if (acc == NULL)
+            continue;
+        m = &ch->morph[kind];
+        m->v = (u32*)realloc(m->v, sizeof(u32) * (m->count + acc->count));
+        m->d = (float(*)[3])realloc(m->d, sizeof(float[3]) * (m->count + acc->count));
+        if (m->v == NULL || m->d == NULL)
+        {
+            m->count = 0;
+            continue;
+        }
+        for (v = 0; v < acc->count; v++)
+        {
+            float d[3];
+            cgltf_accessor_read_float(acc, v, d, 3);
+            if (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f)
+                continue;
+            m->v[m->count] = (u32)(vbase + v);
+            m->d[m->count][0] = d[0] * scale;
+            m->d[m->count][1] = -d[1] * scale;
+            m->d[m->count][2] = d[2] * scale;
+            m->count++;
+        }
+        SH_DBG("[SKIN] shape key \"%s\" drives %s", mesh->target_names[t],
+               kind == PC_SKIN_MORPH_BLINK ? "blinking" : "the mouth");
+    }
 }
 
 static int Skin_Load(PcSkinChara* ch, const char* path)
@@ -613,6 +706,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
                         tri->uv[c][1] -= cv;
                     }
                 }
+                Skin_LoadMorphs(ch, node->mesh, p, vbase, scale);
                 vbase += (int)vc;
             }
         }
@@ -713,12 +807,19 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     }
 
     for (b = 1; b < PC_SKIN_BONES; b++)
+    {
         if (!s_pinned[b])
         {
             anchor[b][0] = s_heroRest[b].T[0];
             anchor[b][1] = s_heroRest[b].T[1];
             anchor[b][2] = s_heroRest[b].T[2];
         }
+        /* Hips and knees keep the model's own spacing: pulling a knee onto the
+         * game's (narrower) knee while the foot stayed put bowed the shins
+         * outward. A leg swings about X, so the X offset costs nothing. */
+        else if (b == 12 || b == 13 || b == 15 || b == 16)
+            anchor[b][0] = s_heroRest[b].T[0];
+    }
 
     /* Bone-local positions per influence, lighting normal per vertex. */
     for (j = 0; j < (size_t)ch->vertCount; j++)
@@ -749,6 +850,14 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     }
 #undef TO_GAME
 
+    for (b = 0; b < PC_SKIN_BONES; b++)
+    {
+        int i;
+        for (i = 0; i < 9; i++)
+            ch->rt[b][i] = R[b][(i % 3) * 3 + i / 3];
+        memcpy(ch->ax[b], axis[b], sizeof(axis[b]));
+        ch->kk[b] = k[b];
+    }
     for (b = 0; b < PC_SKIN_BONES; b++)
     {
         ch->byBone[b] = (u32*)malloc(sizeof(u32) * (size_t)(dirCount[b] + 1));
@@ -1032,9 +1141,34 @@ typedef struct
     float hit[3];
     float hitAmount;
     float acc;
+    int   minFrom; /* sticks from here on only push apart, down to len */
 } PcRagdoll;
 
 static PcRagdoll s_rd;
+
+void Pc_SkinChara_NoteHit(const VECTOR3* knock, const VECTOR3* from, s32 amount)
+{
+    const s_SubCharacter* pl = &g_SysWork.playerWork.player;
+    float x = 0.0f, z = 0.0f;
+
+    if (knock != NULL && (knock->vx != 0 || knock->vz != 0))
+    {
+        x = (float)knock->vx;
+        z = (float)knock->vz;
+    }
+    else if (from != NULL)
+    {
+        /* No knockback vector: away from whoever hit him. */
+        x = (float)(pl->position.vx - from->vx);
+        z = (float)(pl->position.vz - from->vz);
+    }
+    if (x == 0.0f && z == 0.0f)
+        return;
+    s_rd.hit[0] = x;
+    s_rd.hit[1] = 0.0f;
+    s_rd.hit[2] = z;
+    s_rd.hitAmount = amount / 4096.0f;
+}
 
 static void RD_TipLocal(int bone, float* out)
 {
@@ -1115,6 +1249,12 @@ static void RD_Start(const PcSkinChara* ch)
     RD_Stick(RD_SHR, RD_ELR); RD_Stick(RD_ELR, RD_WRR); RD_Stick(RD_WRR, RD_HANDR); RD_Stick(RD_ELR, RD_HANDR);
     RD_Stick(RD_HIPL, RD_KNL); RD_Stick(RD_KNL, RD_ANL); RD_Stick(RD_ANL, RD_TOEL); RD_Stick(RD_KNL, RD_TOEL);
     RD_Stick(RD_HIPR, RD_KNR); RD_Stick(RD_KNR, RD_ANR); RD_Stick(RD_ANR, RD_TOER); RD_Stick(RD_KNR, RD_TOER);
+    /* Head held on the shoulders, not just the neck, or it lolls through the chest. */
+    RD_Stick(RD_SHL, RD_HEAD); RD_Stick(RD_SHR, RD_HEAD);
+    s_rd.minFrom = s_rd.stickCount;
+    /* Knees and elbows may bend but not fold flat: the body crumpled into a pile. */
+    RD_Stick(RD_HIPL, RD_ANL); RD_Stick(RD_HIPR, RD_ANR);
+    RD_Stick(RD_SHL, RD_WRL); RD_Stick(RD_SHR, RD_WRR);
 
     RD_Points(ch, s_rd.p);
     for (i = 0; i < s_rd.stickCount; i++)
@@ -1122,17 +1262,29 @@ static void RD_Start(const PcSkinChara* ch)
         float d[3];
         for (j = 0; j < 3; j++) d[j] = s_rd.p[s_rd.sb[i]][j] - s_rd.p[s_rd.sa[i]][j];
         s_rd.len[i] = V3_Len(d);
+        if (i >= s_rd.minFrom)
+            s_rd.len[i] *= 0.6f;
     }
     s_rd.floorY = (float)Q12_TO_Q8(g_SysWork.playerWork.player.position.vy) - RD_RADIUS;
 
-    /* Push along the last hit's knockback, harder for heavier hits, mostly on
-     * the upper body and slightly upward so the body leaves its feet. */
+    /* Push along the last hit, harder for heavier hits. It goes into the upper
+     * body only, so the planted feet turn it into a topple; a body pushed
+     * evenly just dropped where it stood. With no hit on record (a fall, a
+     * scripted death) he goes over backwards. */
     hl = sqrtf(s_rd.hit[0] * s_rd.hit[0] + s_rd.hit[2] * s_rd.hit[2]);
-    speed = (1.0f + 3.0f * (s_rd.hitAmount / 30.0f)) * 256.0f;
-    if (speed > 4.5f * 256.0f) speed = 4.5f * 256.0f;
+    if (hl < 1e-6f)
+    {
+        q3_12 ry = g_SysWork.playerWork.player.rotation.vy;
+        s_rd.hit[0] = -Math_Sin(ry);
+        s_rd.hit[2] = -Math_Cos(ry);
+        hl = sqrtf(s_rd.hit[0] * s_rd.hit[0] + s_rd.hit[2] * s_rd.hit[2]);
+    }
+    speed = (2.2f + 3.0f * (s_rd.hitAmount / 30.0f)) * 256.0f;
+    if (speed > 5.5f * 256.0f) speed = 5.5f * 256.0f;
     for (i = 0; i < RD_COUNT; i++)
     {
-        float w = (i <= RD_HEAD || i == RD_SHL || i == RD_SHR) ? 1.0f : 0.45f;
+        float w = (i <= RD_HEAD) ? 1.0f : (i == RD_SHL || i == RD_SHR) ? 0.9f :
+                  (i == RD_HIPL || i == RD_HIPR) ? 0.35f : (i >= RD_HIPL) ? 0.0f : 0.6f;
         float v[3] = { 0, 0, 0 };
         if (s_rd.haveAnim && s_rd.animDt > 0.0f)
             for (j = 0; j < 3; j++) v[j] = (s_rd.anim[i][j] - s_rd.animPrev[i][j]) / s_rd.animDt;
@@ -1140,7 +1292,7 @@ static void RD_Start(const PcSkinChara* ch)
         {
             v[0] += s_rd.hit[0] / hl * speed * w;
             v[2] += s_rd.hit[2] / hl * speed * w;
-            v[1] -= 0.6f * 256.0f * w;
+            v[1] -= 0.8f * 256.0f * w;
         }
         for (j = 0; j < 3; j++)
             s_rd.pp[i][j] = s_rd.p[i][j] - v[j] * RD_STEP;
@@ -1162,6 +1314,9 @@ static void RD_Start(const PcSkinChara* ch)
     }
     s_rd.acc = 0.0f;
     s_rd.active = 1;
+    /* Spent: a later death without a recorded hit must not reuse this one. */
+    s_rd.hit[0] = s_rd.hit[2] = 0.0f;
+    s_rd.hitAmount = 0.0f;
 }
 
 static void RD_Step(float dt)
@@ -1186,7 +1341,7 @@ static void RD_Step(float dt)
             float d[3], l, f;
             for (j = 0; j < 3; j++) d[j] = b[j] - a[j];
             l = V3_Len(d);
-            if (l < 1e-6f)
+            if (l < 1e-6f || (i >= s_rd.minFrom && l >= s_rd.len[i]))
                 continue;
             f = 0.5f * (l - s_rd.len[i]) / l;
             for (j = 0; j < 3; j++)
@@ -1281,16 +1436,7 @@ static void Skin_Ragdoll(PcSkinChara* ch)
     }
     if (pl->health > Q12(0.0f))
     {
-        /* Alive: remember the last hit and how the pose is moving, for the
-         * moment it stops being alive. */
-        if (pl->damage.position.vx != 0 || pl->damage.position.vy != 0 || pl->damage.position.vz != 0)
-        {
-            s_rd.hit[0] = (float)pl->damage.position.vx;
-            s_rd.hit[1] = (float)pl->damage.position.vy;
-            s_rd.hit[2] = (float)pl->damage.position.vz;
-        }
-        if (pl->damage.amount > 0)
-            s_rd.hitAmount = pl->damage.amount / 4096.0f;
+        /* Alive: remember how the pose is moving, for the moment it stops. */
         if (dt > 0.0f)
         {
             memcpy(s_rd.animPrev, s_rd.anim, sizeof(s_rd.anim));
@@ -1316,6 +1462,79 @@ static void Skin_Ragdoll(PcSkinChara* ch)
         s_rd.acc -= RD_STEP;
     }
     RD_Pose(ch);
+}
+
+/* Blink weight: closed in 70 ms, open again over 130 ms, every 2..6 s; shut
+ * for good once the ragdoll has him. */
+static float Skin_BlinkWeight(PcSkinChara* ch)
+{
+    float dt = g_DeltaTime / 4096.0f, t;
+
+    if (s_rd.active && ch->isPlayer)
+        return 1.0f;
+    if (ch->blinkNext <= 0.0f)
+        ch->blinkNext = 2.0f + (float)(rand() % 4000) / 1000.0f;
+    ch->blinkClock += dt;
+    t = ch->blinkClock - ch->blinkNext;
+    if (t < 0.0f)
+        return 0.0f;
+    if (t < 0.07f)
+        return t / 0.07f;
+    if (t < 0.20f)
+        return 1.0f - (t - 0.07f) / 0.13f;
+    ch->blinkClock = 0.0f;
+    ch->blinkNext = 2.0f + (float)(rand() % 4000) / 1000.0f;
+    return 0.0f;
+}
+
+/* Shape keys move the bind pose, so each delta goes through the same
+ * retarget and bone blend as the vertex it moves. */
+static void Skin_ApplyMorphs(PcSkinChara* ch, float h, float ofx, float ofy, float offX, float offY)
+{
+    float w[PC_SKIN_MORPH_COUNT];
+    int k, i;
+
+    w[PC_SKIN_MORPH_BLINK] = ch->morph[PC_SKIN_MORPH_BLINK].count ? Skin_BlinkWeight(ch) : 0.0f;
+    w[PC_SKIN_MORPH_MOUTH] = 0.0f; /* lip sync not driven yet */
+    for (k = 0; k < PC_SKIN_MORPH_COUNT; k++)
+    {
+        const PcSkinMorph* m = &ch->morph[k];
+        if (w[k] <= 0.0f)
+            continue;
+        for (i = 0; i < m->count; i++)
+        {
+            u32 v = m->v[i];
+            const PcSkinVert* sv = &ch->verts[v];
+            float add[3] = { 0, 0, 0 }, ws = 0.0f, z;
+            int q;
+
+            if (!ch->ok[v])
+                continue;
+            for (q = 0; q < sv->n; q++)
+            {
+                int b = sv->bone[q];
+                float l[3], o[3], sc;
+                if (!ch->have[b])
+                    continue;
+                M3_MulV(ch->rt[b], m->d[i], l);
+                sc = (ch->kk[b] - 1.0f) * (l[0] * ch->ax[b][0] + l[1] * ch->ax[b][1] + l[2] * ch->ax[b][2]);
+                l[0] += sc * ch->ax[b][0]; l[1] += sc * ch->ax[b][1]; l[2] += sc * ch->ax[b][2];
+                M3_MulV(ch->rv[b], l, o);
+                add[0] += sv->w[q] * o[0]; add[1] += sv->w[q] * o[1]; add[2] += sv->w[q] * o[2];
+                ws += sv->w[q];
+            }
+            if (ws <= 0.0f)
+                continue;
+            ch->pos[v * 3]     += w[k] * add[0] / ws;
+            ch->pos[v * 3 + 1] += w[k] * add[1] / ws;
+            ch->pos[v * 3 + 2] += w[k] * add[2] / ws;
+            z = ch->pos[v * 3 + 2];
+            if (z < 16.0f)
+                continue;
+            ch->scr[v * 2]     = ofx + ch->pos[v * 3] * h / z + offX;
+            ch->scr[v * 2 + 1] = ofy + ch->pos[v * 3 + 1] * h / z + offY;
+        }
+    }
 }
 
 void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
@@ -1365,6 +1584,7 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
         if (p[2] < minZ) minZ = p[2];
         if (p[2] > maxZ) maxZ = p[2];
     }
+    Skin_ApplyMorphs(ch, h, ofx, ofy, offX, offY);
     if (maxZ <= 0.0f)
         return;
     PsyX_NoteItemDepthSz((unsigned)maxZ);

@@ -10473,6 +10473,18 @@ void Player_ReceiveDamage(s_SubCharacter* player, s_PlayerExtra* extra) // 0x800
         }
 
 #ifdef SH_PC_PORT
+        /* Ragdoll push: the knockback, damage and attacker are only valid
+         * here, before the hit-reaction states clear them. */
+        {
+            extern void Pc_SkinChara_NoteHit(const VECTOR3* knock, const VECTOR3* from, s32 amount);
+            Pc_SkinChara_NoteHit(&player->damage.position,
+                                 (player->field_40 >= 0 && player->field_40 < NPC_COUNT_MAX) ?
+                                     &g_SysWork.npcs[player->field_40].position : NULL,
+                                 player->damage.amount);
+        }
+#endif
+
+#ifdef SH_PC_PORT
         /* Randomizer score penalty: the damage actually deducted, after the
          * difficulty scaling above. No-op unless a run is live. */
         {

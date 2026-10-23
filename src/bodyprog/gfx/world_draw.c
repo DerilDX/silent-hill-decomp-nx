@@ -1127,7 +1127,18 @@ void WorldGfx_HeldItemDraw(void) // 0x8003D058
         }
 
         Vw_CoordToWorldAndViewMatrices(coord, &worldMat, &viewMat);
+#ifdef SH_PC_PORT
+        /* Depth-tested like the hand holding it: as world geometry the weapon
+         * took the world's far-push and lost to a leg passing in front. */
+        {
+            extern int g_PsxActorDepth;
+            g_PsxActorDepth = 1;
+            func_80057090(&heldItem->bone.modelInfo, &g_OrderingTable0[g_ActiveBufferIdx], 1, &viewMat, &worldMat, 0);
+            g_PsxActorDepth = 0;
+        }
+#else
         func_80057090(&heldItem->bone.modelInfo, &g_OrderingTable0[g_ActiveBufferIdx], 1, &viewMat, &worldMat, 0);
+#endif
     }
 }
 
