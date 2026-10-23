@@ -183,6 +183,8 @@ typedef struct
     float       blinkClock, blinkNext;
     float       grip[2];
     int         female;
+    int         brightness; /* percent of the lit vertex colour */
+    int         fogPct;     /* percent of the game's fog amount */
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -1117,15 +1119,23 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
          * about the chest centre, a hump on whichever side the clavicle
          * owns more of the shoulder. Neither end is pinned, so the turn
          * bought nothing. */
+        lg = V3_Len(gd);
+        lm = V3_Len(md);
         if (b == 3 || b == 7)
+            memcpy(R[b], restR, sizeof(restR));
+        /* Legs keep the game's rotation unless the model's leg points well
+         * away from it. Harry's rest is a step, so his left shin and both
+         * feet lean off the model's straight legs, and the swing that
+         * closes that gap runs about a tilted axis: it rolled the knee
+         * hinge and turned the boot inward. */
+        else if (b >= 12 && lg > 1e-3f && lm > 1e-3f &&
+                 (gd[0] * md[0] + gd[1] * md[1] + gd[2] * md[2]) > 0.866f * lg * lm)
             memcpy(R[b], restR, sizeof(restR));
         else
         {
             M3_Align(gd, md, swing);
             M3_Mul(swing, restR, R[b]);
         }
-        lg = V3_Len(gd);
-        lm = V3_Len(md);
         if (s_scaled[b] && lm > 1e-3f && s_childA[b] >= 0)
         {
             float mdu[3];
@@ -1276,6 +1286,8 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
     char path[112], line[128];
     FILE* f;
 
+    ch->brightness = 100;
+    ch->fogPct = 100;
     snprintf(path, sizeof(path), "%s.ini", base);
     f = fopen(path, "r");
     if (f == NULL)
@@ -1284,11 +1296,17 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
     {
         char key[32];
         int val;
-        if (sscanf(line, " %31[A-Za-z_] = %d", key, &val) == 2 && strcmp(key, "female") == 0)
+        if (sscanf(line, " %31[A-Za-z_] = %d", key, &val) != 2)
+            continue;
+        if (strcmp(key, "female") == 0)
             ch->female = val != 0;
+        else if (strcmp(key, "brightness") == 0)
+            ch->brightness = val < 0 ? 0 : (val > 200 ? 200 : val);
+        else if (strcmp(key, "fog") == 0)
+            ch->fogPct = val < 0 ? 0 : (val > 400 ? 400 : val);
     }
     fclose(f);
-    SH_DBG("[SKIN] %s: female=%d", path, ch->female);
+    SH_DBG("[SKIN] %s: female=%d brightness=%d fog=%d", path, ch->female, ch->brightness, ch->fogPct);
 }
 
 int Pc_SkinChara_HeroFemale(void)
@@ -1452,6 +1470,11 @@ static u8 Skin_Fog(s32 z)
     return (u8)((fa * 127 + 2048) >> 12);
 }
 
+static u8 Skin_Scale8(int v, int pct, int max)
+{
+    v = v * pct / 100;
+    return (u8)(v > max ? max : v);
+}
 
 /* ---------------------------------------------------------------- ragdoll
  *
@@ -2026,11 +2049,11 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
                 o->z = nz;
                 o->u = u * 256.0f;
                 o->v = vv * 256.0f;
-                o->r = ch->color[vi].r;
-                o->g = ch->color[vi].g;
-                o->b = ch->color[vi].b;
+                o->r = Skin_Scale8(ch->color[vi].r, ch->brightness, 255);
+                o->g = Skin_Scale8(ch->color[vi].g, ch->brightness, 255);
+                o->b = Skin_Scale8(ch->color[vi].b, ch->brightness, 255);
                 o->a = 255;
-                o->fog = (char)Skin_Fog((s32)z);
+                o->fog = (char)Skin_Scale8(Skin_Fog((s32)z), ch->fogPct, 127);
                 o->ppx = o->x;
                 o->ppy = o->y;
                 o->ppw = z;

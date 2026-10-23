@@ -198,6 +198,25 @@ female=1
 The amount is the `female_voice_pitch` setting in `config.cfg` (percent, default 140,
 `0` turns it off). Cutscene dialogue is recorded audio and keeps Harry's voice.
 
+## Brightness and fog
+
+The model goes through the game's own lighting and fog, but a modern texture is a
+clean, evenly lit colour map, while Harry's is darker and has its shading painted in.
+A replacement can stand out against the scenery as a result. Two more `HERO.ini`
+settings tune it per model:
+
+```
+brightness=80
+fog=130
+```
+
+| Setting | Effect |
+|---------|--------|
+| `brightness` | Percent of the lit colour (default 100, 0 to 200). Lower it for bright textures. |
+| `fog` | Percent of the game's fog on the model (default 100, 0 to 400). Raise it to fade the model into the fog sooner. |
+
+The game reads `HERO.ini` when it loads the model, so restart after changing it.
+
 ## Troubleshooting
 
 `SilentHill.log` has a `[SKIN]` line for everything the loader decides:
