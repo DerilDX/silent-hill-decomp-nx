@@ -152,6 +152,9 @@ typedef struct
     float       tv[PC_SKIN_BONES][3];
     u8          have[PC_SKIN_BONES];
     u8          lit[PC_SKIN_BONES];
+    float       rw[PC_SKIN_BONES][9]; /* bone -> world, for the ragdoll */
+    float       tw[PC_SKIN_BONES][3];
+    int         isPlayer;
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -884,6 +887,7 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
         return NULL;
     memset(ch->have, 0, sizeof(ch->have));
     memset(ch->lit, 0, sizeof(ch->lit));
+    ch->isPlayer = (lm == g_WorldGfxWork.harryModel.lmHdr);
     return ch;
 }
 
@@ -900,6 +904,12 @@ void Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* viewM
         for (c = 0; c < 3; c++)
             ch->rv[boneIdx][r * 3 + c] = viewMat->m[r][c] / 4096.0f;
         ch->tv[boneIdx][r] = (float)viewMat->t[r];
+    }
+    for (r = 0; r < 3; r++)
+    {
+        for (c = 0; c < 3; c++)
+            ch->rw[boneIdx][r * 3 + c] = worldMat->m[r][c] / 4096.0f;
+        ch->tw[boneIdx][r] = (float)worldMat->t[r];
     }
     ch->have[boneIdx] = 1;
 
@@ -967,6 +977,347 @@ static u8 Skin_Fog(s32 z)
     return (u8)((fa * 127 + 2048) >> 12);
 }
 
+
+/* ---------------------------------------------------------------- ragdoll
+ *
+ * Config `ragdoll`: when the player's replacement dies, the pose it died in
+ * becomes a particle skeleton -- joints plus hand, foot and head tips, a rigid
+ * torso, stiff wrists and ankles -- integrated with Verlet under gravity onto
+ * the floor Harry stood on, and every bone is rebuilt from it. It starts with
+ * the animation's own motion plus a push along the last hit's knockback. World
+ * units, Y down, 256 to the metre. Walls are not collided with. */
+
+enum
+{
+    RD_WAIST, RD_CHEST, RD_NECK, RD_HEAD,
+    RD_SHL, RD_ELL, RD_WRL, RD_HANDL,
+    RD_SHR, RD_ELR, RD_WRR, RD_HANDR,
+    RD_HIPL, RD_KNL, RD_ANL, RD_TOEL,
+    RD_HIPR, RD_KNR, RD_ANR, RD_TOER,
+    RD_COUNT
+};
+
+#define RD_MAX_STICKS 64
+#define RD_GRAVITY    (9.8f * 256.0f)
+#define RD_RADIUS     6.0f
+/* Fixed step: Verlet velocity is per step, so it must not follow the frame rate. */
+#define RD_STEP       (1.0f / 120.0f)
+
+/* Particle -> (bone, tip?) it is read from. */
+static const s8 s_rdBone[RD_COUNT] = { 1, 3, 2, 2, 4, 5, 6, 6, 8, 9, 10, 10, 12, 13, 14, 14, 15, 16, 17, 17 };
+static const u8 s_rdTip[RD_COUNT]  = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+
+/* Bone -> joint particle, end particle, parent bone (-1: a torso frame). */
+static const s8 s_rdJoint[PC_SKIN_BONES] = { -1, RD_WAIST, RD_NECK, RD_CHEST, RD_SHL, RD_ELL, RD_WRL, RD_CHEST, RD_SHR, RD_ELR, RD_WRR,
+                                              RD_WAIST, RD_HIPL, RD_KNL, RD_ANL, RD_HIPR, RD_KNR, RD_ANR };
+static const s8 s_rdEnd[PC_SKIN_BONES]   = { -1, -1, RD_HEAD, RD_SHL, RD_ELL, RD_WRL, RD_HANDL, RD_SHR, RD_ELR, RD_WRR, RD_HANDR,
+                                              -1, RD_KNL, RD_ANL, RD_TOEL, RD_KNR, RD_ANR, RD_TOER };
+static const s8 s_rdParent[PC_SKIN_BONES] = { -1, -1, 1, 1, 3, 4, 5, 1, 7, 8, 9, -1, 11, 12, 13, 11, 15, 16 };
+
+typedef struct
+{
+    int   active;
+    float p[RD_COUNT][3], pp[RD_COUNT][3];
+    u8    sa[RD_MAX_STICKS], sb[RD_MAX_STICKS];
+    float len[RD_MAX_STICKS];
+    int   stickCount;
+    float floorY;
+    float R0[PC_SKIN_BONES][9];
+    float torso0[9], hip0[9];
+    float dir0[PC_SKIN_BONES][3];
+    float anim[RD_COUNT][3];
+    float animPrev[RD_COUNT][3];
+    float animDt;
+    int   haveAnim;
+    float hit[3];
+    float hitAmount;
+    float acc;
+} PcRagdoll;
+
+static PcRagdoll s_rd;
+
+static void RD_TipLocal(int bone, float* out)
+{
+    const PcSkinRestBone* rb = &s_heroRest[bone];
+    float R[9], d[3];
+    M3_FromQ12(rb->R, R);
+    d[0] = rb->C[0] - rb->T[0];
+    d[1] = rb->C[1] - rb->T[1];
+    d[2] = rb->C[2] - rb->T[2];
+    M3_MulTV(R, d, out);
+}
+
+static void RD_Points(const PcSkinChara* ch, float out[RD_COUNT][3])
+{
+    int i;
+    for (i = 0; i < RD_COUNT; i++)
+    {
+        int b = s_rdBone[i];
+        if (s_rdTip[i])
+        {
+            float l[3], w[3];
+            RD_TipLocal(b, l);
+            M3_MulV(ch->rw[b], l, w);
+            out[i][0] = w[0] + ch->tw[b][0];
+            out[i][1] = w[1] + ch->tw[b][1];
+            out[i][2] = w[2] + ch->tw[b][2];
+        }
+        else
+        {
+            out[i][0] = ch->tw[b][0];
+            out[i][1] = ch->tw[b][1];
+            out[i][2] = ch->tw[b][2];
+        }
+    }
+}
+
+/* Orthonormal frame, columns: a, b made perpendicular to a, a x b. */
+static void RD_Frame(const float* from, const float* to, const float* l, const float* r, float* F)
+{
+    float a[3], b[3], c[3], la, lb, d;
+    int i;
+    for (i = 0; i < 3; i++) { a[i] = to[i] - from[i]; b[i] = r[i] - l[i]; }
+    la = V3_Len(a); if (la < 1e-6f) la = 1;
+    for (i = 0; i < 3; i++) a[i] /= la;
+    d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    for (i = 0; i < 3; i++) b[i] -= d * a[i];
+    lb = V3_Len(b); if (lb < 1e-6f) lb = 1;
+    for (i = 0; i < 3; i++) b[i] /= lb;
+    c[0] = a[1] * b[2] - a[2] * b[1];
+    c[1] = a[2] * b[0] - a[0] * b[2];
+    c[2] = a[0] * b[1] - a[1] * b[0];
+    for (i = 0; i < 3; i++) { F[i * 3] = a[i]; F[i * 3 + 1] = b[i]; F[i * 3 + 2] = c[i]; }
+}
+
+static void RD_Stick(int a, int b)
+{
+    if (s_rd.stickCount >= RD_MAX_STICKS)
+        return;
+    s_rd.sa[s_rd.stickCount] = (u8)a;
+    s_rd.sb[s_rd.stickCount] = (u8)b;
+    s_rd.len[s_rd.stickCount] = 0.0f;
+    s_rd.stickCount++;
+}
+
+static void RD_Start(const PcSkinChara* ch)
+{
+    static const u8 torso[] = { RD_WAIST, RD_CHEST, RD_NECK, RD_SHL, RD_SHR, RD_HIPL, RD_HIPR };
+    float vel[3] = { 0, 0, 0 }, speed, hl;
+    int i, j, b;
+
+    memset(s_rd.p, 0, sizeof(s_rd.p));
+    s_rd.stickCount = 0;
+    for (i = 0; i < (int)sizeof(torso); i++)
+        for (j = i + 1; j < (int)sizeof(torso); j++)
+            RD_Stick(torso[i], torso[j]);
+    RD_Stick(RD_NECK, RD_HEAD); RD_Stick(RD_CHEST, RD_HEAD);
+    RD_Stick(RD_SHL, RD_ELL); RD_Stick(RD_ELL, RD_WRL); RD_Stick(RD_WRL, RD_HANDL); RD_Stick(RD_ELL, RD_HANDL);
+    RD_Stick(RD_SHR, RD_ELR); RD_Stick(RD_ELR, RD_WRR); RD_Stick(RD_WRR, RD_HANDR); RD_Stick(RD_ELR, RD_HANDR);
+    RD_Stick(RD_HIPL, RD_KNL); RD_Stick(RD_KNL, RD_ANL); RD_Stick(RD_ANL, RD_TOEL); RD_Stick(RD_KNL, RD_TOEL);
+    RD_Stick(RD_HIPR, RD_KNR); RD_Stick(RD_KNR, RD_ANR); RD_Stick(RD_ANR, RD_TOER); RD_Stick(RD_KNR, RD_TOER);
+
+    RD_Points(ch, s_rd.p);
+    for (i = 0; i < s_rd.stickCount; i++)
+    {
+        float d[3];
+        for (j = 0; j < 3; j++) d[j] = s_rd.p[s_rd.sb[i]][j] - s_rd.p[s_rd.sa[i]][j];
+        s_rd.len[i] = V3_Len(d);
+    }
+    s_rd.floorY = (float)Q12_TO_Q8(g_SysWork.playerWork.player.position.vy) - RD_RADIUS;
+
+    /* Push along the last hit's knockback, harder for heavier hits, mostly on
+     * the upper body and slightly upward so the body leaves its feet. */
+    hl = sqrtf(s_rd.hit[0] * s_rd.hit[0] + s_rd.hit[2] * s_rd.hit[2]);
+    speed = (1.0f + 3.0f * (s_rd.hitAmount / 30.0f)) * 256.0f;
+    if (speed > 4.5f * 256.0f) speed = 4.5f * 256.0f;
+    for (i = 0; i < RD_COUNT; i++)
+    {
+        float w = (i <= RD_HEAD || i == RD_SHL || i == RD_SHR) ? 1.0f : 0.45f;
+        float v[3] = { 0, 0, 0 };
+        if (s_rd.haveAnim && s_rd.animDt > 0.0f)
+            for (j = 0; j < 3; j++) v[j] = (s_rd.anim[i][j] - s_rd.animPrev[i][j]) / s_rd.animDt;
+        if (hl > 1e-6f)
+        {
+            v[0] += s_rd.hit[0] / hl * speed * w;
+            v[2] += s_rd.hit[2] / hl * speed * w;
+            v[1] -= 0.6f * 256.0f * w;
+        }
+        for (j = 0; j < 3; j++)
+            s_rd.pp[i][j] = s_rd.p[i][j] - v[j] * RD_STEP;
+    }
+    (void)vel;
+
+    RD_Frame(s_rd.p[RD_WAIST], s_rd.p[RD_NECK], s_rd.p[RD_SHL], s_rd.p[RD_SHR], s_rd.torso0);
+    {
+        float mid[3];
+        for (j = 0; j < 3; j++) mid[j] = 0.5f * (s_rd.p[RD_HIPL][j] + s_rd.p[RD_HIPR][j]);
+        RD_Frame(s_rd.p[RD_WAIST], mid, s_rd.p[RD_HIPL], s_rd.p[RD_HIPR], s_rd.hip0);
+    }
+    for (b = 0; b < PC_SKIN_BONES; b++)
+    {
+        memcpy(s_rd.R0[b], ch->rw[b], sizeof(s_rd.R0[b]));
+        if (s_rdEnd[b] >= 0)
+            for (j = 0; j < 3; j++)
+                s_rd.dir0[b][j] = s_rd.p[(int)s_rdEnd[b]][j] - s_rd.p[(int)s_rdJoint[b]][j];
+    }
+    s_rd.acc = 0.0f;
+    s_rd.active = 1;
+}
+
+static void RD_Step(float dt)
+{
+    int i, j, it;
+    for (i = 0; i < RD_COUNT; i++)
+    {
+        for (j = 0; j < 3; j++)
+        {
+            float x = s_rd.p[i][j];
+            float v = (x - s_rd.pp[i][j]) * 0.995f;
+            s_rd.pp[i][j] = x;
+            s_rd.p[i][j] = x + v + ((j == 1) ? RD_GRAVITY * dt * dt : 0.0f);
+        }
+    }
+    for (it = 0; it < 10; it++)
+    {
+        for (i = 0; i < s_rd.stickCount; i++)
+        {
+            float* a = s_rd.p[s_rd.sa[i]];
+            float* b = s_rd.p[s_rd.sb[i]];
+            float d[3], l, f;
+            for (j = 0; j < 3; j++) d[j] = b[j] - a[j];
+            l = V3_Len(d);
+            if (l < 1e-6f)
+                continue;
+            f = 0.5f * (l - s_rd.len[i]) / l;
+            for (j = 0; j < 3; j++)
+            {
+                a[j] += d[j] * f;
+                b[j] -= d[j] * f;
+            }
+        }
+        for (i = 0; i < RD_COUNT; i++)
+            if (s_rd.p[i][1] > s_rd.floorY)
+            {
+                s_rd.p[i][1] = s_rd.floorY;
+                /* Ground friction: bleed the sliding velocity. */
+                s_rd.pp[i][0] += (s_rd.p[i][0] - s_rd.pp[i][0]) * 0.35f;
+                s_rd.pp[i][2] += (s_rd.p[i][2] - s_rd.pp[i][2]) * 0.35f;
+            }
+    }
+}
+
+/* Rebuild the bones' world matrices from the particles, then hand them to the
+ * skinning as view matrices through this frame's camera (any bone's animated
+ * view * inverse(world)). */
+static void RD_Pose(PcSkinChara* ch)
+{
+    float V[9], Vt[3], torso[9], hip[9], F[9], T[9];
+    float Rw[PC_SKIN_BONES][9], tw[PC_SKIN_BONES][3], delta[PC_SKIN_BONES][9];
+    int b, j, ref = 1;
+
+    /* camera: view = V * world */
+    {
+        float Rt[9];
+        for (j = 0; j < 9; j++) Rt[j] = ch->rw[ref][(j % 3) * 3 + j / 3];
+        M3_Mul(ch->rv[ref], Rt, V);
+        M3_MulV(V, ch->tw[ref], Vt);
+        for (j = 0; j < 3; j++) Vt[j] = ch->tv[ref][j] - Vt[j];
+    }
+
+    RD_Frame(s_rd.p[RD_WAIST], s_rd.p[RD_NECK], s_rd.p[RD_SHL], s_rd.p[RD_SHR], F);
+    for (j = 0; j < 9; j++) T[j] = s_rd.torso0[(j % 3) * 3 + j / 3];
+    M3_Mul(F, T, torso);
+    {
+        float mid[3];
+        for (j = 0; j < 3; j++) mid[j] = 0.5f * (s_rd.p[RD_HIPL][j] + s_rd.p[RD_HIPR][j]);
+        RD_Frame(s_rd.p[RD_WAIST], mid, s_rd.p[RD_HIPL], s_rd.p[RD_HIPR], F);
+    }
+    for (j = 0; j < 9; j++) T[j] = s_rd.hip0[(j % 3) * 3 + j / 3];
+    M3_Mul(F, T, hip);
+
+    for (b = 1; b < PC_SKIN_BONES; b++)
+    {
+        float* d = delta[b];
+        if (b == 1)
+            memcpy(d, torso, sizeof(torso));
+        else if (b == 11)
+            memcpy(d, hip, sizeof(hip));
+        else
+        {
+            const float* pd = delta[(int)s_rdParent[b]];
+            float carried[3], now[3], sw[9];
+            M3_MulV(pd, s_rd.dir0[b], carried);
+            for (j = 0; j < 3; j++)
+                now[j] = s_rd.p[(int)s_rdEnd[b]][j] - s_rd.p[(int)s_rdJoint[b]][j];
+            M3_Align(carried, now, sw);
+            M3_Mul(sw, pd, d);
+        }
+        M3_Mul(d, s_rd.R0[b], Rw[b]);
+        for (j = 0; j < 3; j++)
+            tw[b][j] = s_rd.p[(int)s_rdJoint[b]][j];
+    }
+    for (b = 1; b < PC_SKIN_BONES; b++)
+    {
+        float t[3];
+        if (!ch->have[b])
+            continue;
+        M3_Mul(V, Rw[b], ch->rv[b]);
+        M3_MulV(V, tw[b], t);
+        for (j = 0; j < 3; j++)
+            ch->tv[b][j] = t[j] + Vt[j];
+    }
+}
+
+static void Skin_Ragdoll(PcSkinChara* ch)
+{
+    const s_SubCharacter* pl = &g_SysWork.playerWork.player;
+    float dt = g_DeltaTime / 4096.0f;
+    int i;
+
+    if (!g_PcConfig.ragdoll || !ch->isPlayer || !ch->have[1] || !ch->have[11])
+    {
+        s_rd.active = 0;
+        return;
+    }
+    if (pl->health > Q12(0.0f))
+    {
+        /* Alive: remember the last hit and how the pose is moving, for the
+         * moment it stops being alive. */
+        if (pl->damage.position.vx != 0 || pl->damage.position.vy != 0 || pl->damage.position.vz != 0)
+        {
+            s_rd.hit[0] = (float)pl->damage.position.vx;
+            s_rd.hit[1] = (float)pl->damage.position.vy;
+            s_rd.hit[2] = (float)pl->damage.position.vz;
+        }
+        if (pl->damage.amount > 0)
+            s_rd.hitAmount = pl->damage.amount / 4096.0f;
+        if (dt > 0.0f)
+        {
+            memcpy(s_rd.animPrev, s_rd.anim, sizeof(s_rd.anim));
+            RD_Points(ch, s_rd.anim);
+            s_rd.animDt = dt;
+            s_rd.haveAnim = (s_rd.haveAnim < 2) ? s_rd.haveAnim + 1 : 2;
+        }
+        s_rd.active = 0;
+        return;
+    }
+    if (!s_rd.active)
+    {
+        if (s_rd.haveAnim < 2)
+            s_rd.haveAnim = 0;
+        RD_Start(ch);
+    }
+    if (dt > 1.0f / 15.0f)
+        dt = 1.0f / 15.0f;
+    s_rd.acc += dt;
+    for (i = 0; s_rd.acc >= RD_STEP && i < 16; i++)
+    {
+        RD_Step(RD_STEP);
+        s_rd.acc -= RD_STEP;
+    }
+    RD_Pose(ch);
+}
+
 void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
 {
     PcSkinChara* ch = (PcSkinChara*)chara;
@@ -979,6 +1330,7 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
 
     if (ch == NULL || ot == NULL)
         return;
+    Skin_Ragdoll(ch);
     PsyX_GetDrawEnvOffset(&offX, &offY);
     for (v = 0; v < ch->vertCount; v++)
     {
