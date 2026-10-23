@@ -1017,11 +1017,10 @@ void PsyX_Sys_DoPollEvent()
 					{
 						int fullscreen = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) > 0;
 
-						SDL_SetWindowFullscreen(g_window, fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-
-						SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
-						GR_ResetDevice();
-						PsyX_UpdateMouseConfinement();
+						/* The menu's path, not a bare SetWindowFullscreen: writing the
+						 * window size into g_windowWidth made the render size disagree
+						 * with the internal target, which stayed at the old size. */
+						PsyX_ApplyWindowState(g_cfgRenderWidth, g_cfgRenderHeight, fullscreen ? 0 : 2);
 					}
 					break;
 				}
