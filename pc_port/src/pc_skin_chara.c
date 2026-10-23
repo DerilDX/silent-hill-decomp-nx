@@ -798,8 +798,18 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             gd[i] = gEnd[i] - rb->T[i];
             md[i] = mEnd[i] - anchor[b][i];
         }
-        M3_Align(gd, md, swing);
-        M3_Mul(swing, restR, R[b]);
+        /* Clavicles keep the model's own slope. Turning a sloped modern
+         * clavicle onto Harry's level one rotated the whole shoulder top up
+         * about the chest centre, a hump on whichever side the clavicle
+         * owns more of the shoulder. Neither end is pinned, so the turn
+         * bought nothing. */
+        if (b == 3 || b == 7)
+            memcpy(R[b], restR, sizeof(restR));
+        else
+        {
+            M3_Align(gd, md, swing);
+            M3_Mul(swing, restR, R[b]);
+        }
         lg = V3_Len(gd);
         lm = V3_Len(md);
         if (s_scaled[b] && lm > 1e-3f && s_childA[b] >= 0)
