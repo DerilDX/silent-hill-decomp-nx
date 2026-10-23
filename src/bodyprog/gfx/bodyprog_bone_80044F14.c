@@ -6,6 +6,9 @@
 #include "bodyprog/screen/screen_data.h"
 #include "bodyprog/screen/screen_draw.h"
 #include "main/fsqueue.h"
+#ifdef SH_PC_PORT
+#include "pc_skin_chara.h"
+#endif
 
 s8* D_800C15B0;
 
@@ -404,6 +407,10 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
 
     if (drawScale != Q12(1.0f))
         Vw_CoordToWorldAndViewMatrices(&boneCoords[0], &rootWorld, &rootView);
+
+    /* A skinned glTF replacement draws the whole character once, from every
+     * bone's matrices, instead of the rigid parts. */
+    void* skinChara = Pc_SkinChara_Begin(skel);
 #endif
 
     for (curBone = skel->bones_4; curBone != NULL; curBone = curBone->next)
@@ -437,7 +444,11 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
              * head) — hide them with it or the hair floats in front of the eye. */
             {
                 int _hb = (u8)curBone->bone.idx;
-                if (!(g_PcHideHarryFpsBody && (_hb == 2 || _hb >= 18)))
+                if (skinChara != NULL)
+                {
+                    Pc_SkinChara_Bone(skinChara, _hb, &worldMat, &viewMat);
+                }
+                else if (!(g_PcHideHarryFpsBody && (_hb == 2 || _hb >= 18)))
                 {
                     extern int g_PsxActorDepth;
 
@@ -492,6 +503,11 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
             }
         }
     }
+
+#ifdef SH_PC_PORT
+    if (skinChara != NULL)
+        Pc_SkinChara_End(skinChara, ot, arg2, g_PcHideHarryFpsBody);
+#endif
 
     if (g_WorldEnvWork.isFogEnabled)
     {
