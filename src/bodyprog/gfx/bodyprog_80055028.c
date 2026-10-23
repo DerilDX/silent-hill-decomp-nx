@@ -2,6 +2,7 @@
 #include "inline_no_dmpsx.h"
 #ifdef SH_PC_PORT
 #include "pc_config.h"
+#include "pc_skin_chara.h"
 /* The pixel aspect the renderer is really using (PsyX_render.cpp). NOT
  * GR_LivePixelAspect(), which display_aspect = crt does not read. */
 extern float GR_LivePixelAspect(void);
@@ -950,6 +951,20 @@ void func_800554C4(s32 arg0, s16 arg1, GsCOORDINATE2* coord0, GsCOORDINATE2* coo
     {
         Vw_CoordHierarchyMatrixCompute(coord1, &mat);
 
+#ifdef SH_PC_PORT
+        /* A replacement model's own flashlight can sit elsewhere on the chest
+         * (Heather's is on her right, Harry's on his left). */
+        if (coord1 == &g_SysWork.playerBoneCoords[HarryBone_Torso])
+        {
+            s32 off[3];
+            if (Pc_SkinChara_HeroLightOffset(off))
+            {
+                x += off[0];
+                y += off[1];
+                z += off[2];
+            }
+        }
+#endif
         tempSvec.vx = Q12_TO_Q8(x);
         tempSvec.vy = Q12_TO_Q8(y);
         tempSvec.vz = Q12_TO_Q8(z);

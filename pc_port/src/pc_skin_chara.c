@@ -185,6 +185,8 @@ typedef struct
     int         female;
     int         brightness; /* percent of the lit vertex colour */
     int         fogPct;     /* percent of the game's fog amount */
+    int         beamPct;    /* percent of the flashlight beam it takes */
+    int         lightOff[3]; /* flashlight origin shift, cm, torso space */
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -432,6 +434,52 @@ static int Skin_JointIndex(const cgltf_skin* skin, const cgltf_node* node)
  * finger, for the grip. A finger named "index" wins; otherwise the thumb (by
  * name, or the chain rooted nearest the wrist) is skipped and the middle-most
  * of the rest is used: any long finger gives the curl direction. */
+/* Harry's toe directions at rest (x, z), from the sole of 14LFOOT and
+ * 17RFOOT. */
+static const float s_heroToe[2][2] = { { -0.3360f, 0.9419f }, { 0.1961f, 0.9806f } };
+
+/* Horizontal toe direction of the model's foot: the long axis of the
+ * sole (the lowest 15 units of the geometry the foot owns), signed away
+ * from the ankle. A boot's shaft would pull a plain centroid upward. */
+static int Skin_ToeDir(const PcSkinChara* ch, const float* gpos, int bone, const float* ankle, float* dir)
+{
+    float maxY = -1e30f, mx = 0.0f, mz = 0.0f, sxx = 0.0f, sxz = 0.0f, szz = 0.0f, th;
+    int j, n = 0;
+
+    for (j = 0; j < ch->vertCount; j++)
+        if (ch->verts[j].dom == bone && gpos[j * 3 + 1] > maxY)
+            maxY = gpos[j * 3 + 1];
+    for (j = 0; j < ch->vertCount; j++)
+        if (ch->verts[j].dom == bone && gpos[j * 3 + 1] > maxY - 15.0f)
+        {
+            mx += gpos[j * 3];
+            mz += gpos[j * 3 + 2];
+            n++;
+        }
+    if (n < 3)
+        return 0;
+    mx /= n;
+    mz /= n;
+    for (j = 0; j < ch->vertCount; j++)
+        if (ch->verts[j].dom == bone && gpos[j * 3 + 1] > maxY - 15.0f)
+        {
+            float dx = gpos[j * 3] - mx, dz = gpos[j * 3 + 2] - mz;
+            sxx += dx * dx;
+            sxz += dx * dz;
+            szz += dz * dz;
+        }
+    th = 0.5f * atan2f(2.0f * sxz, sxx - szz);
+    dir[0] = cosf(th);
+    dir[1] = 0.0f;
+    dir[2] = sinf(th);
+    if (dir[0] * (mx - ankle[0]) + dir[2] * (mz - ankle[2]) < 0.0f)
+    {
+        dir[0] = -dir[0];
+        dir[2] = -dir[2];
+    }
+    return 1;
+}
+
 static void Skin_FindGrip(const cgltf_skin* skin, float jointPos[][3], int handJoint[2], int fingerJoint[2][3])
 {
     int side;
@@ -1128,6 +1176,19 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
          * feet lean off the model's straight legs, and the swing that
          * closes that gap runs about a tilted axis: it rolled the knee
          * hinge and turned the boot inward. */
+        /* Feet turn about the vertical only, so the toe points where
+         * Harry's does. A modern boot is modelled straight and his feet
+         * splay (20 and 11 degrees), and his standing poses turn the left
+         * foot further in: kept as modelled, that toe crossed toward the
+         * other foot. */
+        else if ((b == 14 || b == 17) && Skin_ToeDir(ch, gpos, b, anchor[b], md))
+        {
+            gd[0] = s_heroToe[b == 17][0];
+            gd[1] = 0.0f;
+            gd[2] = s_heroToe[b == 17][1];
+            M3_Align(gd, md, swing);
+            M3_Mul(swing, restR, R[b]);
+        }
         else if (b >= 12 && lg > 1e-3f && lm > 1e-3f &&
                  (gd[0] * md[0] + gd[1] * md[1] + gd[2] * md[2]) > 0.866f * lg * lm)
             memcpy(R[b], restR, sizeof(restR));
@@ -1288,6 +1349,8 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
 
     ch->brightness = 100;
     ch->fogPct = 100;
+    ch->beamPct = 100;
+    memset(ch->lightOff, 0, sizeof(ch->lightOff));
     snprintf(path, sizeof(path), "%s.ini", base);
     f = fopen(path, "r");
     if (f == NULL)
@@ -1304,9 +1367,34 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
             ch->brightness = val < 0 ? 0 : (val > 200 ? 200 : val);
         else if (strcmp(key, "fog") == 0)
             ch->fogPct = val < 0 ? 0 : (val > 400 ? 400 : val);
+        else if (strcmp(key, "flashlight") == 0)
+            ch->beamPct = val < 0 ? 0 : (val > 100 ? 100 : val);
+        else if (strcmp(key, "flashlight_x") == 0)
+            ch->lightOff[0] = val;
+        else if (strcmp(key, "flashlight_y") == 0)
+            ch->lightOff[1] = val;
+        else if (strcmp(key, "flashlight_z") == 0)
+            ch->lightOff[2] = val;
     }
     fclose(f);
-    SH_DBG("[SKIN] %s: female=%d brightness=%d fog=%d", path, ch->female, ch->brightness, ch->fogPct);
+    SH_DBG("[SKIN] %s: female=%d brightness=%d fog=%d flashlight=%d at (%d %d %d)", path, ch->female,
+           ch->brightness, ch->fogPct, ch->beamPct, ch->lightOff[0], ch->lightOff[1], ch->lightOff[2]);
+}
+
+int Pc_SkinChara_HeroLightOffset(s32 offQ12[3])
+{
+    int i, k;
+
+    if (!g_PcConfig.allowLooseFiles)
+        return 0;
+    for (i = 0; i < s_charaCount; i++)
+        if (s_chara[i].state == 1 && strcmp(s_chara[i].name, "HERO") == 0)
+        {
+            for (k = 0; k < 3; k++)
+                offQ12[k] = s_chara[i].lightOff[k] * 4096 / 100;
+            return s_chara[i].lightOff[0] | s_chara[i].lightOff[1] | s_chara[i].lightOff[2];
+        }
+    return 0;
 }
 
 int Pc_SkinChara_HeroFemale(void)
@@ -2054,6 +2142,7 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
                 o->b = Skin_Scale8(ch->color[vi].b, ch->brightness, 255);
                 o->a = 255;
                 o->fog = (char)Skin_Scale8(Skin_Fog((s32)z), ch->fogPct, 127);
+                o->nz = 1.0f - ch->beamPct / 100.0f;
                 o->ppx = o->x;
                 o->ppy = o->y;
                 o->ppw = z;

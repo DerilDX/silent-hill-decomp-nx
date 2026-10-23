@@ -39,6 +39,10 @@ int   Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding);
 /* HERO's replacement says female=1 in its HERO.ini (drives the voice pitch). */
 int   Pc_SkinChara_HeroFemale(void);
 
+/* HERO's replacement moves the flashlight (flashlight_x/y/z, cm): the shift in
+ * torso space, Q12 metres. Returns 0 when there is none. */
+int   Pc_SkinChara_HeroLightOffset(s32 offQ12[3]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -215,6 +215,24 @@ fog=130
 | `brightness` | Percent of the lit colour (default 100, 0 to 200). Lower it for bright textures. |
 | `fog` | Percent of the game's fog on the model (default 100, 0 to 400). Raise it to fade the model into the fog sooner. |
 
+## Flashlight
+
+Harry's flashlight is clipped to the left side of his chest, and the beam starts
+there. If your character carries theirs somewhere else, move the beam to match, and
+tone it down on a light-coloured outfit that the beam washes out:
+
+```
+flashlight=60
+flashlight_x=16
+```
+
+| Setting | Effect |
+|---------|--------|
+| `flashlight` | Percent of the beam that lights the model itself (default 100, 0 to 100). |
+| `flashlight_x` | Moves the beam origin across the chest, in cm. Positive is toward the character's right; 16 mirrors Harry's spot onto the right side. |
+| `flashlight_y` | Moves it up or down, in cm. Negative is up. |
+| `flashlight_z` | Moves it forward or back, in cm. Positive is forward. |
+
 The game reads `HERO.ini` when it loads the model, so restart after changing it.
 
 ## Troubleshooting
