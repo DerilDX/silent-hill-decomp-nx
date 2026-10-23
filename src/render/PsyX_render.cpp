@@ -2479,9 +2479,10 @@ int g_PsxFogToBlack = 0;
 		 * exactly what the flat path yields for the same vz. World never
 		 * depth-tests itself (ALWAYS painter), so this only makes the depth
 		 * field actors LEQUAL against per-pixel accurate — closing the
-		 * distant grazing gaps flat-average depth leaves. */\
+		 * distant grazing gaps flat-average depth leaves. a_extra.w == 2
+		 * marks ACTOR verts: the same depth, minus the world's far-push. */\
 		"		if (a_extra.w > 0.5) {\n"\
-		"			float dvz = min(a_pgxp.z + u_worldFarBias, u_szMax);\n"\
+		"			float dvz = min(a_pgxp.z + (a_extra.w > 1.5 ? 0.0 : u_worldFarBias), u_szMax);\n"\
 		"			b.z = (2.0 * dvz / u_szMax - 1.0) * b.w;\n"\
 		"		}\n"\
 		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\

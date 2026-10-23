@@ -959,7 +959,14 @@ int g_DrawPrimMode = 0;
  * static faces — rugs on floors, paper on desks, distant road/wall panels — stop
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
-enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2 };
+enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 };
+/* ACTOR: a character's skeleton is being drawn (g_PsxActorDepth, set by the
+ * game around each bone). Its flat bucket seed ties every prim of a bucket, so
+ * a belt and the jacket hem over it, or a mouth behind the lips, resolved by
+ * submission order and swapped as the pose moved. These take true per-vertex
+ * depth from the PGXP W instead (shader, a_extra.w == 2), without the world's
+ * far-push so they still win against the floor they stand on. */
+extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
 /* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
  * bucket shares that one bucket, so painter order cannot sort the distant town
  * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
@@ -1201,7 +1208,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
-		kind = SZ_KIND_NONE;
+		kind = g_PsxActorDepth ? SZ_KIND_ACTOR : SZ_KIND_NONE;
 	}
 
 	// Track per-frame SZ maximum for global depth calibration
@@ -1422,6 +1429,18 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	 * the first version of this. Stashed instead; the colour builders consume
 	 * it (s_primAlphaPending) and reset it to 255. */
 	s_primAlphaPending = (g_PsxPgxpDbg & 4) ? 255 : PsyX_LookupGteAlpha(polyTag);
+
+	/* The SZ payload is FIFO garbage for these drawers; only the mark is used,
+	 * and z keeps the bucket seed for verts PGXP has no W for. */
+	if (kind == SZ_KIND_ACTOR)
+	{
+		if (pgxpWorldPath && g_PsxPgxpActorDepth)
+		{
+			vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = 2;
+			if (isQuad) vertex[3]._p1 = 2;
+		}
+		return;
+	}
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
