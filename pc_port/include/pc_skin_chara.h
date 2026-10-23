@@ -8,8 +8,8 @@
  * (or .gltf) is drawn from that skinned mesh instead of its rigid ILM parts:
  * every vertex follows the game's own bone matrices through its glTF skin
  * weights, so joints bend smoothly and the model needs no cutting into parts.
- * The skin's joints are matched to the game's bones by name (Mixamo names,
- * with or without the "mixamorig:" prefix and Sketchfab "_NN" suffixes), and
+ * The skin's joints are matched to the game's bones by name (Mixamo, Blender,
+ * XPS, Unreal, Biped or VRoid conventions, with Sketchfab "_NN" suffixes), and
  * the model's bind pose -- T-pose, A-pose, anything -- is retargeted onto the
  * character's rest pose at load. Textures stay full resolution, one per
  * material. */
@@ -35,6 +35,9 @@ void  Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* view
 void  Pc_SkinChara_End(void* chara, void* ot, int shift, int hideHead);
 
 int   Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding);
+
+/* HERO's replacement says female=1 in its HERO.ini (drives the voice pitch). */
+int   Pc_SkinChara_HeroFemale(void);
 
 #ifdef __cplusplus
 }

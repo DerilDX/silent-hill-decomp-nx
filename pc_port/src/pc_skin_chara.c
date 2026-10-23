@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "game.h"
 #include "inline_no_dmpsx.h"
@@ -50,6 +51,7 @@ extern s_WorldEnvWork g_WorldEnvWork;
 #define PC_SKIN_BONES     18
 #define PC_SKIN_MAX_CHARA 8
 #define PC_SKIN_MAX_MATS  32
+#define PC_SKIN_MAX_JOINTS 256
 #define PC_SKIN_INFL      4
 /* Characters sit at func_800571D0(field_B_1 = 0)'s OT base. */
 #define PC_SKIN_OT_BASE   2
@@ -180,6 +182,7 @@ typedef struct
     PcSkinMorph morph[PC_SKIN_MORPH_COUNT];
     float       blinkClock, blinkNext;
     float       grip[2];
+    int         female;
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -292,10 +295,36 @@ static void Skin_BaseName(const char* full, char* base, size_t size)
         base[i - 1] = '\0';
 }
 
-static int Skin_JointBone(const char* full)
+/* Rigs that are not Mixamo (Blender/Rigify "upper_arm.L", XPS "Arm.001.L",
+ * Unreal "upperarm_l", 3ds Max "Bip01 L UpperArm", VRoid "J_Bip_L_UpperArm",
+ * DAZ "lShldrBend") are read by side plus a body-part word. A bare "arm" or
+ * "leg" is told apart by how many of its sided ancestors are arm or leg too. */
+enum { SKIN_CLAV, SKIN_UPARM, SKIN_FOREARM, SKIN_HAND, SKIN_THIGH, SKIN_SHIN, SKIN_FOOT, SKIN_ARM, SKIN_LEG };
+static const s8 s_limbBone[2][7] = { { 3, 4, 5, 6, 12, 13, 14 }, { 7, 8, 9, 10, 15, 16, 17 } };
+static const struct { const char* key; s8 cls; } s_limbKeys[] = {
+    { "armature", -1 },
+    { "finger", SKIN_HAND }, { "thumb", SKIN_HAND }, { "index", SKIN_HAND }, { "middle", SKIN_HAND },
+    { "ring", SKIN_HAND }, { "pinky", SKIN_HAND }, { "little", SKIN_HAND }, { "hand", SKIN_HAND },
+    { "wrist", SKIN_HAND }, { "palm", SKIN_HAND },
+    { "forearm", SKIN_FOREARM }, { "lowerarm", SKIN_FOREARM }, { "elbow", SKIN_FOREARM },
+    { "upperarm", SKIN_UPARM }, { "uparm", SKIN_UPARM }, { "shldr", SKIN_UPARM },
+    { "clavicle", SKIN_CLAV }, { "collar", SKIN_CLAV }, { "shoulder", SKIN_CLAV }, { "arm", SKIN_ARM },
+    { "toe", SKIN_FOOT }, { "ball", SKIN_FOOT }, { "foot", SKIN_FOOT }, { "ankle", SKIN_FOOT },
+    { "calf", SKIN_SHIN }, { "shin", SKIN_SHIN }, { "knee", SKIN_SHIN }, { "lowerleg", SKIN_SHIN },
+    { "thigh", SKIN_THIGH }, { "upleg", SKIN_THIGH }, { "upperleg", SKIN_THIGH }, { "hip", SKIN_THIGH },
+    { "leg", SKIN_LEG },
+};
+static const struct { const char* key; s8 bone; } s_torsoKeys[] = {
+    { "pelvis", 11 }, { "hip", 11 }, { "spine", 1 }, { "chest", 1 }, { "torso", 1 }, { "abdomen", 1 },
+    { "neck", 2 }, { "head", 2 },
+};
+
+/* Returns a game bone (>= 0), -1 for none, or -2 with side and cls set for a limb. */
+static int Skin_NameClass(const char* full, int* side, int* cls)
 {
-    char base[64];
-    size_t i;
+    char base[64], comp[64];
+    const char* t;
+    size_t i, n = 0;
 
     Skin_BaseName(full, base, sizeof(base));
     for (i = 0; i < sizeof(s_jointMap) / sizeof(s_jointMap[0]); i++)
@@ -305,7 +334,181 @@ static int Skin_JointBone(const char* full)
         return 6;
     if (strncmp(base, "LeftHand", 8) == 0)
         return 10;
+
+    *side = -1;
+    for (t = base; *t != '\0';)
+    {
+        char tok[64];
+        size_t len = 0, c;
+        while (*t != '\0' && !isalnum((unsigned char)*t))
+            t++;
+        while (isalnum((unsigned char)t[len]))
+            len++;
+        if (len == 0)
+            break;
+        for (c = 0; c < len && c < sizeof(tok) - 1; c++)
+            tok[c] = (char)tolower((unsigned char)t[c]);
+        tok[c] = '\0';
+        if (strcmp(tok, "l") == 0 || strcmp(tok, "left") == 0)
+            *side = 1;
+        else if (strcmp(tok, "r") == 0 || strcmp(tok, "right") == 0)
+            *side = 0;
+        else
+            for (c = 0; c < len && n < sizeof(comp) - 1; c++)
+                if (isalpha((unsigned char)tok[c]))
+                    comp[n++] = tok[c];
+        t += len;
+    }
+    comp[n] = '\0';
+    if (*side < 0)
+    {
+        if (strncmp(comp, "left", 4) == 0)
+            *side = 1, memmove(comp, comp + 4, strlen(comp + 4) + 1);
+        else if (strncmp(comp, "right", 5) == 0)
+            *side = 0, memmove(comp, comp + 5, strlen(comp + 5) + 1);
+        else if ((base[0] == 'l' || base[0] == 'r') && isupper((unsigned char)base[1]))
+            *side = (base[0] == 'l'), memmove(comp, comp + 1, strlen(comp + 1) + 1);
+    }
+
+    /* Face rigs carry sided joints ("eyeball left") whose words collide with limb ones. */
+    if (strstr(comp, "head") || strstr(comp, "neck") || strstr(comp, "eye") || strstr(comp, "face") || strstr(comp, "jaw"))
+        return 2;
+    if (*side >= 0)
+        for (i = 0; i < sizeof(s_limbKeys) / sizeof(s_limbKeys[0]); i++)
+            if (strstr(comp, s_limbKeys[i].key))
+            {
+                if (s_limbKeys[i].cls < 0)
+                    return -1;
+                *cls = s_limbKeys[i].cls;
+                return -2;
+            }
+    if (strstr(comp, "armature"))
+        return -1;
+    for (i = 0; i < sizeof(s_torsoKeys) / sizeof(s_torsoKeys[0]); i++)
+        if (strstr(comp, s_torsoKeys[i].key))
+            return s_torsoKeys[i].bone;
     return -1;
+}
+
+/* The node's own game bone, without falling back to an ancestor. */
+static int Skin_NodeBone(const cgltf_node* node)
+{
+    int side, cls, depth = 0, r = node->name ? Skin_NameClass(node->name, &side, &cls) : -1;
+    const cgltf_node* p;
+
+    if (r != -2)
+        return r;
+    if (cls == SKIN_ARM || cls == SKIN_LEG)
+    {
+        for (p = node->parent; p != NULL; p = p->parent)
+        {
+            int ps, pc, pr = p->name ? Skin_NameClass(p->name, &ps, &pc) : -1;
+            if (pr == -2 && ps == side &&
+                (cls == SKIN_ARM ? (pc == SKIN_UPARM || pc == SKIN_ARM) : (pc == SKIN_THIGH || pc == SKIN_LEG)))
+                depth++;
+            else if (cls == SKIN_ARM ? (pr == 4 || pr == 8) : (pr == 12 || pr == 13 || pr == 15 || pr == 16))
+                depth++;
+        }
+        if (cls == SKIN_ARM)
+            cls = depth == 0 ? SKIN_UPARM : SKIN_FOREARM;
+        else
+            cls = depth == 0 ? SKIN_THIGH : depth == 1 ? SKIN_SHIN : SKIN_FOOT;
+    }
+    return s_limbBone[side][cls];
+}
+
+static int Skin_JointIndex(const cgltf_skin* skin, const cgltf_node* node)
+{
+    size_t j;
+    for (j = 0; j < skin->joints_count; j++)
+        if (skin->joints[j] == node)
+            return (int)j;
+    return -1;
+}
+
+/* For each hand (0 = game hand 6), the hand joint and three joints of one
+ * finger, for the grip. A finger named "index" wins; otherwise the thumb (by
+ * name, or the chain rooted nearest the wrist) is skipped and the middle-most
+ * of the rest is used: any long finger gives the curl direction. */
+static void Skin_FindGrip(const cgltf_skin* skin, float jointPos[][3], int handJoint[2], int fingerJoint[2][3])
+{
+    int side;
+
+    for (side = 0; side < 2; side++)
+    {
+        int roots[16], rootCount = 0, named = -1, thumb = -1, best = -1, i, f;
+        float ctr[3] = { 0, 0, 0 }, bestD = 1e30f, thumbD = 1e30f;
+        size_t j;
+        const cgltf_node* hand;
+
+        for (j = 0; j < skin->joints_count && handJoint[side] < 0; j++)
+            if (Skin_NodeBone(skin->joints[j]) == s_limbBone[side][SKIN_HAND] &&
+                (skin->joints[j]->parent == NULL || Skin_NodeBone(skin->joints[j]->parent) != s_limbBone[side][SKIN_HAND]))
+                handJoint[side] = (int)j;
+        if (handJoint[side] < 0)
+            continue;
+        hand = skin->joints[handJoint[side]];
+        for (j = 0; j < hand->children_count && rootCount < 16; j++)
+        {
+            const cgltf_node* c = hand->children[j];
+            if (Skin_JointIndex(skin, c) < 0 || c->children_count == 0 || c->children[0]->children_count == 0)
+                continue;
+            if (c->name != NULL)
+            {
+                char lower[64];
+                size_t k;
+                for (k = 0; c->name[k] != '\0' && k < sizeof(lower) - 1; k++)
+                    lower[k] = (char)tolower((unsigned char)c->name[k]);
+                lower[k] = '\0';
+                if (strstr(lower, "index") && named < 0)
+                    named = rootCount;
+                if (strstr(lower, "thumb"))
+                    thumb = rootCount;
+            }
+            roots[rootCount++] = Skin_JointIndex(skin, c);
+        }
+        if (rootCount == 0)
+            continue;
+        if (named < 0)
+        {
+            if (thumb < 0)
+                for (i = 0; i < rootCount; i++)
+                {
+                    float d = 0.0f;
+                    for (f = 0; f < 3; f++)
+                        d += (jointPos[roots[i]][f] - jointPos[handJoint[side]][f]) * (jointPos[roots[i]][f] - jointPos[handJoint[side]][f]);
+                    if (d < thumbD)
+                        thumbD = d, thumb = i;
+                }
+            if (rootCount < 2)
+                thumb = -1;
+            for (i = 0; i < rootCount; i++)
+                if (i != thumb)
+                    for (f = 0; f < 3; f++)
+                        ctr[f] += jointPos[roots[i]][f] / (float)(rootCount - (thumb >= 0));
+            for (i = 0; i < rootCount; i++)
+            {
+                float d = 0.0f;
+                if (i == thumb)
+                    continue;
+                for (f = 0; f < 3; f++)
+                    d += (jointPos[roots[i]][f] - ctr[f]) * (jointPos[roots[i]][f] - ctr[f]);
+                if (d < bestD)
+                    bestD = d, best = i;
+            }
+            named = best;
+        }
+        if (named < 0)
+            continue;
+        {
+            const cgltf_node* n = skin->joints[roots[named]];
+            for (f = 0; f < 3 && n != NULL; f++)
+            {
+                fingerJoint[side][f] = Skin_JointIndex(skin, n);
+                n = n->children_count ? n->children[0] : NULL;
+            }
+        }
+    }
 }
 
 static cgltf_result Skin_FileRead(const struct cgltf_memory_options* mem, const struct cgltf_file_options* file,
@@ -568,8 +771,8 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     cgltf_options opt;
     cgltf_data* data = NULL;
     const cgltf_skin* skin;
-    float jointPos[128][3];
-    s8 jointBone[128];
+    float jointPos[PC_SKIN_MAX_JOINTS][3];
+    s8 jointBone[PC_SKIN_MAX_JOINTS];
     float minY = 1e30f, maxY = -1e30f, scale, offX, offY, offZ;
     float hipsPos[3] = { 0, 0, 0 };
     int hipsFound = 0;
@@ -599,7 +802,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         return 0;
     }
     skin = &data->skins[0];
-    if (skin->joints_count == 0 || skin->joints_count > 128 || skin->inverse_bind_matrices == NULL)
+    if (skin->joints_count == 0 || skin->joints_count > PC_SKIN_MAX_JOINTS || skin->inverse_bind_matrices == NULL)
     {
         SH_DBG("[SKIN] %s: skin has %u joints / no inverse bind matrices", path, (unsigned)skin->joints_count);
         cgltf_free(data);
@@ -617,37 +820,18 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         if (!M4_InvTranslation(ibm, jointPos[j]))
             jointPos[j][0] = jointPos[j][1] = jointPos[j][2] = 0.0f;
         for (; n != NULL && bone < 0; n = n->parent)
-            bone = n->name ? Skin_JointBone(n->name) : -1;
+            bone = Skin_NodeBone(n);
         jointBone[j] = (s8)bone;
-        if (skin->joints[j]->name != NULL)
         {
-            char base[64];
-            int side, f;
-            Skin_BaseName(skin->joints[j]->name, base, sizeof(base));
-            for (side = 0; side < 2; side++)
-            {
-                const char* hand = side ? "LeftHand" : "RightHand";
-                size_t hl = strlen(hand);
-                if (strncmp(base, hand, hl) != 0)
-                    continue;
-                if (base[hl] == '\0')
-                    handJoint[side] = (int)j;
-                for (f = 0; f < 3; f++)
-                    if (strncmp(base + hl, "Index", 5) == 0 && base[hl + 5] == '1' + f && base[hl + 6] == '\0')
-                        indexJoint[side][f] = (int)j;
-            }
-        }
-        if (skin->joints[j]->name != NULL)
-        {
-            int own = Skin_JointBone(skin->joints[j]->name);
+            int own = Skin_NodeBone(skin->joints[j]);
             const cgltf_node* par = skin->joints[j]->parent;
-            if ((own == 4 || own == 8) && (par == NULL || par->name == NULL || Skin_JointBone(par->name) != own))
+            if ((own == 4 || own == 8) && (par == NULL || Skin_NodeBone(par) != own))
             {
                 armY += jointPos[j][1];
                 armCount++;
             }
         }
-        if (!hipsFound && skin->joints[j]->name && Skin_JointBone(skin->joints[j]->name) == 11)
+        if (!hipsFound && Skin_NodeBone(skin->joints[j]) == 11)
         {
             memcpy(hipsPos, jointPos[j], sizeof(hipsPos));
             hipsFound = 1;
@@ -847,17 +1031,18 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     for (b = 0; b < ch->matCount; b++)
         ch->mats[b].out[1] = NULL;
 
+    Skin_FindGrip(skin, jointPos, handJoint, indexJoint);
     Skin_BuildGrip(ch, gpos, jointPos, handJoint, indexJoint, scale, offX, offY, offZ);
 
     /* Anchors: each bone's root-most mapped joint. */
     memset(anchorSet, 0, sizeof(anchorSet));
     for (j = 0; j < skin->joints_count; j++)
     {
-        int bone = skin->joints[j]->name ? Skin_JointBone(skin->joints[j]->name) : -1;
+        int bone = Skin_NodeBone(skin->joints[j]);
         const cgltf_node* par = skin->joints[j]->parent;
         int parBone = -1;
         for (; par != NULL && parBone < 0; par = par->parent)
-            parBone = par->name ? Skin_JointBone(par->name) : -1;
+            parBone = Skin_NodeBone(par);
         if (bone >= 0 && parBone != bone && !anchorSet[bone])
         {
             TO_GAME(jointPos[j], anchor[bone]);
@@ -1085,6 +1270,39 @@ static int Skin_ModelPath(const s_LmHeader* lm, char* name, size_t nameSize, cha
     return 0;
 }
 
+/* <NAME>.ini beside the model holds what the mesh cannot say about itself. */
+static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
+{
+    char path[112], line[128];
+    FILE* f;
+
+    snprintf(path, sizeof(path), "%s.ini", base);
+    f = fopen(path, "r");
+    if (f == NULL)
+        return;
+    while (fgets(line, sizeof(line), f) != NULL)
+    {
+        char key[32];
+        int val;
+        if (sscanf(line, " %31[A-Za-z_] = %d", key, &val) == 2 && strcmp(key, "female") == 0)
+            ch->female = val != 0;
+    }
+    fclose(f);
+    SH_DBG("[SKIN] %s: female=%d", path, ch->female);
+}
+
+int Pc_SkinChara_HeroFemale(void)
+{
+    int i;
+
+    if (!g_PcConfig.allowLooseFiles)
+        return 0;
+    for (i = 0; i < s_charaCount; i++)
+        if (s_chara[i].state == 1 && strcmp(s_chara[i].name, "HERO") == 0)
+            return s_chara[i].female;
+    return 0;
+}
+
 void* Pc_SkinChara_Begin(s_Skeleton* skel)
 {
     const s_ModelHeader* hdr;
@@ -1137,6 +1355,8 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
             if (Skin_Load(ch, path))
                 ch->state = 1;
         }
+        if (ch->state == 1)
+            Skin_LoadSettings(ch, base);
     }
     if (ch->state != 1)
         return NULL;

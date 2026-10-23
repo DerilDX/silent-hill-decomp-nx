@@ -34,6 +34,7 @@
 #include "pc_playas.h"
 #include "pc_big_lm.h"
 #include "pc_config.h"
+#include "pc_skin_chara.h"
 #include "hires_override.h"
 #include "sh_log.h"
 
@@ -148,6 +149,8 @@ int Pc_PlayAs_SkinCharaId(void)
 
 int Pc_PlayAs_IsFemale(void)
 {
+    if (PlayAs_Cur()->charaId == Chara_Harry)
+        return Pc_SkinChara_HeroFemale();
     return PlayAs_Cur()->female != 0;
 }
 
