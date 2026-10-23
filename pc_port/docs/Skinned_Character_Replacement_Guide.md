@@ -176,8 +176,10 @@ normal death animation.
 ## Limitations
 
 - Harry only for now. Other characters need their skeleton tables added.
-- Hands keep their modelled shape. There are no finger bones, so a gun is held with an
-  open hand unless you model the hand closed.
+- The hand holding an item closes into a fist, with every finger bent the same way.
+  This needs the `LeftHandIndex1` to `3` and `RightHandIndex1` to `3` joints. It bends
+  past the index knuckle in the direction your index finger already curls, so a dead
+  straight index finger gets no grip. The game does not pose individual fingers.
 - The replacement does not cast flashlight shadows yet.
 - The ragdoll collides with the floor, not walls.
 

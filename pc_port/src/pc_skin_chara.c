@@ -97,11 +97,12 @@ static const u8 s_scaled[PC_SKIN_BONES] = { 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 
  * different heights on a modern rig (Mixamo's Hips is the pelvis, the game's
  * is the waist), and moving them there lifted the pelvis, stretched the neck
  * and stood the feet off the floor.
- * Upper arms are not pinned either: a modern torso is broader than Harry's,
- * and pulling the sleeve onto his narrower shoulder sank it into the coat.
- * The forearm instead runs from the shoulder-shifted elbow to Harry's wrist,
- * so the hand still lands on a held weapon. */
-static const u8 s_pinned[PC_SKIN_BONES] = { 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
+ * Upper arms keep the model's shoulder WIDTH: a modern torso is broader than
+ * Harry's, and pulling the sleeve onto his narrower shoulder sank it into the
+ * coat. The forearm runs from the widened elbow to Harry's wrist, so the hand
+ * still lands on a held weapon. Only X: keeping the model's shoulder depth
+ * too set the upper arm back and kinked the forearm forward to the wrist. */
+static const u8 s_pinned[PC_SKIN_BONES] = { 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
 
 /* Mixamo base name -> game bone. The game's "L" parts sit at -X, which is the
  * model's own right side, so Mixamo "Right" drives them. */
@@ -149,7 +150,8 @@ typedef struct
     float (*d)[3]; /* game-space bind delta */
 } PcSkinMorph;
 
-enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_COUNT };
+/* GRIP_L/GRIP_R curl the fingers of game hand 6/10 round a held item. */
+enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_MORPH_GRIP_R, PC_SKIN_MORPH_COUNT };
 
 typedef struct
 {
@@ -177,6 +179,7 @@ typedef struct
     float       kk[PC_SKIN_BONES];
     PcSkinMorph morph[PC_SKIN_MORPH_COUNT];
     float       blinkClock, blinkNext;
+    float       grip[2];
     CVECTOR*    color;
     float*      pos;  /* view x,y,z */
     float*      scr;  /* screen x,y */
@@ -273,14 +276,13 @@ static int M4_InvTranslation(const float* m, float* t)
 
 /* ---------------------------------------------------------------- loading */
 
-static int Skin_JointBone(const char* full)
+static void Skin_BaseName(const char* full, char* base, size_t size)
 {
-    char base[64];
     const char* s = strrchr(full, ':');
     size_t n, i;
 
     s = s ? s + 1 : full;
-    snprintf(base, sizeof(base), "%s", s);
+    snprintf(base, size, "%s", s);
     /* Sketchfab appends "_<index>" to every node name. */
     n = strlen(base);
     i = n;
@@ -288,6 +290,14 @@ static int Skin_JointBone(const char* full)
         i--;
     if (i > 0 && i < n && base[i - 1] == '_')
         base[i - 1] = '\0';
+}
+
+static int Skin_JointBone(const char* full)
+{
+    char base[64];
+    size_t i;
+
+    Skin_BaseName(full, base, sizeof(base));
     for (i = 0; i < sizeof(s_jointMap) / sizeof(s_jointMap[0]); i++)
         if (strcmp(base, s_jointMap[i].name) == 0)
             return s_jointMap[i].bone;
@@ -454,6 +464,105 @@ static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf
     }
 }
 
+
+/* A fist for each hand, as a bind-space shape key: everything past the index
+ * knuckle bends round an axis across the knuckles, more the further out it is,
+ * in the direction the model's index finger already curls. Many rigs have no
+ * bones for the other fingers (or none at all), so this works on the mesh. */
+#define PC_SKIN_GRIP_CURL 3.3f
+
+static void Skin_BuildGrip(PcSkinChara* ch, const float* gpos, float jointPos[][3], const int* handJoint,
+                           int indexJoint[][3], float scale, float offX, float offY, float offZ)
+{
+    int side;
+
+    for (side = 0; side < 2; side++)
+    {
+        int bone = side ? 10 : 6, f, i, n = 0;
+        float P[4][3], a[3], c[3], q[3], d1[3], d2[3], len, ca, L = 0.0f, kap, rad;
+        PcSkinMorph* m = &ch->morph[PC_SKIN_MORPH_GRIP_L + side];
+
+        if (handJoint[side] < 0 || indexJoint[side][0] < 0 || indexJoint[side][1] < 0 || indexJoint[side][2] < 0)
+            continue;
+        for (f = 0; f < 4; f++)
+        {
+            const float* src = jointPos[f ? indexJoint[side][f - 1] : handJoint[side]];
+            P[f][0] = src[0] * scale + offX;
+            P[f][1] = -src[1] * scale + offY;
+            P[f][2] = src[2] * scale + offZ;
+        }
+        for (i = 0; i < 3; i++)
+        {
+            a[i] = P[1][i] - P[0][i];
+            d1[i] = P[2][i] - P[1][i];
+            d2[i] = P[3][i] - P[2][i];
+        }
+        len = V3_Len(a);
+        if (len < 1e-4f)
+            continue;
+        for (i = 0; i < 3; i++) a[i] /= len;
+        c[0] = d1[1] * d2[2] - d1[2] * d2[1];
+        c[1] = d1[2] * d2[0] - d1[0] * d2[2];
+        c[2] = d1[0] * d2[1] - d1[1] * d2[0];
+        ca = c[0] * a[0] + c[1] * a[1] + c[2] * a[2];
+        for (i = 0; i < 3; i++) c[i] -= ca * a[i];
+        len = V3_Len(c);
+        /* A dead-straight index finger gives no curl direction. */
+        if (len < 1e-4f)
+            continue;
+        for (i = 0; i < 3; i++) c[i] /= len;
+        q[0] = c[1] * a[2] - c[2] * a[1];
+        q[1] = c[2] * a[0] - c[0] * a[2];
+        q[2] = c[0] * a[1] - c[1] * a[0];
+
+        for (i = 0; i < ch->vertCount; i++)
+            if (ch->verts[i].dom == bone)
+            {
+                const float* v = &gpos[i * 3];
+                float s = (v[0] - P[1][0]) * a[0] + (v[1] - P[1][1]) * a[1] + (v[2] - P[1][2]) * a[2];
+                if (s > 0.0f)
+                {
+                    n++;
+                    if (s > L) L = s;
+                }
+            }
+        if (n == 0 || L < 1e-3f)
+            continue;
+        kap = PC_SKIN_GRIP_CURL / L;
+        rad = 1.0f / kap;
+        m->v = (u32*)malloc(sizeof(u32) * (size_t)n);
+        m->d = (float(*)[3])malloc(sizeof(float[3]) * (size_t)n);
+        if (m->v == NULL || m->d == NULL)
+        {
+            free(m->v);
+            free(m->d);
+            m->v = NULL;
+            m->d = NULL;
+            continue;
+        }
+        for (i = 0; i < ch->vertCount; i++)
+        {
+            const float* v = &gpos[i * 3];
+            float r[3], s, h, w, t, k;
+            if (ch->verts[i].dom != bone)
+                continue;
+            r[0] = v[0] - P[1][0]; r[1] = v[1] - P[1][1]; r[2] = v[2] - P[1][2];
+            s = r[0] * a[0] + r[1] * a[1] + r[2] * a[2];
+            if (s <= 0.0f)
+                continue;
+            h = r[0] * q[0] + r[1] * q[1] + r[2] * q[2];
+            w = r[0] * c[0] + r[1] * c[1] + r[2] * c[2];
+            t = s * kap;
+            k = rad - h;
+            m->v[m->count] = (u32)i;
+            for (f = 0; f < 3; f++)
+                m->d[m->count][f] = P[1][f] + c[f] * w + q[f] * rad + (a[f] * sinf(t) - q[f] * cosf(t)) * k - v[f];
+            m->count++;
+        }
+        SH_DBG("[SKIN] grip for game hand %d: %d vertices past the knuckles", bone, m->count);
+    }
+}
+
 static int Skin_Load(PcSkinChara* ch, const char* path)
 {
     cgltf_options opt;
@@ -475,6 +584,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     float R[PC_SKIN_BONES][9], axis[PC_SKIN_BONES][3], k[PC_SKIN_BONES];
     float* gpos = NULL;
     float* gnrm = NULL;
+    int handJoint[2] = { -1, -1 }, indexJoint[2][3] = { { -1, -1, -1 }, { -1, -1, -1 } };
     int b;
 
     memset(&opt, 0, sizeof(opt));
@@ -509,6 +619,24 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         for (; n != NULL && bone < 0; n = n->parent)
             bone = n->name ? Skin_JointBone(n->name) : -1;
         jointBone[j] = (s8)bone;
+        if (skin->joints[j]->name != NULL)
+        {
+            char base[64];
+            int side, f;
+            Skin_BaseName(skin->joints[j]->name, base, sizeof(base));
+            for (side = 0; side < 2; side++)
+            {
+                const char* hand = side ? "LeftHand" : "RightHand";
+                size_t hl = strlen(hand);
+                if (strncmp(base, hand, hl) != 0)
+                    continue;
+                if (base[hl] == '\0')
+                    handJoint[side] = (int)j;
+                for (f = 0; f < 3; f++)
+                    if (strncmp(base + hl, "Index", 5) == 0 && base[hl + 5] == '1' + f && base[hl + 6] == '\0')
+                        indexJoint[side][f] = (int)j;
+            }
+        }
         if (skin->joints[j]->name != NULL)
         {
             int own = Skin_JointBone(skin->joints[j]->name);
@@ -719,6 +847,8 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     for (b = 0; b < ch->matCount; b++)
         ch->mats[b].out[1] = NULL;
 
+    Skin_BuildGrip(ch, gpos, jointPos, handJoint, indexJoint, scale, offX, offY, offZ);
+
     /* Anchors: each bone's root-most mapped joint. */
     memset(anchorSet, 0, sizeof(anchorSet));
     for (j = 0; j < skin->joints_count; j++)
@@ -768,8 +898,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             continue;
         }
         if (b == 5 || b == 9)
-            for (i = 0; i < 3; i++)
-                anchor[b][i] -= anchor[b - 1][i] - s_heroRest[b - 1].T[i];
+            anchor[b][0] -= anchor[b - 1][0] - s_heroRest[b - 1].T[0];
         if (s_childA[b] >= 0)
         {
             const PcSkinRestBone* ca = &s_heroRest[(int)s_childA[b]];
@@ -834,7 +963,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         /* Hips and knees keep the model's own spacing: pulling a knee onto the
          * game's (narrower) knee while the foot stayed put bowed the shins
          * outward. A leg swings about X, so the X offset costs nothing. */
-        else if (b == 12 || b == 13 || b == 15 || b == 16)
+        else if (b == 4 || b == 8 || b == 12 || b == 13 || b == 15 || b == 16)
             anchor[b][0] = s_heroRest[b].T[0];
     }
 
@@ -1504,6 +1633,29 @@ static float Skin_BlinkWeight(PcSkinChara* ch)
     return 0.0f;
 }
 
+/* Fingers close round whatever the game puts in that hand (the phone goes in
+ * the left, everything else in the right) and open again when it is put away
+ * or the ragdoll takes over. */
+static void Skin_GripWeights(PcSkinChara* ch, float* w)
+{
+    float dt = g_DeltaTime / 4096.0f;
+    int side;
+
+    for (side = 0; side < 2; side++)
+    {
+        int held = g_WorldGfxWork.heldItem.itemId != NO_VALUE &&
+                   (g_WorldGfxWork.heldItem.itemId == InvItemId_CutscenePhone) == (side == 0);
+        float target = (ch->isPlayer && held && !s_rd.active) ? 1.0f : 0.0f;
+        float step = dt / 0.15f;
+
+        if (ch->grip[side] < target)
+            ch->grip[side] = (ch->grip[side] + step > target) ? target : ch->grip[side] + step;
+        else if (ch->grip[side] > target)
+            ch->grip[side] = (ch->grip[side] - step < target) ? target : ch->grip[side] - step;
+        w[side] = ch->morph[PC_SKIN_MORPH_GRIP_L + side].count ? ch->grip[side] : 0.0f;
+    }
+}
+
 /* Shape keys move the bind pose, so each delta goes through the same
  * retarget and bone blend as the vertex it moves. */
 static void Skin_ApplyMorphs(PcSkinChara* ch, float h, float ofx, float ofy, float offX, float offY)
@@ -1513,6 +1665,7 @@ static void Skin_ApplyMorphs(PcSkinChara* ch, float h, float ofx, float ofy, flo
 
     w[PC_SKIN_MORPH_BLINK] = ch->morph[PC_SKIN_MORPH_BLINK].count ? Skin_BlinkWeight(ch) : 0.0f;
     w[PC_SKIN_MORPH_MOUTH] = 0.0f; /* lip sync not driven yet */
+    Skin_GripWeights(ch, &w[PC_SKIN_MORPH_GRIP_L]);
     for (k = 0; k < PC_SKIN_MORPH_COUNT; k++)
     {
         const PcSkinMorph* m = &ch->morph[k];
