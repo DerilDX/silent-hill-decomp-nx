@@ -352,7 +352,7 @@ extern void			GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned cha
 extern void			GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_UpdateVertexBuffer(const GrVertex* vertices, int count);
 extern void			GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int count);
-extern int			GR_DrawModernMesh(unsigned int mesh_handle);
+extern int			GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env);
 extern void			GR_DrawTriangles(int start_vertex, int triangles);
 
 /* Flashlight shadow map depth pre-pass (see g_PsyX_UseFlashlightShadows). Call

@@ -3260,6 +3260,7 @@ static void AddModernSplit(unsigned int handle)
 	GPUDrawSplit& split = g_splits[++g_splitIndex];
 	split.kind = GPU_SPLIT_MODERN;
 	split.modernHandle = handle;
+	split.drawenv = activeDrawEnv;
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
 }
@@ -3510,7 +3511,7 @@ void DrawAllSplits()
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
-			GR_DrawModernMesh(g_splits[i].modernHandle);
+			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
 			DrawFarMeshSplit(g_splits[i]);
 		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
