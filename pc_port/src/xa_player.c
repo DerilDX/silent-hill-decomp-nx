@@ -755,7 +755,7 @@ static int FillAndUploadOne(ALuint alBuffer) {
         memcpy(g_XaPlayer.pcmBuffer, s_ovPcm + s_ovPos, n);
         s_ovPos += n;
         g_XaPlayer.remainingSectors--;
-        Pc_Lip_Feed((const int16_t*)g_XaPlayer.pcmBuffer, (int)(n / (g_XaPlayer.isStereo ? 4u : 2u)),
+        Pc_Lip_Feed(g_XaPlayer.xaIdx, (const int16_t*)g_XaPlayer.pcmBuffer, (int)(n / (g_XaPlayer.isStereo ? 4u : 2u)),
                     g_XaPlayer.sampleRate, g_XaPlayer.isStereo ? 2 : 1);
         alBufferData(alBuffer, g_XaPlayer.isStereo ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16,
                      g_XaPlayer.pcmBuffer, (ALsizei)n, g_XaPlayer.sampleRate);
@@ -804,7 +804,7 @@ static int FillAndUploadOne(ALuint alBuffer) {
     g_XaPlayer.remainingSectors -= matchedCount;
 
     int byteCount = totalSamples * (int)sizeof(int16_t);
-    Pc_Lip_Feed(g_XaPlayer.pcmBuffer, totalSamples / (g_XaPlayer.isStereo ? 2 : 1),
+    Pc_Lip_Feed(g_XaPlayer.xaIdx, g_XaPlayer.pcmBuffer, totalSamples / (g_XaPlayer.isStereo ? 2 : 1),
                 g_XaPlayer.sampleRate, g_XaPlayer.isStereo ? 2 : 1);
     ALenum format = g_XaPlayer.isStereo ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16;
     alBufferData(alBuffer, format, g_XaPlayer.pcmBuffer, byteCount, g_XaPlayer.sampleRate);

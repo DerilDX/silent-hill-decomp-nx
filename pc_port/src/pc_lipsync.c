@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "pc_lipsync.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <SDL_timer.h>
+#include "pc_config.h"
+#include "sh_log.h"
 
 #define LIP_WIN_MS  20
 #define LIP_RING    4096
@@ -15,6 +18,7 @@
 #define LIP_HZ_BINS   200 /* 2 Hz each */
 
 static int    s_active;
+static uint16_t s_line;
 static Uint32 s_startMs;
 static Uint32 s_holdMs;
 static int    s_held;
@@ -77,7 +81,38 @@ static void Lip_Vote(void)
     }
 }
 
-void Pc_Lip_Feed(const int16_t* pcm, int frames, int rate, int channels)
+/* Per-line corrections, "<xaIdx> = <MODEL>" a line, "-" for nobody. */
+static char s_override[PC_LIP_LINES][12];
+
+static void Lip_LoadOverrides(void)
+{
+    static int loaded;
+    char line[96];
+    FILE* f;
+    int n = 0;
+
+    if (loaded)
+        return;
+    loaded = 1;
+    if (!g_PcConfig.allowLooseFiles)
+        return;
+    f = fopen("gamedata/load/XA/speakers.txt", "r");
+    if (f == NULL)
+        return;
+    while (fgets(line, sizeof(line), f) != NULL)
+    {
+        int idx;
+        char who[12];
+        if (line[0] == '#' || sscanf(line, " %d = %11s", &idx, who) != 2 || idx <= 0 || idx >= PC_LIP_LINES)
+            continue;
+        snprintf(s_override[idx], sizeof(s_override[idx]), "%s", who);
+        n++;
+    }
+    fclose(f);
+    SH_DBG("[LIP] speakers.txt: %d line(s) reassigned", n);
+}
+
+void Pc_Lip_Feed(uint16_t xaIdx, const int16_t* pcm, int frames, int rate, int channels)
 {
     int f;
 
@@ -85,7 +120,9 @@ void Pc_Lip_Feed(const int16_t* pcm, int frames, int rate, int channels)
         return;
     if (!s_active)
     {
+        Lip_LoadOverrides();
         s_active = 1;
+        s_line = xaIdx;
         s_startMs = SDL_GetTicks();
         s_held = 0;
         s_rate = rate;
@@ -145,15 +182,18 @@ void Pc_Lip_Hold(int hold)
         s_startMs += SDL_GetTicks() - s_holdMs;
 }
 
-float Pc_Lip_Level(int* female)
+float Pc_Lip_Level(const char** speaker, int* female)
 {
     Uint32 now = s_held ? s_holdMs : SDL_GetTicks();
     uint32_t w;
     float ref;
 
     *female = -1;
+    *speaker = NULL;
     if (!s_active)
         return -1.0f;
+    if (s_line < PC_LIP_LINES)
+        *speaker = s_override[s_line][0] ? s_override[s_line] : g_PcLipSpeaker[s_line];
     if (s_voiced >= 4)
     {
         int i, n = 0;

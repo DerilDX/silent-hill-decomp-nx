@@ -189,13 +189,23 @@ every 2 to 6 seconds, and the eyes stay shut when the ragdoll takes over. Export
 Add a shape key that opens the jaw and name it `jawOpen` (`mouthOpen` and `viseme_aa`
 also work). While a voice line plays, the mouth opens with the loudness of the line.
 
-The game does not record who speaks a line, so the pitch of the voice decides:
+The game does not record who speaks a line, so the port carries its own list of the
+speaker of each voice line, by the speaker's model name (`HERO`, `SIBYL`, `DARIA`, `LISA`,
+`KAU` and so on). Only the speaker's mouth moves, whichever model replaces them. Lines
+not on the list, mostly short grunts, fall back to the pitch of the voice: a male line
+moves Harry's mouth and a female line moves Cybil's.
 
-- A male line moves Harry's mouth, whatever model replaces him, because the lines are
-  Harry's.
-- A female line moves Cybil's.
+If a line moves the wrong mouth, correct it in `gamedata/load/XA/speakers.txt`, one line
+per voice line:
 
-Short shouted lines from Harry can read as female, and his mouth stays shut for those.
+```
+# <voice line number> = <model name>, or - for nobody
+118 = KAU
+255 = -
+```
+
+The voice line number is in `SilentHill.log`: look for the `[XA] Play xaIdx=` line logged
+when the line starts.
 
 A rig with a jaw bone needs no sculpting. Turn the jaw open about 10 degrees in pose
 mode and save the result as the shape key.

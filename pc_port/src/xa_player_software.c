@@ -541,7 +541,7 @@ static int FillAndQueueOne(void) {
                                     (uint32_t)g_XaPlayer.sampleRate, (uint32_t)channels)) {
             return 0;
         }
-        Pc_Lip_Feed(g_XaPlayer.pcmBuffer, frames, g_XaPlayer.sampleRate, channels);
+        Pc_Lip_Feed(g_XaPlayer.xaIdx, g_XaPlayer.pcmBuffer, frames, g_XaPlayer.sampleRate, channels);
         s_ovPos += n;
         g_XaPlayer.remainingSectors = (s_ovPos >= s_ovBytes) ? 0 : g_XaPlayer.remainingSectors - 1;
         return frames;
@@ -593,7 +593,7 @@ static int FillAndQueueOne(void) {
                                 (uint32_t)g_XaPlayer.sampleRate, (uint32_t)channels)) {
         return 0;
     }
-    Pc_Lip_Feed(g_XaPlayer.pcmBuffer, frames, g_XaPlayer.sampleRate, channels);
+    Pc_Lip_Feed(g_XaPlayer.xaIdx, g_XaPlayer.pcmBuffer, frames, g_XaPlayer.sampleRate, channels);
     return frames;
 }
 

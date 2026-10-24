@@ -2015,16 +2015,19 @@ static float Skin_BlinkWeight(PcSkinChara* ch)
     return 0.0f;
 }
 
-/* The mouth follows the voice line's loudness when the line's pitch matches
- * this character's voice. Opening is quick and closing slower, so syllables
- * read as movement rather than a flicker. */
+/* The mouth follows the voice line's loudness when this character speaks it:
+ * by the speaker table, or for an untabled line, when its pitch matches this
+ * character's voice. Opening is quick and closing slower, so syllables read
+ * as movement rather than a flicker. */
 static float Skin_MouthWeight(PcSkinChara* ch)
 {
     float dt = g_DeltaTime / 4096.0f, target = 0.0f, rate;
-    int female;
-    float level = Pc_Lip_Level(&female);
+    const char* speaker;
+    int female, mine;
+    float level = Pc_Lip_Level(&speaker, &female);
 
-    if (level > 0.0f && female == ch->def->femaleVoice && !(s_rd.active && ch->isPlayer))
+    mine = speaker != NULL ? strcmp(speaker, ch->name) == 0 : female == ch->def->femaleVoice;
+    if (level > 0.0f && mine && !(s_rd.active && ch->isPlayer))
         target = level;
     rate = target > ch->mouth ? 30.0f : 14.0f;
     ch->mouth += (target - ch->mouth) * (dt * rate > 1.0f ? 1.0f : dt * rate);
