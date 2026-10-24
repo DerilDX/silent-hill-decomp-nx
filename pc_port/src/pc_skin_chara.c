@@ -723,6 +723,7 @@ static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf
         int kind = Skin_MorphKind(mesh->target_names[t], haveBoth);
         const cgltf_accessor* acc = NULL;
         PcSkinMorph* m;
+        float* all;
 
         if (kind < 0)
             continue;
@@ -734,15 +735,21 @@ static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf
         m = &ch->morph[kind];
         m->v = (u32*)realloc(m->v, sizeof(u32) * (m->count + acc->count));
         m->d = (float(*)[3])realloc(m->d, sizeof(float[3]) * (m->count + acc->count));
-        if (m->v == NULL || m->d == NULL)
+        /* Unpacked whole: Blender writes shape keys as sparse accessors by
+         * default, and cgltf_accessor_read_float refuses those, leaving each
+         * delta uninitialised. */
+        all = (float*)malloc(sizeof(float) * 3 * acc->count);
+        if (m->v == NULL || m->d == NULL || all == NULL)
         {
             m->count = 0;
+            free(all);
             continue;
         }
+        if (cgltf_accessor_unpack_floats(acc, all, acc->count * 3) != acc->count * 3)
+            memset(all, 0, sizeof(float) * 3 * acc->count);
         for (v = 0; v < acc->count; v++)
         {
-            float d[3];
-            cgltf_accessor_read_float(acc, v, d, 3);
+            const float* d = &all[v * 3];
             if (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f)
                 continue;
             m->v[m->count] = (u32)(vbase + v);
@@ -751,6 +758,7 @@ static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf
             m->d[m->count][2] = d[2] * scale;
             m->count++;
         }
+        free(all);
         SH_DBG("[SKIN] shape key \"%s\" drives %s", mesh->target_names[t],
                kind == PC_SKIN_MORPH_BLINK ? "blinking" : "the mouth");
     }
