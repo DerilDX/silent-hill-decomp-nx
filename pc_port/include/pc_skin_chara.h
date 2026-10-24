@@ -36,6 +36,11 @@ void  Pc_SkinChara_End(void* chara, void* ot, int shift, int hideHead);
 /* Nonzero for a stock part still drawn beside the replacement: a prop the
  * ILM welds into a body part (Cybil's pistol is her 06LGUN/10RGUN hands). */
 int   Pc_SkinChara_KeepsStockPart(const char partName[8]);
+/* Transforms and lights a replaced part into the scratch slots without drawing
+ * it, for a kept part that reads its seam vertices from there
+ * (bodyprog_80055028.c). */
+typedef struct _ModelInfo s_ModelInfo;
+void  Pc_PartFillScratch(s_ModelInfo* modelInfo, MATRIX* viewMat);
 
 int   Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding);
 

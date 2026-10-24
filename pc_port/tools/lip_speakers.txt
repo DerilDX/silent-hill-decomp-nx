@@ -48,7 +48,7 @@
 45 = SIBYL  # MAP0_S01.38: Cybil Bennett.
 46 = SIBYL  # MAP0_S01.35: What's your name?
 47 = HERO  # MAP0_S01.27: My daughter.
-48 = HERO  # MAP0_S01.24: Uh-huh?
+48 = SIBYL  # MAP0_S01.24: Uh-huh?
 49 = SIBYL  # MAP0_S01.56: Got it?
 50 = HERO  # MAP0_S01.42: Hmph.
 51 = HERO  # MAP0_S01.28: Sorry.

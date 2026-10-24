@@ -411,6 +411,15 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
     /* A skinned glTF replacement draws the whole character once, from every
      * bone's matrices, instead of the rigid parts. */
     void* skinChara = Pc_SkinChara_Begin(skel);
+    int   skinKeepsStock = 0;
+
+    if (skinChara != NULL)
+    {
+        for (curBone = skel->bones_4; curBone != NULL; curBone = curBone->next)
+            if (curBone->bone.modelInfo.modelHdr != NULL &&
+                Pc_SkinChara_KeepsStockPart(curBone->bone.modelInfo.modelHdr->name.str))
+                skinKeepsStock = 1;
+    }
 #endif
 
     for (curBone = skel->bones_4; curBone != NULL; curBone = curBone->next)
@@ -447,7 +456,12 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
                 if (skinChara != NULL)
                 {
                     Pc_SkinChara_Bone(skinChara, _hb, &worldMat, &viewMat);
-                    if (Pc_SkinChara_KeepsStockPart(curBone->bone.modelInfo.modelHdr->name.str))
+                    if (!Pc_SkinChara_KeepsStockPart(curBone->bone.modelInfo.modelHdr->name.str))
+                    {
+                        if (skinKeepsStock)
+                            Pc_PartFillScratch(&curBone->bone.modelInfo, &viewMat);
+                    }
+                    else
                     {
                         extern int g_PsxActorDepth;
 

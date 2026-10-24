@@ -4458,6 +4458,31 @@ void func_8005A21C(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
     }
 }
 
+#ifdef SH_PC_PORT
+/* func_8005A21C's transform and vertex lighting without its prims. A part
+ * reads the seam vertices it shares with a neighbour from the scratch slots
+ * that neighbour filled when it drew; when a skinned replacement draws the
+ * neighbour instead, a stock part kept beside it (Cybil's gun hands) needs
+ * the slots filled this way, or it reads stale ones and stretches across the
+ * screen. Expects the part's lighting prelude already run (Pc_SkinChara_Bone). */
+void Pc_PartFillScratch(s_ModelInfo* modelInfo, MATRIX* viewMat)
+{
+    s_ModelHeader*    modelHdr = modelInfo->modelHdr;
+    s_MeshHeader*     curMeshHdr;
+    s_GteScratchData* scratchData = PSX_SCRATCH_ADDR(0);
+
+    if (modelHdr == NULL || modelHdr->meshHdrs == NULL || modelInfo->field_0 < 0 || !modelHdr->field_B_0 ||
+        (modelHdr->field_B_4 & 0xFF) != 0)
+        return;
+    for (curMeshHdr = modelHdr->meshHdrs; curMeshHdr < &modelHdr->meshHdrs[modelHdr->meshCount]; curMeshHdr++)
+    {
+        func_8005A900(curMeshHdr, modelHdr->vertexOffset, scratchData, viewMat);
+        if (g_WorldEnvWork.field_0 != 0)
+            func_8005AA08(curMeshHdr, modelHdr->normalOffset, (s_GteScratchData2*)scratchData);
+    }
+}
+#endif
+
 void func_8005A42C(s_GteScratchData* scratchData, q19_12 alpha) // 0x8005A42C
 {
     q19_12 invAlpha = Q12(1.0f) - Q12_MULT(alpha, g_WorldEnvWork.field_20);
