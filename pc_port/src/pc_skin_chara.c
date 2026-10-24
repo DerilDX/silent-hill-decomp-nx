@@ -37,6 +37,7 @@
 #include "psyq/libgs.h"
 #include "hires_override.h"
 #include "pc_config.h"
+#include "pc_lipsync.h"
 #include "pc_modern_mesh.h"
 #include "pc_modern_vertex.h"
 #include "pc_skin_chara.h"
@@ -63,9 +64,9 @@ typedef struct
     float C[3];  /* rest-pose centroid of the bone's stock geometry */
 } PcSkinRestBone;
 
-/* HERO rest pose: HB_BASE.ANM keyframe 0, the pose the ILM converter exports
- * (HERO.ilmmeta.json restPose per part; centroids from that same HERO.obj). */
-#define HERO_SOLE_Y (-9.4f)
+/* Rest poses: the ANM's keyframe 0, the pose the ILM converter exports
+ * (<NAME>.ilmmeta.json restPose per part; centroids from that same <NAME>.obj).
+ * HERO is HB_BASE.ANM. */
 static const PcSkinRestBone s_heroRest[PC_SKIN_BONES] = {
     { { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 }, { 0, 0, 0 }, { 0, 0, 0 } },
     { { 4064, -32, -96, 32, 4064, -64, 96, 64, 4064 }, { 0, -279, 0 }, { 0.5f, -322.1f, -6.4f } },
@@ -85,6 +86,46 @@ static const PcSkinRestBone s_heroRest[PC_SKIN_BONES] = {
     { { 4044, -31, 63, 4, 4033, -36, -62, 60, 4045 }, { 16, -236, 1 }, { 17.4f, -186.4f, -5.4f } },
     { { 4012, -38, 58, 3, 3974, 437, -62, -415, 3988 }, { 15, -146, 2 }, { 15.7f, -89.3f, -11.1f } },
     { { 3873, -188, 843, 134, 3959, 20, -862, 30, 3893 }, { 13, -39, -18 }, { 19.1f, -22.1f, -9.4f } },
+};
+
+/* SIBYL (Cybil): SBL.ANM keyframe 0, the same 17 bones as HERO. */
+static const PcSkinRestBone s_sibylRest[PC_SKIN_BONES] = {
+    { { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 }, { 0, 0, 0 }, { 0, 0, 0 } },
+    { { 4064, -32, -96, 32, 4064, -288, 96, 288, 4064 }, { 0, -271, 12 }, { 0.2f, -312.8f, 9.9f } },
+    { { 4033, 10, -67, 2, 4032, 161, 61, -161, 4032 }, { 0, -363, 5 }, { -1.8f, -381.2f, 14.9f } },
+    { { 131, -44, 4031, -547, 3995, 93, -3995, -548, 131 }, { 0, -335, 3 }, { -29.9f, -331.8f, 1.2f } },
+    { { 3900, -860, -223, 273, 84, 3991, -854, -3894, 146 }, { -32, -336, 1 }, { -38.5f, -308.0f, 3.8f } },
+    { { 3940, -422, -13, 134, 1048, 3815, -420, -3808, 1052 }, { -39, -286, 3 }, { -41.5f, -264.6f, 9.9f } },
+    { { 3930, 76, -188, 179, 1137, 3754, 111, -3777, 1152 }, { -40, -231, 18 }, { -43.9f, -215.1f, 26.1f } },
+    { { -28, -83, 4034, -289, 4038, 104, -4044, -258, -28 }, { 0, -335, 3 }, { 29.3f, -330.7f, 1.8f } },
+    { { 3981, 11, 388, -367, -663, 3960, 65, -3957, -637 }, { 31, -335, 2 }, { 38.9f, -307.2f, -1.8f } },
+    { { 3887, 568, 587, -604, 248, 3945, 515, -3945, 349 }, { 39, -286, -7 }, { 45.2f, -263.8f, -4.2f } },
+    { { 3224, 2236, 117, -890, 1108, 3700, 2043, -3081, 1434 }, { 47, -229, -2 }, { 48.8f, -213.8f, 8.0f } },
+    { { -4064, 32, 192, 64, 4064, 64, -192, 96, -4064 }, { 0, -271, 12 }, { 0.4f, -248.9f, 8.6f } },
+    { { -4007, -403, 157, -383, 4011, -159, -136, -149, -4039 }, { -16, -220, 12 }, { -20.1f, -186.4f, 8.6f } },
+    { { -3976, -376, 208, -381, 3927, -690, -135, -684, -3957 }, { -21, -138, 9 }, { -25.0f, -92.3f, -4.2f } },
+    { { -3906, 5, 619, 18, 3976, -108, -614, -67, -3940 }, { -31, -36, -13 }, { -34.2f, -18.3f, -3.1f } },
+    { { 4028, 102, -253, -128, 4033, 96, 252, -61, 4033 }, { 16, -220, 13 }, { 18.1f, -186.5f, 10.6f } },
+    { { 3996, 132, -237, -127, 3957, 598, 250, -565, 3962 }, { 14, -138, 11 }, { 15.9f, -91.8f, -0.7f } },
+    { { 3924, -31, 566, -24, 3987, 23, -563, 24, 3933 }, { 17, -35, -8 }, { 20.1f, -17.6f, 2.3f } },
+};
+
+/* A character the loader can retarget onto: its rest pose, sole height and
+ * toe directions at rest (x, z, from the sole of 14LFOOT and 17RFOOT, which
+ * splay), and whether its voice is female, which is how lip sync tells the
+ * speakers of a voice line apart. */
+typedef struct
+{
+    const char*           name;
+    const PcSkinRestBone* rest;
+    float                 soleY;
+    float                 toe[2][2];
+    int                   femaleVoice;
+} PcSkinRestDef;
+
+static const PcSkinRestDef s_restDefs[] = {
+    { "HERO", s_heroRest, -9.4f, { { -0.3360f, 0.9419f }, { 0.1961f, 0.9806f } }, 0 },
+    { "SIBYL", s_sibylRest, -7.5f, { { -0.1840f, 0.9829f }, { 0.1715f, 0.9852f } }, 1 },
 };
 
 /* Where each bone's segment ends: a child joint, the midpoint of two (the
@@ -158,6 +199,7 @@ enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_M
 typedef struct
 {
     char        name[16];
+    const PcSkinRestDef* def;
     int         state; /* 0 untried, 1 ready, -1 none */
     int         vertCount;
     PcSkinVert* verts;
@@ -181,6 +223,7 @@ typedef struct
     float       kk[PC_SKIN_BONES];
     PcSkinMorph morph[PC_SKIN_MORPH_COUNT];
     float       blinkClock, blinkNext;
+    float       mouth;
     float       grip[2];
     int         female;
     int         brightness; /* percent of the lit vertex colour */
@@ -434,10 +477,6 @@ static int Skin_JointIndex(const cgltf_skin* skin, const cgltf_node* node)
  * finger, for the grip. A finger named "index" wins; otherwise the thumb (by
  * name, or the chain rooted nearest the wrist) is skipped and the middle-most
  * of the rest is used: any long finger gives the curl direction. */
-/* Harry's toe directions at rest (x, z), from the sole of 14LFOOT and
- * 17RFOOT. */
-static const float s_heroToe[2][2] = { { -0.3360f, 0.9419f }, { 0.1961f, 0.9806f } };
-
 /* Horizontal toe direction of the model's foot: the long axis of the
  * sole (the lowest 15 units of the geometry the foot owns), signed away
  * from the ankle. A boot's shaft would pull a plain centroid upward. */
@@ -930,10 +969,10 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
      * and neck are taller than the PSX ones, so height-matching left the arms
      * a few inches low and pinning them raised the shoulders into peaks; at
      * shoulder height the wrists already sit where the game holds weapons. */
-    scale = (HERO_SOLE_Y - (float)s_heroRest[4].T[1]) / (armY / armCount - minY);
+    scale = (ch->def->soleY - (float)ch->def->rest[4].T[1]) / (armY / armCount - minY);
     offX = -hipsPos[0] * scale;
     offZ = -hipsPos[2] * scale;
-    offY = HERO_SOLE_Y + minY * scale;
+    offY = ch->def->soleY + minY * scale;
 #define TO_GAME(src, dst) do { (dst)[0] = (src)[0] * scale + offX; (dst)[1] = -(src)[1] * scale + offY; (dst)[2] = (src)[2] * scale + offZ; } while (0)
 
     ch->verts = (PcSkinVert*)calloc((size_t)totalVerts, sizeof(PcSkinVert));
@@ -1119,7 +1158,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     /* Retarget: R = swing(rest dir -> model dir) * restR; joint -> model joint. */
     for (b = 0; b < PC_SKIN_BONES; b++)
     {
-        const PcSkinRestBone* rb = &s_heroRest[b];
+        const PcSkinRestBone* rb = &ch->def->rest[b];
         float restR[9], swing[9], gd[3], md[3], gEnd[3], mEnd[3], lg, lm;
         int i;
 
@@ -1133,10 +1172,10 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             continue;
         }
         if (b == 5 || b == 9)
-            anchor[b][0] -= anchor[b - 1][0] - s_heroRest[b - 1].T[0];
+            anchor[b][0] -= anchor[b - 1][0] - ch->def->rest[b - 1].T[0];
         if (s_childA[b] >= 0)
         {
-            const PcSkinRestBone* ca = &s_heroRest[(int)s_childA[b]];
+            const PcSkinRestBone* ca = &ch->def->rest[(int)s_childA[b]];
             for (i = 0; i < 3; i++)
             {
                 gEnd[i] = ca->T[i];
@@ -1145,7 +1184,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             if (s_childB[b] >= 0)
                 for (i = 0; i < 3; i++)
                 {
-                    gEnd[i] = 0.5f * (gEnd[i] + s_heroRest[(int)s_childB[b]].T[i]);
+                    gEnd[i] = 0.5f * (gEnd[i] + ch->def->rest[(int)s_childB[b]].T[i]);
                     mEnd[i] = 0.5f * (mEnd[i] + anchor[(int)s_childB[b]][i]);
                 }
         }
@@ -1183,9 +1222,9 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
          * other foot. */
         else if ((b == 14 || b == 17) && Skin_ToeDir(ch, gpos, b, anchor[b], md))
         {
-            gd[0] = s_heroToe[b == 17][0];
+            gd[0] = ch->def->toe[b == 17][0];
             gd[1] = 0.0f;
-            gd[2] = s_heroToe[b == 17][1];
+            gd[2] = ch->def->toe[b == 17][1];
             M3_Align(gd, md, swing);
             M3_Mul(swing, restR, R[b]);
         }
@@ -1212,15 +1251,15 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     {
         if (!s_pinned[b])
         {
-            anchor[b][0] = s_heroRest[b].T[0];
-            anchor[b][1] = s_heroRest[b].T[1];
-            anchor[b][2] = s_heroRest[b].T[2];
+            anchor[b][0] = ch->def->rest[b].T[0];
+            anchor[b][1] = ch->def->rest[b].T[1];
+            anchor[b][2] = ch->def->rest[b].T[2];
         }
         /* Hips and knees keep the model's own spacing: pulling a knee onto the
          * game's (narrower) knee while the foot stayed put bowed the shins
          * outward. A leg swings about X, so the X offset costs nothing. */
         else if (b == 4 || b == 8 || b == 12 || b == 13 || b == 15 || b == 16)
-            anchor[b][0] = s_heroRest[b].T[0];
+            anchor[b][0] = ch->def->rest[b].T[0];
     }
 
     /* Bone-local positions per influence, lighting normal per vertex. */
@@ -1415,6 +1454,7 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
     const s_LmHeader* lm = NULL;
     char name[16], base[96], path[112];
     PcSkinChara* ch = NULL;
+    const PcSkinRestDef* def = NULL;
     int i;
 
     if (!g_PcConfig.allowLooseFiles || skel == NULL || skel->bones_4 == NULL)
@@ -1434,8 +1474,10 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
     }
     if (lm == NULL || !Skin_ModelPath(lm, name, sizeof(name), base, sizeof(base)))
         return NULL;
-    /* Only HERO's rest pose is tabled so far. */
-    if (strcmp(name, "HERO") != 0)
+    for (i = 0; i < (int)(sizeof(s_restDefs) / sizeof(s_restDefs[0])); i++)
+        if (strcmp(name, s_restDefs[i].name) == 0)
+            def = &s_restDefs[i];
+    if (def == NULL)
         return NULL;
 
     for (i = 0; i < s_charaCount; i++)
@@ -1448,6 +1490,7 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
         ch = &s_chara[s_charaCount++];
         memset(ch, 0, sizeof(*ch));
         snprintf(ch->name, sizeof(ch->name), "%s", name);
+        ch->def = def;
     }
     if (ch->state == 0)
     {
@@ -1470,6 +1513,14 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
     memset(ch->lit, 0, sizeof(ch->lit));
     ch->isPlayer = (lm == g_WorldGfxWork.harryModel.lmHdr);
     return ch;
+}
+
+int Pc_SkinChara_KeepsStockPart(const char partName[8])
+{
+    char n[9];
+    memcpy(n, partName, 8);
+    n[8] = '\0';
+    return strstr(n, "GUN") != NULL;
 }
 
 void Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* viewMat)
@@ -1964,6 +2015,22 @@ static float Skin_BlinkWeight(PcSkinChara* ch)
     return 0.0f;
 }
 
+/* The mouth follows the voice line's loudness when the line's pitch matches
+ * this character's voice. Opening is quick and closing slower, so syllables
+ * read as movement rather than a flicker. */
+static float Skin_MouthWeight(PcSkinChara* ch)
+{
+    float dt = g_DeltaTime / 4096.0f, target = 0.0f, rate;
+    int female;
+    float level = Pc_Lip_Level(&female);
+
+    if (level > 0.0f && female == ch->def->femaleVoice && !(s_rd.active && ch->isPlayer))
+        target = level;
+    rate = target > ch->mouth ? 30.0f : 14.0f;
+    ch->mouth += (target - ch->mouth) * (dt * rate > 1.0f ? 1.0f : dt * rate);
+    return ch->mouth;
+}
+
 /* Fingers close round whatever the game puts in that hand (the phone goes in
  * the left, everything else in the right) and open again when it is put away
  * or the ragdoll takes over. */
@@ -1995,7 +2062,7 @@ static void Skin_ApplyMorphs(PcSkinChara* ch, float h, float ofx, float ofy, flo
     int k, i;
 
     w[PC_SKIN_MORPH_BLINK] = ch->morph[PC_SKIN_MORPH_BLINK].count ? Skin_BlinkWeight(ch) : 0.0f;
-    w[PC_SKIN_MORPH_MOUTH] = 0.0f; /* lip sync not driven yet */
+    w[PC_SKIN_MORPH_MOUTH] = ch->morph[PC_SKIN_MORPH_MOUTH].count ? Skin_MouthWeight(ch) : 0.0f;
     Skin_GripWeights(ch, &w[PC_SKIN_MORPH_GRIP_L]);
     for (k = 0; k < PC_SKIN_MORPH_COUNT; k++)
     {

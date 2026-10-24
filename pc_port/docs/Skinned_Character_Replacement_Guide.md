@@ -13,7 +13,15 @@ There is no cutting into parts, no fitting in Blender and no converter step.
 This replaces the older rigid-part workflow in [Model_Modding_Guide.md](Model_Modding_Guide.md)
 for whole-character swaps. Use that guide only when you want to edit the original PSX model.
 
-**Supported characters:** Harry (`HERO`) for now.
+**Supported characters:**
+
+| Character | File |
+| --- | --- |
+| Harry | `gamedata/load/CHARA/HERO.glb` |
+| Cybil | `gamedata/load/CHARA/SIBYL.glb` |
+
+The steps below use Harry's `HERO`. For Cybil, use `SIBYL` in every file name. The game
+spells her model file that way. The same file is used in her ending scene.
 
 ## Quick start
 
@@ -176,8 +184,27 @@ a left and right pair such as `eyeBlink_L`/`eyeBlink_R` also work. The game blin
 every 2 to 6 seconds, and the eyes stay shut when the ragdoll takes over. Export with
 **Shape Keys** on.
 
-Mouth keys (`jawOpen`, `mouthOpen`, `viseme_aa`) are recognised and loaded, but lip sync
-does not drive them yet.
+## Lip sync
+
+Add a shape key that opens the jaw and name it `jawOpen` (`mouthOpen` and `viseme_aa`
+also work). While a voice line plays, the mouth opens with the loudness of the line.
+
+The game does not record who speaks a line, so the pitch of the voice decides:
+
+- A male line moves Harry's mouth, whatever model replaces him, because the lines are
+  Harry's.
+- A female line moves Cybil's.
+
+Short shouted lines from Harry can read as female, and his mouth stays shut for those.
+
+A rig with a jaw bone needs no sculpting. Turn the jaw open about 10 degrees in pose
+mode and save the result as the shape key.
+
+## Cybil's pistol
+
+Cybil's original model has her pistol built into her hand parts. The game keeps drawing
+those original parts beside a replacement, so she still holds her gun, along with the
+original low-poly hand around it.
 
 ## Ragdoll on death
 
@@ -250,14 +277,14 @@ The game reads `HERO.ini` when it loads the model, so restart after changing it.
 
 ## Limitations
 
-- Harry only for now. Other characters need their skeleton tables added.
+- Harry and Cybil only for now. Other characters need their skeleton tables added.
 - The hand holding an item closes into a fist, with every finger bent the same way.
   This needs a finger chain of three joints under each hand: the index finger when it is
   named (`LeftHandIndex1` to `3`), otherwise a middle finger. It bends past that knuckle
   in the direction the finger already curls, so a dead straight finger gets no grip.
   The game does not pose individual fingers.
-- Shape keys drive blinking. A rig that blinks with eyelid bones instead does not
-  blink in game.
+- Shape keys drive blinking and the mouth. A rig that blinks with eyelid bones instead
+  does not blink in game.
 - The replacement does not cast flashlight shadows yet.
 - The ragdoll collides with the floor, not walls.
 

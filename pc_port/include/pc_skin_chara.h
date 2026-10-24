@@ -33,6 +33,9 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel);
  * have used. Also runs that bone's lighting. */
 void  Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* viewMat);
 void  Pc_SkinChara_End(void* chara, void* ot, int shift, int hideHead);
+/* Nonzero for a stock part still drawn beside the replacement: a prop the
+ * ILM welds into a body part (Cybil's pistol is her 06LGUN/10RGUN hands). */
+int   Pc_SkinChara_KeepsStockPart(const char partName[8]);
 
 int   Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding);
 

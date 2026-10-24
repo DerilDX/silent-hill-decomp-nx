@@ -447,6 +447,14 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
                 if (skinChara != NULL)
                 {
                     Pc_SkinChara_Bone(skinChara, _hb, &worldMat, &viewMat);
+                    if (Pc_SkinChara_KeepsStockPart(curBone->bone.modelInfo.modelHdr->name.str))
+                    {
+                        extern int g_PsxActorDepth;
+
+                        g_PsxActorDepth = 1;
+                        func_80057090(&curBone->bone.modelInfo, ot, arg2, &viewMat, &worldMat, arg5);
+                        g_PsxActorDepth = 0;
+                    }
                 }
                 else if (!(g_PcHideHarryFpsBody && (_hb == 2 || _hb >= 18)))
                 {
