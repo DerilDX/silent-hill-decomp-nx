@@ -31,6 +31,9 @@
 #include "pc_big_lm.h"
 #include "pc_chara_pool.h"
 #include "pc_config.h"
+#ifdef __SWITCH__
+extern s_MapOverlayHdr g_MapOverlayHeader_chara_global;
+#endif
 #include "hires_override.h"
 #include "dll_loader.h"
 #include "sh_log.h"
@@ -387,9 +390,13 @@ void Pc_CharaGlobal_Open(void)
     /* Own handle, never closed: MapOverlay_Load's single-slot handle would
      * FreeLibrary it on the next transition, killing live fn ptrs. */
 #if defined(__SWITCH__)
-    /* No dynamic loading on Switch — the global chara pool overlay is a
-     * desktop DLL feature; native per-map AI variants are always used. */
-    dll = NULL;
+    /* No dynamic loading on Switch — the global chara pool overlay is
+     * statically linked into the ELF, so use its header directly. */
+    if (g_PcConfig.globalCharaPool)
+    {
+        s_globalHdr = &g_MapOverlayHeader_chara_global;
+    }
+    return;
 #elif defined(_WIN32)
     dll = DllLoader_Open("maps/chara_global.dll");
 #elif defined(__APPLE__)

@@ -17,6 +17,52 @@ e_MapIdx g_CurrentMapIdx = MapIdx_MAP0_S00;
 
 /* The fully-compiled map0_s00 header (renamed via -DSH_MAP_NAME=map0_s00). */
 extern s_MapOverlayHdr g_MapOverlayHeader_map0_s00;
+#ifdef __SWITCH__
+/* On Switch every map overlay is statically linked into the ELF. */
+extern s_MapOverlayHdr g_MapOverlayHeader_map0_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map0_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map0_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s04;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s05;
+extern s_MapOverlayHdr g_MapOverlayHeader_map1_s06;
+extern s_MapOverlayHdr g_MapOverlayHeader_map2_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map2_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map2_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map2_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map2_s04;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s04;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s05;
+extern s_MapOverlayHdr g_MapOverlayHeader_map3_s06;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s04;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s05;
+extern s_MapOverlayHdr g_MapOverlayHeader_map4_s06;
+extern s_MapOverlayHdr g_MapOverlayHeader_map5_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map5_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map5_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map5_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s03;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s04;
+extern s_MapOverlayHdr g_MapOverlayHeader_map6_s05;
+extern s_MapOverlayHdr g_MapOverlayHeader_map7_s00;
+extern s_MapOverlayHdr g_MapOverlayHeader_map7_s01;
+extern s_MapOverlayHdr g_MapOverlayHeader_map7_s02;
+extern s_MapOverlayHdr g_MapOverlayHeader_map7_s03;
+#endif
 
 /* ========================================================================
  * Stub headers for maps that aren't fully compiled.
@@ -215,7 +261,54 @@ void MapRegistry_Load(e_MapIdx id)
 
     /* Try loading the map overlay DLL first. */
 #ifdef __SWITCH__
-    header = NULL;  /* No dynamic DLL loading on Switch — always use statically linked overlays */
+    /* All overlays are statically linked into the ELF; resolve by id. */
+    switch (id)
+    {
+case MapIdx_MAP0_S00: header = &g_MapOverlayHeader_map0_s00; break;
+        case MapIdx_MAP0_S01: header = &g_MapOverlayHeader_map0_s01; break;
+        case MapIdx_MAP0_S02: header = &g_MapOverlayHeader_map0_s02; break;
+        case MapIdx_MAP1_S00: header = &g_MapOverlayHeader_map1_s00; break;
+        case MapIdx_MAP1_S01: header = &g_MapOverlayHeader_map1_s01; break;
+        case MapIdx_MAP1_S02: header = &g_MapOverlayHeader_map1_s02; break;
+        case MapIdx_MAP1_S03: header = &g_MapOverlayHeader_map1_s03; break;
+        case MapIdx_MAP1_S04: header = &g_MapOverlayHeader_map1_s04; break;
+        case MapIdx_MAP1_S05: header = &g_MapOverlayHeader_map1_s05; break;
+        case MapIdx_MAP1_S06: header = &g_MapOverlayHeader_map1_s06; break;
+        case MapIdx_MAP2_S00: header = &g_MapOverlayHeader_map2_s00; break;
+        case MapIdx_MAP2_S01: header = &g_MapOverlayHeader_map2_s01; break;
+        case MapIdx_MAP2_S02: header = &g_MapOverlayHeader_map2_s02; break;
+        case MapIdx_MAP2_S03: header = &g_MapOverlayHeader_map2_s03; break;
+        case MapIdx_MAP2_S04: header = &g_MapOverlayHeader_map2_s04; break;
+        case MapIdx_MAP3_S00: header = &g_MapOverlayHeader_map3_s00; break;
+        case MapIdx_MAP3_S01: header = &g_MapOverlayHeader_map3_s01; break;
+        case MapIdx_MAP3_S02: header = &g_MapOverlayHeader_map3_s02; break;
+        case MapIdx_MAP3_S03: header = &g_MapOverlayHeader_map3_s03; break;
+        case MapIdx_MAP3_S04: header = &g_MapOverlayHeader_map3_s04; break;
+        case MapIdx_MAP3_S05: header = &g_MapOverlayHeader_map3_s05; break;
+        case MapIdx_MAP3_S06: header = &g_MapOverlayHeader_map3_s06; break;
+        case MapIdx_MAP4_S00: header = &g_MapOverlayHeader_map4_s00; break;
+        case MapIdx_MAP4_S01: header = &g_MapOverlayHeader_map4_s01; break;
+        case MapIdx_MAP4_S02: header = &g_MapOverlayHeader_map4_s02; break;
+        case MapIdx_MAP4_S03: header = &g_MapOverlayHeader_map4_s03; break;
+        case MapIdx_MAP4_S04: header = &g_MapOverlayHeader_map4_s04; break;
+        case MapIdx_MAP4_S05: header = &g_MapOverlayHeader_map4_s05; break;
+        case MapIdx_MAP4_S06: header = &g_MapOverlayHeader_map4_s06; break;
+        case MapIdx_MAP5_S00: header = &g_MapOverlayHeader_map5_s00; break;
+        case MapIdx_MAP5_S01: header = &g_MapOverlayHeader_map5_s01; break;
+        case MapIdx_MAP5_S02: header = &g_MapOverlayHeader_map5_s02; break;
+        case MapIdx_MAP5_S03: header = &g_MapOverlayHeader_map5_s03; break;
+        case MapIdx_MAP6_S00: header = &g_MapOverlayHeader_map6_s00; break;
+        case MapIdx_MAP6_S01: header = &g_MapOverlayHeader_map6_s01; break;
+        case MapIdx_MAP6_S02: header = &g_MapOverlayHeader_map6_s02; break;
+        case MapIdx_MAP6_S03: header = &g_MapOverlayHeader_map6_s03; break;
+        case MapIdx_MAP6_S04: header = &g_MapOverlayHeader_map6_s04; break;
+        case MapIdx_MAP6_S05: header = &g_MapOverlayHeader_map6_s05; break;
+        case MapIdx_MAP7_S00: header = &g_MapOverlayHeader_map7_s00; break;
+        case MapIdx_MAP7_S01: header = &g_MapOverlayHeader_map7_s01; break;
+        case MapIdx_MAP7_S02: header = &g_MapOverlayHeader_map7_s02; break;
+        case MapIdx_MAP7_S03: header = &g_MapOverlayHeader_map7_s03; break;
+        default: header = NULL; break;
+    }
 #else
     header = MapOverlay_Load(id);
 #endif

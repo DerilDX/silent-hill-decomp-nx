@@ -240,7 +240,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
     packet = NULL;
     result = false;
 
-if (str && str[0] >= 0x20) switch_dbg("[DBG] Gfx_StringDraw: \"%s\" len=%d", str, strLength);
+
 
     // Set base screen position.
     posX = g_StringPosition.vx;

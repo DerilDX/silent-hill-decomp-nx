@@ -683,8 +683,138 @@ endif()
 # =============================================================================
 # Map Overlay DLLs (optional — builds all maps as loadable modules)
 # =============================================================================
-# Map DLLs not supported on Switch yet
-if(NOT SH_SWITCH)
+# Map overlays: PC builds them as DLLs (dlopen at runtime); Switch has no
+# dynamic loader, so compile every map into the ELF. Each map is partially
+# linked into a single relocatable object and all symbols except its
+# g_MapOverlayHeader_<name> are localized, which keeps the per-map global
+# names (MAP_EVENTS, MAP_POINTS, ...) from colliding across maps.
+if(SH_SWITCH)
+    set(SH_OBJCOPY "${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-objcopy")
+
+    file(GLOB SH_MAP_DIRS "${DECOMP_DIR}/src/maps/map*")
+    set(SH_MAP_RELOC_OBJS "")
+    foreach(SH_MAP_DIR IN LISTS SH_MAP_DIRS)
+        get_filename_component(SH_MAP_NAME "${SH_MAP_DIR}" NAME)
+        if(SH_MAP_NAME STREQUAL "map0_s00")
+            continue()
+        endif()
+        string(TOUPPER "${SH_MAP_NAME}" SH_MAP_DEFINE)
+
+        file(GLOB SH_MAP_SRCS "${SH_MAP_DIR}/*.c")
+        set(SH_MAP_EXTRACTED "${CMAKE_SOURCE_DIR}/build_gen/extracted_data/${SH_MAP_NAME}_extracted_data.c")
+        if(EXISTS "${SH_MAP_EXTRACTED}")
+            list(APPEND SH_MAP_SRCS "${SH_MAP_EXTRACTED}")
+        endif()
+
+        set(SH_MAP_TARGET "${SH_MAP_NAME}_obj")
+        add_library(${SH_MAP_TARGET} OBJECT ${SH_MAP_SRCS})
+        target_compile_definitions(${SH_MAP_TARGET} PRIVATE
+            VER_USA
+            SH_PC_PORT
+            SKIP_ASM
+            SH_MAP_DLL
+            ${SH_MAP_DEFINE}
+            SH_MAP_NAME=${SH_MAP_NAME}
+            "static_assert=_Static_assert"
+        )
+        target_include_directories(${SH_MAP_TARGET} PRIVATE
+            "${CMAKE_SOURCE_DIR}/include"
+            "${CMAKE_SOURCE_DIR}/include/psyq_compat"
+            "${CMAKE_SOURCE_DIR}/src"
+            "${DECOMP_DIR}/include"
+            "${DECOMP_DIR}/include/decomp"
+            "${PSYCROSS_DIR}/include/psx"
+            "${PSYCROSS_DIR}/include"
+        )
+        target_compile_options(${SH_MAP_TARGET} PRIVATE
+            -include "${CMAKE_SOURCE_DIR}/include/map_dll_fixups.h"
+            -Wno-implicit-function-declaration
+            -Wno-implicit-int
+            -Wno-int-conversion
+            -Wno-incompatible-pointer-types
+            -Wno-discarded-qualifiers
+            -Wno-builtin-declaration-mismatch
+            -Wno-int-to-pointer-cast
+            -Wno-pointer-to-int-cast
+            -Wno-sign-compare
+            -Wno-missing-braces
+            -Wno-unused-variable
+            -Wno-unused-function
+        )
+        if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+            target_compile_options(${SH_MAP_TARGET} PRIVATE
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-int>
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=int-conversion>
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=declaration-missing-parameter-type>
+                $<$<COMPILE_LANGUAGE:C>:-Wno-error=return-mismatch>
+            )
+        endif()
+
+        set(SH_MAP_RELOC "${CMAKE_BINARY_DIR}/maps/${SH_MAP_NAME}.o")
+        add_custom_command(OUTPUT "${SH_MAP_RELOC}"
+            COMMAND "${CMAKE_C_COMPILER}" -r $<TARGET_OBJECTS:${SH_MAP_TARGET}> -o "${SH_MAP_RELOC}"
+            COMMAND "${SH_OBJCOPY}" -G "g_MapOverlayHeader_${SH_MAP_NAME}" "${SH_MAP_RELOC}"
+            DEPENDS ${SH_MAP_TARGET}
+            VERBATIM
+            COMMAND_EXPAND_LISTS
+        )
+        list(APPEND SH_MAP_RELOC_OBJS "${SH_MAP_RELOC}")
+    endforeach()
+
+    # chara_global pseudo-map (portable monster AI)
+    set(SH_CHARA_GLOBAL_DIR "${DECOMP_DIR}/src/maps/chara_global")
+    if(EXISTS "${SH_CHARA_GLOBAL_DIR}")
+        file(GLOB SH_CG_SRCS "${SH_CHARA_GLOBAL_DIR}/*.c")
+        add_library(chara_global_obj OBJECT ${SH_CG_SRCS})
+        target_compile_definitions(chara_global_obj PRIVATE
+            VER_USA
+            SH_PC_PORT
+            SKIP_ASM
+            CHARA_GLOBAL
+            SH_MAP_NAME=chara_global
+            "static_assert=_Static_assert"
+        )
+        target_include_directories(chara_global_obj PRIVATE
+            "${CMAKE_SOURCE_DIR}/include"
+            "${CMAKE_SOURCE_DIR}/include/psyq_compat"
+            "${CMAKE_SOURCE_DIR}/src"
+            "${DECOMP_DIR}/include"
+            "${DECOMP_DIR}/include/decomp"
+            "${PSYCROSS_DIR}/include/psx"
+            "${PSYCROSS_DIR}/include"
+        )
+        target_compile_options(chara_global_obj PRIVATE
+            -include "${CMAKE_SOURCE_DIR}/include/map_dll_fixups.h"
+            -Wno-implicit-function-declaration
+            -Wno-implicit-int
+            -Wno-int-conversion
+            -Wno-incompatible-pointer-types
+            -Wno-discarded-qualifiers
+            -Wno-builtin-declaration-mismatch
+            -Wno-int-to-pointer-cast
+            -Wno-pointer-to-int-cast
+            -Wno-sign-compare
+            -Wno-missing-braces
+            -Wno-unused-variable
+            -Wno-unused-function
+        )
+        set(SH_CG_RELOC "${CMAKE_BINARY_DIR}/maps/chara_global.o")
+        add_custom_command(OUTPUT "${SH_CG_RELOC}"
+            COMMAND "${CMAKE_C_COMPILER}" -r $<TARGET_OBJECTS:chara_global_obj> -o "${SH_CG_RELOC}"
+            COMMAND "${SH_OBJCOPY}" -G "g_MapOverlayHeader_chara_global" "${SH_CG_RELOC}"
+            DEPENDS chara_global_obj
+            VERBATIM
+            COMMAND_EXPAND_LISTS
+        )
+        list(APPEND SH_MAP_RELOC_OBJS "${SH_CG_RELOC}")
+    endif()
+
+    add_custom_target(switch_maps ALL DEPENDS ${SH_MAP_RELOC_OBJS})
+    add_dependencies(${EXECUTABLE_NAME} switch_maps)
+    target_sources(${EXECUTABLE_NAME} PRIVATE ${SH_MAP_RELOC_OBJS})
+else()
     option(SH_BUILD_MAP_DLLS "Build map overlays as DLLs for dynamic loading" OFF)
     if(SH_BUILD_MAP_DLLS)
         add_subdirectory(maps)
