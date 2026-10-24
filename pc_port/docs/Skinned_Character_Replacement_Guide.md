@@ -72,7 +72,7 @@ The list is read when the game starts.
 | Size | Any. The model is scaled so its **shoulders** sit at Harry's shoulder height, feet on the floor. |
 | Weights | Up to 4 bones per vertex, as glTF allows. |
 | Textures | **PNG**, base colour only. JPEG is not decoded. Embed them in the `.glb`. |
-| Polygons | Up to about 87,000 triangles per material. |
+| Polygons | Up to about 260,000 vertices per material. Every vertex is skinned each frame, so a model of 20,000 to 50,000 triangles keeps the frame rate comfortable. |
 
 ### Bones the game uses
 

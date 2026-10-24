@@ -178,15 +178,22 @@ typedef struct
     float uv[3][2];
 } PcSkinTri;
 
+/* Drawn indexed: one output vertex per (skin vertex, UV) pair, so a dense mesh
+ * skins, lights and uploads each vertex once instead of once per corner. */
 typedef struct
 {
     PcSkinTri*      tris;
     int             triCount;
+    u32*            corner;   /* triangle corner -> output vertex */
+    u32*            src;      /* output vertex -> skin vertex */
+    float         (*uv)[2];
+    int             srcCount;
     unsigned char*  rgba;
     int             w, h;
     u32             texture;
     GrModernVertex* out[PC_SKIN_INST][2];
-    int             outCount[PC_SKIN_INST][2];
+    u32*            idx[PC_SKIN_INST][2];
+    int             idxCount[PC_SKIN_INST][2];
 } PcSkinMat;
 
 /* A shape key the game drives, kept sparse: only the vertices it moves. */
@@ -875,6 +882,49 @@ static void Skin_BuildGrip(PcSkinChara* ch, const float* gpos, float jointPos[][
     }
 }
 
+/* Per-triangle UV wrapping (Skin_Load) can give one skin vertex two UVs in the
+ * same material, so output vertices are keyed by the pair, not the vertex. */
+static int Skin_BuildCorners(PcSkinMat* mat, int vertCount)
+{
+    int* first = (int*)malloc(sizeof(int) * (size_t)vertCount);
+    int* next = (int*)malloc(sizeof(int) * (size_t)mat->triCount * 3);
+    int t, c, k;
+
+    mat->corner = (u32*)malloc(sizeof(u32) * (size_t)mat->triCount * 3);
+    mat->src = (u32*)malloc(sizeof(u32) * (size_t)mat->triCount * 3);
+    mat->uv = (float(*)[2])malloc(sizeof(float[2]) * (size_t)mat->triCount * 3);
+    if (first == NULL || next == NULL || mat->corner == NULL || mat->src == NULL || mat->uv == NULL)
+    {
+        free(first);
+        free(next);
+        return 0;
+    }
+    memset(first, 0xFF, sizeof(int) * (size_t)vertCount);
+    mat->srcCount = 0;
+    for (t = 0; t < mat->triCount; t++)
+        for (c = 0; c < 3; c++)
+        {
+            const PcSkinTri* tri = &mat->tris[t];
+            u32 v = tri->v[c];
+            for (k = first[v]; k >= 0; k = next[k])
+                if (mat->uv[k][0] == tri->uv[c][0] && mat->uv[k][1] == tri->uv[c][1])
+                    break;
+            if (k < 0)
+            {
+                k = mat->srcCount++;
+                mat->src[k] = v;
+                mat->uv[k][0] = tri->uv[c][0];
+                mat->uv[k][1] = tri->uv[c][1];
+                next[k] = first[v];
+                first[v] = k;
+            }
+            mat->corner[t * 3 + c] = (u32)k;
+        }
+    free(first);
+    free(next);
+    return 1;
+}
+
 static int Skin_Load(PcSkinChara* ch, const char* path)
 {
     cgltf_options opt;
@@ -1138,7 +1188,11 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         ch->vertCount = vbase;
     }
     for (b = 0; b < ch->matCount; b++)
+    {
         ch->mats[b].out[0][1] = NULL;
+        if (!Skin_BuildCorners(&ch->mats[b], ch->vertCount))
+            goto fail;
+    }
 
     Skin_FindGrip(skin, jointPos, handJoint, indexJoint);
     Skin_BuildGrip(ch, gpos, jointPos, handJoint, indexJoint, scale, offX, offY, offZ);
@@ -1506,12 +1560,34 @@ static int Skin_PickInstance(PcSkinChara* ch, const void* boneCoords)
     ch->instUse[slot] = ch->instClock;
     for (m = 0; m < ch->matCount; m++)
         for (b = 0; b < 2; b++)
-            if (ch->mats[m].out[slot][b] == NULL)
+        {
+            PcSkinMat* mat = &ch->mats[m];
+            int k;
+            if (mat->out[slot][b] != NULL)
+                continue;
+            mat->out[slot][b] = (GrModernVertex*)calloc((size_t)mat->srcCount, sizeof(GrModernVertex));
+            mat->idx[slot][b] = (u32*)malloc(sizeof(u32) * (size_t)mat->triCount * 3);
+            if (mat->out[slot][b] == NULL || mat->idx[slot][b] == NULL)
             {
-                ch->mats[m].out[slot][b] = (GrModernVertex*)calloc((size_t)ch->mats[m].triCount * 3, sizeof(GrModernVertex));
-                if (ch->mats[m].out[slot][b] == NULL)
-                    return 0;
+                free(mat->out[slot][b]);
+                free(mat->idx[slot][b]);
+                mat->out[slot][b] = NULL;
+                mat->idx[slot][b] = NULL;
+                return 0;
             }
+            for (k = 0; k < mat->srcCount; k++)
+            {
+                GrModernVertex* o = &mat->out[slot][b][k];
+                float u = mat->uv[k][0], vv = mat->uv[k][1];
+                if (u < 0.0f) u = 0.0f;
+                if (u > 1.0f) u = 1.0f;
+                if (vv < 0.0f) vv = 0.0f;
+                if (vv > 1.0f) vv = 1.0f;
+                o->u = u * 256.0f;
+                o->v = vv * 256.0f;
+                o->a = 255;
+            }
+        }
     ch->inst = slot;
     return 1;
 }
@@ -1671,20 +1747,41 @@ void Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* viewM
             gte_lddqb_0();
             break;
     }
-    for (i = 0; i < ch->byBoneCount[boneIdx]; i++)
+    if (g_WorldEnvWork.field_0 == 0)
     {
-        u32 v = ch->byBone[boneIdx][i];
-        if (g_WorldEnvWork.field_0 == 0)
+        for (i = 0; i < ch->byBoneCount[boneIdx]; i++)
+            ch->color[ch->byBone[boneIdx][i]] = sd->field_3D8;
+    }
+    else
+    {
+        /* gte_ncs (sf=1, lm=1) on the registers the prelude above loaded, done
+         * natively: one emulated op per vertex cost milliseconds on a dense mesh. */
+        const s32 L[9] = { C2_L11, C2_L12, C2_L13, C2_L21, C2_L22, C2_L23, C2_L31, C2_L32, C2_L33 };
+        const s32 LC[9] = { C2_LR1, C2_LR2, C2_LR3, C2_LG1, C2_LG2, C2_LG3, C2_LB1, C2_LB2, C2_LB3 };
+        const s64 bk[3] = { (s64)C2_RBK << 12, (s64)C2_GBK << 12, (s64)C2_BBK << 12 };
+
+        for (i = 0; i < ch->byBoneCount[boneIdx]; i++)
         {
-            ch->color[v] = sd->field_3D8;
-        }
-        else
-        {
-            CVECTOR in = { 0, 0, 0, 0 };
-            gte_ldrgb(&in);
-            gte_ldv0(&ch->verts[v].gteNormal);
-            gte_ncs();
-            gte_strgb(&ch->color[v]);
+            u32 v = ch->byBone[boneIdx][i];
+            const SVECTOR* n = &ch->verts[v].gteNormal;
+            s32 ir[3], rgb[3];
+            int k;
+
+            for (k = 0; k < 3; k++)
+            {
+                s32 mac = (s32)(((s64)L[k * 3] * n->vx + (s64)L[k * 3 + 1] * n->vy + (s64)L[k * 3 + 2] * n->vz) >> 12);
+                ir[k] = mac < 0 ? 0 : (mac > 0x7FFF ? 0x7FFF : mac);
+            }
+            for (k = 0; k < 3; k++)
+            {
+                s32 mac = (s32)((bk[k] + (s64)LC[k * 3] * ir[0] + (s64)LC[k * 3 + 1] * ir[1] + (s64)LC[k * 3 + 2] * ir[2]) >> 12);
+                mac >>= 4;
+                rgb[k] = mac < 0 ? 0 : (mac > 255 ? 255 : mac);
+            }
+            ch->color[v].r = (u8)rgb[0];
+            ch->color[v].g = (u8)rgb[1];
+            ch->color[v].b = (u8)rgb[2];
+            ch->color[v].cd = 0;
         }
     }
     ch->lit[boneIdx] = 1;
@@ -2216,7 +2313,7 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
 {
     PcSkinChara* ch = (PcSkinChara*)chara;
     GsOT* ot = (GsOT*)otp;
-    float offX = 0.0f, offY = 0.0f, szMax;
+    float offX = 0.0f, offY = 0.0f, beam;
     float h = (float)C2_H, ofx = (float)C2_OFX / 65536.0f, ofy = (float)C2_OFY / 65536.0f;
     float minZ = 1e30f, maxZ = 0.0f;
     int buf = g_ActiveBufferIdx & 1;
@@ -2225,6 +2322,7 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
     if (ch == NULL || ot == NULL)
         return;
     Skin_Ragdoll(ch);
+    beam = 1.0f - ch->beamPct / 100.0f;
     PsyX_GetDrawEnvOffset(&offX, &offY);
     for (v = 0; v < ch->vertCount; v++)
     {
@@ -2263,9 +2361,6 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
     if (maxZ <= 0.0f)
         return;
     PsyX_NoteItemDepthSz((unsigned)maxZ);
-    szMax = PGXP_GetSzMax();
-    if (szMax < 1.0f)
-        szMax = 1.0f;
 
     bucket = PC_SKIN_OT_BASE + ((((int)minZ) >> shift) >> 2);
     if (bucket < 1)
@@ -2277,57 +2372,49 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
     {
         PcSkinMat* mat = &ch->mats[m];
         GrModernVertex* out = mat->out[ch->inst][buf];
-        int t, n = 0;
+        u32* idx = mat->idx[ch->inst][buf];
+        int t, k, n = 0;
 
-        mat->outCount[ch->inst][buf] = 0;
-        if (out == NULL)
+        mat->idxCount[ch->inst][buf] = 0;
+        if (out == NULL || idx == NULL)
             continue;
         for (t = 0; t < mat->triCount; t++)
         {
             const PcSkinTri* tri = &mat->tris[t];
-            int c;
             if (!ch->ok[tri->v[0]] || !ch->ok[tri->v[1]] || !ch->ok[tri->v[2]])
                 continue;
             if (hideHead && ch->verts[tri->v[0]].dom == 2 && ch->verts[tri->v[1]].dom == 2 &&
                 ch->verts[tri->v[2]].dom == 2)
                 continue;
-            for (c = 0; c < 3; c++)
-            {
-                u32 vi = tri->v[c];
-                GrModernVertex* o = &out[n++];
-                float z = ch->pos[vi * 3 + 2];
-                float nz = 1.0f - 2.0f * z / szMax;
-                float u = tri->uv[c][0], vv = tri->uv[c][1];
-
-                if (nz < -1.0f) nz = -1.0f;
-                if (nz > 1.0f) nz = 1.0f;
-                if (u < 0.0f) u = 0.0f;
-                if (u > 1.0f) u = 1.0f;
-                if (vv < 0.0f) vv = 0.0f;
-                if (vv > 1.0f) vv = 1.0f;
-                memset(o, 0, sizeof(*o));
-                o->x = ch->scr[vi * 2];
-                o->y = ch->scr[vi * 2 + 1];
-                o->z = nz;
-                o->u = u * 256.0f;
-                o->v = vv * 256.0f;
-                o->r = Skin_Scale8(ch->color[vi].r, ch->brightness, 255);
-                o->g = Skin_Scale8(ch->color[vi].g, ch->brightness, 255);
-                o->b = Skin_Scale8(ch->color[vi].b, ch->brightness, 255);
-                o->a = 255;
-                o->fog = (char)Skin_Scale8(Skin_Fog((s32)z), ch->fogPct, 127);
-                o->nz = 1.0f - ch->beamPct / 100.0f;
-                o->ppx = o->x;
-                o->ppy = o->y;
-                o->ppw = z;
-                o->vsx = ch->pos[vi * 3];
-                o->vsy = ch->pos[vi * 3 + 1];
-                o->vsz = z;
-            }
+            idx[n++] = mat->corner[t * 3];
+            idx[n++] = mat->corner[t * 3 + 1];
+            idx[n++] = mat->corner[t * 3 + 2];
         }
-        mat->outCount[ch->inst][buf] = n;
+        mat->idxCount[ch->inst][buf] = n;
         if (n < 3)
             continue;
+        for (k = 0; k < mat->srcCount; k++)
+        {
+            u32 vi = mat->src[k];
+            GrModernVertex* o = &out[k];
+            float z = ch->pos[vi * 3 + 2];
+
+            if (!ch->ok[vi])
+                continue;
+            o->x = ch->scr[vi * 2];
+            o->y = ch->scr[vi * 2 + 1];
+            o->r = Skin_Scale8(ch->color[vi].r, ch->brightness, 255);
+            o->g = Skin_Scale8(ch->color[vi].g, ch->brightness, 255);
+            o->b = Skin_Scale8(ch->color[vi].b, ch->brightness, 255);
+            o->fog = (char)Skin_Scale8(Skin_Fog((s32)z), ch->fogPct, 127);
+            o->nz = beam;
+            o->ppx = o->x;
+            o->ppy = o->y;
+            o->ppw = z;
+            o->vsx = ch->pos[vi * 3];
+            o->vsy = ch->pos[vi * 3 + 1];
+            o->vsz = z;
+        }
         {
             DR_PSYX_MODERN_MESH* packet = (DR_PSYX_MODERN_MESH*)GsOUT_PACKET_P;
             setlen(packet, 2);
@@ -2346,6 +2433,9 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
         m = (int)(handle & 0x1F);
     PcSkinChara* ch;
     PcSkinMat* mat;
+    GrModernVertex* out;
+    float szMax;
+    int k;
 
     if (ci >= s_charaCount)
         return 0;
@@ -2353,7 +2443,8 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
     if (ch->state != 1 || m >= ch->matCount)
         return 0;
     mat = &ch->mats[m];
-    if (mat->outCount[inst][buf] < 3 || mat->out[inst][buf] == NULL)
+    out = mat->out[inst][buf];
+    if (mat->idxCount[inst][buf] < 3 || out == NULL)
         return 0;
     if (mat->texture == 0)
     {
@@ -2363,10 +2454,24 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
         if (mat->texture == 0)
             return 0;
     }
-    Pc_ModernVertex_Upload(mat->out[inst][buf], mat->outCount[inst][buf]);
+    /* Depth is normalized here, at draw time, as the stock prims are. With PGXP
+     * off the divisor is the SZ maximum that each GsDrawOt swaps in; read at
+     * sort time it came from the frame's last OT -- the 2D one, near zero --
+     * and clamped every vertex to the far plane, behind the world. */
+    szMax = PGXP_GetSzMax();
+    if (szMax < 1.0f)
+        szMax = 1.0f;
+    for (k = 0; k < mat->srcCount; k++)
+    {
+        float z = 1.0f - 2.0f * out[k].vsz / szMax;
+        out[k].z = z < -1.0f ? -1.0f : (z > 1.0f ? 1.0f : z);
+    }
+    Pc_ModernVertex_Upload(out, mat->srcCount);
+    Pc_ModernVertex_UploadIndices(mat->idx[inst][buf], mat->idxCount[inst][buf]);
     binding->textureId = mat->texture;
     binding->texFormat = TF_32_BIT_RGBA;
-    binding->vertexCount = mat->outCount[inst][buf];
+    binding->vertexCount = mat->srcCount;
+    binding->indexCount = mat->idxCount[inst][buf];
     binding->nativeWidth = binding->nativeHeight = 256;
     return 1;
 }
