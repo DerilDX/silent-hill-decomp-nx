@@ -410,7 +410,7 @@ void func_80045534(s_Skeleton* skel, GsOT* ot, s32 arg2, GsCOORDINATE2* boneCoor
 
     /* A skinned glTF replacement draws the whole character once, from every
      * bone's matrices, instead of the rigid parts. */
-    void* skinChara = Pc_SkinChara_Begin(skel);
+    void* skinChara = Pc_SkinChara_Begin(skel, boneCoords);
     int   skinKeepsStock = 0;
 
     if (skinChara != NULL)

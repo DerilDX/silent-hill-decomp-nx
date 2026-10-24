@@ -28,7 +28,7 @@ extern "C" {
 
 /* Returns the replacement for the character that owns `skel`, or NULL to draw
  * it the stock way. */
-void* Pc_SkinChara_Begin(s_Skeleton* skel);
+void* Pc_SkinChara_Begin(s_Skeleton* skel, const void* boneCoords);
 /* Every visible part of the skeleton, with the matrices the stock drawer would
  * have used. Also runs that bone's lighting. */
 void  Pc_SkinChara_Bone(void* chara, int boneIdx, MATRIX* worldMat, MATRIX* viewMat);

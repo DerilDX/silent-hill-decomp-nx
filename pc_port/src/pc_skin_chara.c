@@ -54,6 +54,10 @@ extern s_WorldEnvWork g_WorldEnvWork;
 #define PC_SKIN_MAX_MATS  32
 #define PC_SKIN_MAX_JOINTS 256
 #define PC_SKIN_INFL      4
+/* Characters of one type share a model and so one PcSkinChara; each one drawn
+ * in a frame needs its own output, or the last drawn overwrote the others' and
+ * whichever the OT order put last showed in all their places. */
+#define PC_SKIN_INST      4
 /* Characters sit at func_800571D0(field_B_1 = 0)'s OT base. */
 #define PC_SKIN_OT_BASE   2
 
@@ -181,8 +185,8 @@ typedef struct
     unsigned char*  rgba;
     int             w, h;
     u32             texture;
-    GrModernVertex* out[2];
-    int             outCount[2];
+    GrModernVertex* out[PC_SKIN_INST][2];
+    int             outCount[PC_SKIN_INST][2];
 } PcSkinMat;
 
 /* A shape key the game drives, kept sparse: only the vertices it moves. */
@@ -201,6 +205,11 @@ typedef struct
     char        name[16];
     const PcSkinRestDef* def;
     int         state; /* 0 untried, 1 ready, -1 none */
+    const void* instKey[PC_SKIN_INST]; /* the instance's bone coords */
+    u32         instUse[PC_SKIN_INST];
+    u32         instClock;
+    int         inst;
+    int         instLogged;
     int         vertCount;
     PcSkinVert* verts;
     int         matCount;
@@ -1023,15 +1032,15 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
                 /* Material slot. */
                 mi = -1;
                 for (a = 0; a < (size_t)ch->matCount; a++)
-                    if ((const void*)ch->mats[a].out[1] == (const void*)p->material)
+                    if ((const void*)ch->mats[a].out[0][1] == (const void*)p->material)
                         mi = (int)a;
                 if (mi < 0)
                 {
                     if (ch->matCount >= PC_SKIN_MAX_MATS)
                         continue;
                     mi = ch->matCount++;
-                    /* out[1] doubles as the material key until frame buffers exist. */
-                    ch->mats[mi].out[1] = (GrModernVertex*)(void*)p->material;
+                    /* out[0][1] doubles as the material key until frame buffers exist. */
+                    ch->mats[mi].out[0][1] = (GrModernVertex*)(void*)p->material;
                     Skin_LoadImage(&ch->mats[mi], p->material, path);
                 }
                 mat = &ch->mats[mi];
@@ -1126,7 +1135,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
         ch->vertCount = vbase;
     }
     for (b = 0; b < ch->matCount; b++)
-        ch->mats[b].out[1] = NULL;
+        ch->mats[b].out[0][1] = NULL;
 
     Skin_FindGrip(skin, jointPos, handJoint, indexJoint);
     Skin_BuildGrip(ch, gpos, jointPos, handJoint, indexJoint, scale, offX, offY, offZ);
@@ -1321,11 +1330,6 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     ch->pos = (float*)calloc((size_t)ch->vertCount * 3, sizeof(float));
     ch->scr = (float*)calloc((size_t)ch->vertCount * 2, sizeof(float));
     ch->ok = (u8*)calloc((size_t)ch->vertCount, 1);
-    for (b = 0; b < ch->matCount; b++)
-    {
-        ch->mats[b].out[0] = (GrModernVertex*)calloc((size_t)ch->mats[b].triCount * 3, sizeof(GrModernVertex));
-        ch->mats[b].out[1] = (GrModernVertex*)calloc((size_t)ch->mats[b].triCount * 3, sizeof(GrModernVertex));
-    }
 
     SH_DBG("[SKIN] %s: %d verts, %d materials, %u joints, scale %.1f", path, ch->vertCount, ch->matCount,
            (unsigned)skin->joints_count, scale);
@@ -1456,7 +1460,50 @@ int Pc_SkinChara_HeroFemale(void)
     return 0;
 }
 
-void* Pc_SkinChara_Begin(s_Skeleton* skel)
+/* The output slot for the instance drawn from these bone coords; a new one
+ * takes a free slot or the one drawn longest ago. Buffers come on first use. */
+static int Skin_PickInstance(PcSkinChara* ch, const void* boneCoords)
+{
+    int i, slot = -1, m, b;
+
+    ch->instClock++;
+    for (i = 0; i < PC_SKIN_INST && slot < 0; i++)
+        if (ch->instKey[i] == boneCoords)
+            slot = i;
+    if (slot < 0)
+    {
+        slot = 0;
+        for (i = 0; i < PC_SKIN_INST; i++)
+        {
+            if (ch->instKey[i] == NULL)
+            {
+                slot = i;
+                break;
+            }
+            if (ch->instUse[i] < ch->instUse[slot])
+                slot = i;
+        }
+        ch->instKey[slot] = boneCoords;
+        if (slot > 0 && !ch->instLogged)
+        {
+            ch->instLogged = 1;
+            SH_DBG("[SKIN] %s: more than one drawn at once, each keeps its own output", ch->name);
+        }
+    }
+    ch->instUse[slot] = ch->instClock;
+    for (m = 0; m < ch->matCount; m++)
+        for (b = 0; b < 2; b++)
+            if (ch->mats[m].out[slot][b] == NULL)
+            {
+                ch->mats[m].out[slot][b] = (GrModernVertex*)calloc((size_t)ch->mats[m].triCount * 3, sizeof(GrModernVertex));
+                if (ch->mats[m].out[slot][b] == NULL)
+                    return 0;
+            }
+    ch->inst = slot;
+    return 1;
+}
+
+void* Pc_SkinChara_Begin(s_Skeleton* skel, const void* boneCoords)
 {
     const s_ModelHeader* hdr;
     const s_LmHeader* lm = NULL;
@@ -1515,7 +1562,7 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel)
         if (ch->state == 1)
             Skin_LoadSettings(ch, base);
     }
-    if (ch->state != 1)
+    if (ch->state != 1 || !Skin_PickInstance(ch, boneCoords))
         return NULL;
     memset(ch->have, 0, sizeof(ch->have));
     memset(ch->lit, 0, sizeof(ch->lit));
@@ -2180,10 +2227,10 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
     for (m = 0; m < ch->matCount; m++)
     {
         PcSkinMat* mat = &ch->mats[m];
-        GrModernVertex* out = mat->out[buf];
+        GrModernVertex* out = mat->out[ch->inst][buf];
         int t, n = 0;
 
-        mat->outCount[buf] = 0;
+        mat->outCount[ch->inst][buf] = 0;
         if (out == NULL)
             continue;
         for (t = 0; t < mat->triCount; t++)
@@ -2229,14 +2276,15 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
                 o->vsz = z;
             }
         }
-        mat->outCount[buf] = n;
+        mat->outCount[ch->inst][buf] = n;
         if (n < 3)
             continue;
         {
             DR_PSYX_MODERN_MESH* packet = (DR_PSYX_MODERN_MESH*)GsOUT_PACKET_P;
             setlen(packet, 2);
             packet->code[0] = 0xB3000000;
-            packet->code[1] = PC_SKIN_HANDLE_FLAG | ((u32)(ch - s_chara) << 8) | ((u32)buf << 7) | (u32)m;
+            packet->code[1] = PC_SKIN_HANDLE_FLAG | ((u32)(ch - s_chara) << 8) | ((u32)ch->inst << 6) |
+                              ((u32)buf << 5) | (u32)m;
             addPrim(&ot->org[bucket], packet);
             GsOUT_PACKET_P = (PACKET*)((unsigned char*)packet + sizeof(*packet));
         }
@@ -2245,7 +2293,8 @@ void Pc_SkinChara_End(void* chara, void* otp, int shift, int hideHead)
 
 int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
 {
-    int ci = (int)((handle >> 8) & 0xFF), buf = (int)((handle >> 7) & 1), m = (int)(handle & 0x7F);
+    int ci = (int)((handle >> 8) & 0xFF), inst = (int)((handle >> 6) & 3), buf = (int)((handle >> 5) & 1),
+        m = (int)(handle & 0x1F);
     PcSkinChara* ch;
     PcSkinMat* mat;
 
@@ -2255,7 +2304,7 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
     if (ch->state != 1 || m >= ch->matCount)
         return 0;
     mat = &ch->mats[m];
-    if (mat->outCount[buf] < 3)
+    if (mat->outCount[inst][buf] < 3 || mat->out[inst][buf] == NULL)
         return 0;
     if (mat->texture == 0)
     {
@@ -2265,10 +2314,10 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
         if (mat->texture == 0)
             return 0;
     }
-    Pc_ModernVertex_Upload(mat->out[buf], mat->outCount[buf]);
+    Pc_ModernVertex_Upload(mat->out[inst][buf], mat->outCount[inst][buf]);
     binding->textureId = mat->texture;
     binding->texFormat = TF_32_BIT_RGBA;
-    binding->vertexCount = mat->outCount[buf];
+    binding->vertexCount = mat->outCount[inst][buf];
     binding->nativeWidth = binding->nativeHeight = 256;
     return 1;
 }
