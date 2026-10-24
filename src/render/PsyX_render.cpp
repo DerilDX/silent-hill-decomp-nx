@@ -7598,7 +7598,7 @@ void GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int num_vertice
 	Pc_ModernVertex_Upload(vertices, num_vertices);
 }
 
-struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; };
+struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; int indexCount; };
 extern "C" int Pc_ModernMesh_PrepareDraw(unsigned int, PcModernDrawBinding*);
 
 int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
@@ -7646,7 +7646,12 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	}
 	else
 		GR_Ortho2D(0.0f, (float)activeDispEnv.disp.w, (float)activeDispEnv.disp.h, 0.0f, -1.0f, 1.0f);
-	GR_DrawTriangles(0, count / 3);
+	/* Skinned characters upload each vertex once and index it, instead of a
+	 * copy per triangle corner (a 40k-triangle model was ~8 MB a frame). */
+	if (binding.indexCount > 0)
+		glDrawElements(GL_TRIANGLES, binding.indexCount, GL_UNSIGNED_INT, 0);
+	else
+		GR_DrawTriangles(0, count / 3);
 	glBindVertexArray(g_glVertexArray[g_curVertexBuffer ^ 1]);
 	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer ^ 1]);
 	glUseProgram(0);
