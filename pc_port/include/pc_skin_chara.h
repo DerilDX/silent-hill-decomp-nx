@@ -44,6 +44,10 @@ void  Pc_PartFillScratch(s_ModelInfo* modelInfo, MATRIX* viewMat);
 
 int   Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding);
 
+/* Which file HERO's replacement loads: a play-as swap's base name (HERO_CJ),
+ * or NULL for HERO itself. A swap whose file is gone falls back to HERO. */
+void  Pc_SkinChara_SetHeroFile(const char* file);
+
 /* HERO's replacement says female=1 in its HERO.ini (drives the voice pitch). */
 int   Pc_SkinChara_HeroFemale(void);
 

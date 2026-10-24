@@ -38,6 +38,29 @@ spells her model file that way. The same file is used in her ending scene.
 To go back to the original Harry, delete or rename `HERO.glb`. The replacement takes
 priority over any `HERO.ILM` in the same folder, so you do not need to remove that.
 
+## Extra Harry models in Play As
+
+You can keep the original Harry and add other models as characters to switch to. Any
+file in `gamedata/load/CHARA` whose name starts with `HERO` becomes its own entry in the
+Play As list, named after what follows `HERO`:
+
+| File | Play As name |
+| --- | --- |
+| `HERO_CJ.glb` | CJ |
+| `HEROCJ.glb` | CJ |
+| `HERO_Heather.glb` | HEATHER |
+| `HERO.glb` | Harry (replaces him, as above) |
+
+Pick one the same way as any other Play As character: the console command
+`playas cj`, the Play As cheat, or `player_character = cj` in `config.cfg`. The model
+plays on Harry's own animations, exactly like a `HERO.glb` replacement, and takes its
+settings from an `.ini` with the same name, such as `HERO_CJ.ini`.
+
+If the file for the selected character is deleted later, the game falls back to
+`HERO.glb` if there is one, otherwise to the original Harry. Load mods installed through
+the Mod Manager land in the same folder, so a mod that ships `HERO_CJ.glb` shows up too.
+The list is read when the game starts.
+
 ## What the model needs
 
 | Requirement | Details |

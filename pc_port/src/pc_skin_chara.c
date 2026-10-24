@@ -50,7 +50,7 @@ extern void  func_80057228(MATRIX* mat, s32 alpha, SVECTOR* arg2, VECTOR3* arg3)
 extern s_WorldEnvWork g_WorldEnvWork;
 
 #define PC_SKIN_BONES     18
-#define PC_SKIN_MAX_CHARA 8
+#define PC_SKIN_MAX_CHARA 16
 #define PC_SKIN_MAX_MATS  32
 #define PC_SKIN_MAX_JOINTS 256
 #define PC_SKIN_INFL      4
@@ -202,7 +202,8 @@ enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_M
 
 typedef struct
 {
-    char        name[16];
+    char        name[16]; /* the model it replaces: HERO, SIBYL */
+    char        file[32]; /* the glTF it came from: HERO, HERO_CJ */
     const PcSkinRestDef* def;
     int         state; /* 0 untried, 1 ready, -1 none */
     const void* instKey[PC_SKIN_INST]; /* the instance's bone coords */
@@ -246,6 +247,8 @@ typedef struct
 } PcSkinChara;
 
 static PcSkinChara s_chara[PC_SKIN_MAX_CHARA];
+/* The play-as Harry swap's file base (HERO_CJ), or empty for HERO itself. */
+static char        s_heroFile[32];
 static int         s_charaCount;
 
 /* ---------------------------------------------------------------- math */
@@ -1432,32 +1435,42 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
            ch->brightness, ch->fogPct, ch->beamPct, ch->lightOff[0], ch->lightOff[1], ch->lightOff[2]);
 }
 
+/* The HERO entry Begin would draw: the selected swap when it loaded, else
+ * HERO.glb. */
+static const PcSkinChara* Skin_CurrentHero(void)
+{
+    const PcSkinChara* hero = NULL;
+    int i;
+
+    for (i = 0; i < s_charaCount; i++)
+    {
+        if (s_chara[i].state != 1 || strcmp(s_chara[i].name, "HERO") != 0)
+            continue;
+        if (s_heroFile[0] != '\0' && strcmp(s_chara[i].file, s_heroFile) == 0)
+            return &s_chara[i];
+        if (strcmp(s_chara[i].file, "HERO") == 0)
+            hero = &s_chara[i];
+    }
+    return hero;
+}
+
 int Pc_SkinChara_HeroLightOffset(s32 offQ12[3])
 {
-    int i, k;
+    const PcSkinChara* hero = g_PcConfig.allowLooseFiles ? Skin_CurrentHero() : NULL;
+    int k;
 
-    if (!g_PcConfig.allowLooseFiles)
+    if (hero == NULL)
         return 0;
-    for (i = 0; i < s_charaCount; i++)
-        if (s_chara[i].state == 1 && strcmp(s_chara[i].name, "HERO") == 0)
-        {
-            for (k = 0; k < 3; k++)
-                offQ12[k] = s_chara[i].lightOff[k] * 4096 / 100;
-            return s_chara[i].lightOff[0] | s_chara[i].lightOff[1] | s_chara[i].lightOff[2];
-        }
-    return 0;
+    for (k = 0; k < 3; k++)
+        offQ12[k] = hero->lightOff[k] * 4096 / 100;
+    return hero->lightOff[0] | hero->lightOff[1] | hero->lightOff[2];
 }
 
 int Pc_SkinChara_HeroFemale(void)
 {
-    int i;
+    const PcSkinChara* hero = g_PcConfig.allowLooseFiles ? Skin_CurrentHero() : NULL;
 
-    if (!g_PcConfig.allowLooseFiles)
-        return 0;
-    for (i = 0; i < s_charaCount; i++)
-        if (s_chara[i].state == 1 && strcmp(s_chara[i].name, "HERO") == 0)
-            return s_chara[i].female;
-    return 0;
+    return hero != NULL ? hero->female : 0;
 }
 
 /* The output slot for the instance drawn from these bone coords; a new one
@@ -1503,6 +1516,49 @@ static int Skin_PickInstance(PcSkinChara* ch, const void* boneCoords)
     return 1;
 }
 
+/* The entry for one glTF, loaded on first use. */
+static PcSkinChara* Skin_Entry(const char* name, const char* file, const char* base, const PcSkinRestDef* def)
+{
+    char path[128];
+    PcSkinChara* ch = NULL;
+    int i;
+
+    for (i = 0; i < s_charaCount && ch == NULL; i++)
+        if (strcmp(s_chara[i].file, file) == 0)
+            ch = &s_chara[i];
+    if (ch == NULL)
+    {
+        if (s_charaCount >= PC_SKIN_MAX_CHARA)
+            return NULL;
+        ch = &s_chara[s_charaCount++];
+        memset(ch, 0, sizeof(*ch));
+        snprintf(ch->name, sizeof(ch->name), "%s", name);
+        snprintf(ch->file, sizeof(ch->file), "%s", file);
+        ch->def = def;
+    }
+    if (ch->state == 0)
+    {
+        ch->state = -1;
+        snprintf(path, sizeof(path), "%s.glb", base);
+        if (Skin_Load(ch, path))
+            ch->state = 1;
+        else
+        {
+            snprintf(path, sizeof(path), "%s.gltf", base);
+            if (Skin_Load(ch, path))
+                ch->state = 1;
+        }
+        if (ch->state == 1)
+            Skin_LoadSettings(ch, base);
+    }
+    return ch;
+}
+
+void Pc_SkinChara_SetHeroFile(const char* file)
+{
+    snprintf(s_heroFile, sizeof(s_heroFile), "%s", file != NULL ? file : "");
+}
+
 void* Pc_SkinChara_Begin(s_Skeleton* skel, const void* boneCoords)
 {
     const s_ModelHeader* hdr;
@@ -1535,33 +1591,26 @@ void* Pc_SkinChara_Begin(s_Skeleton* skel, const void* boneCoords)
     if (def == NULL)
         return NULL;
 
-    for (i = 0; i < s_charaCount; i++)
-        if (strcmp(s_chara[i].name, name) == 0)
-            ch = &s_chara[i];
-    if (ch == NULL)
+    /* A play-as Harry swap loads its own file; one that is gone or broken
+     * falls back to HERO.glb, then to the stock model. */
+    if (strcmp(name, "HERO") == 0 && s_heroFile[0] != '\0')
     {
-        if (s_charaCount >= PC_SKIN_MAX_CHARA)
-            return NULL;
-        ch = &s_chara[s_charaCount++];
-        memset(ch, 0, sizeof(*ch));
-        snprintf(ch->name, sizeof(ch->name), "%s", name);
-        ch->def = def;
-    }
-    if (ch->state == 0)
-    {
-        ch->state = -1;
-        snprintf(path, sizeof(path), "%s.glb", base);
-        if (Skin_Load(ch, path))
-            ch->state = 1;
-        else
+        char dir[96], *slash;
+        snprintf(dir, sizeof(dir), "%s", base);
+        slash = strrchr(dir, '/');
+        if (slash != NULL)
         {
-            snprintf(path, sizeof(path), "%s.gltf", base);
-            if (Skin_Load(ch, path))
-                ch->state = 1;
+            *slash = '\0';
+            snprintf(path, sizeof(path), "%s/%s", dir, s_heroFile);
+            ch = Skin_Entry(name, s_heroFile, path, def);
+            if (ch != NULL && ch->state != 1)
+                ch = NULL;
         }
-        if (ch->state == 1)
-            Skin_LoadSettings(ch, base);
     }
+    if (ch == NULL)
+        ch = Skin_Entry(name, name, base, def);
+    if (ch == NULL)
+        return NULL;
     if (ch->state != 1 || !Skin_PickInstance(ch, boneCoords))
         return NULL;
     memset(ch->have, 0, sizeof(ch->have));
