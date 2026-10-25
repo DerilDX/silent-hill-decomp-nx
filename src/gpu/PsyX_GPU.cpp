@@ -617,6 +617,83 @@ static const AffineEntry* AffineFind(const void* prim) {
 	return nullptr;
 }
 
+/* ---- Per-pixel lighting side channel (PsyX_PpLitPrim) ----------------------
+ * Keyed by prim address and stamped with the PGXP frame gen, exactly like the
+ * affine table above: the game builds a prim, records its corner normals, and
+ * the parse finds them when it emits that prim's vertices. */
+extern "C" { int g_PsyX_PpLitActive = 0; float g_PsyX_HeroLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; }
+struct PpLitEntry { uintptr_t key; unsigned gen; int kind; float n[12]; };
+#define PPLIT_BITS 15
+#define PPLIT_SIZE (1u << PPLIT_BITS)
+#define PPLIT_MASK (PPLIT_SIZE - 1u)
+static PpLitEntry s_ppLit[PPLIT_SIZE];
+
+extern "C" void PsyX_PpLitPrim(const void* prim, int kind, const float* n)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	PpLitEntry* e = &s_ppLit[s];
+	for (int i = 0; i < 16; i++) {
+		PpLitEntry* c = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (c->key == key || c->key == 0 || c->gen != s_pgxpGen) { e = c; break; }
+	}
+	e->key = key; e->gen = s_pgxpGen; e->kind = kind;
+	memcpy(e->n, n, sizeof(e->n));
+}
+
+static const PpLitEntry* PpLitFind(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	for (int i = 0; i < 16; i++) {
+		const PpLitEntry* e = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
+	}
+	return nullptr;
+}
+
+/* Parallel to g_vertexBuffer, index for index. Vertices nothing lit are zero
+ * (w = 0 reads as "use the vertex colour"), written lazily up to the next lit
+ * prim so the cost stays with the prims that use it. */
+float g_ppLitBuffer[MAX_VERTEX_BUFFER_SIZE][4];
+static int s_ppLitCursor = 0;
+
+static void PpLitZeroTo(int end)
+{
+	if (end > s_ppLitCursor)
+		memset(g_ppLitBuffer[s_ppLitCursor], 0, (size_t)(end - s_ppLitCursor) * sizeof(g_ppLitBuffer[0]));
+	if (end > s_ppLitCursor)
+		s_ppLitCursor = end;
+}
+
+extern "C" const float* PsyX_PpLitBufferFinish(int count)
+{
+	PpLitZeroTo(count);
+	return g_ppLitBuffer[0];
+}
+
+/* map[i] = which prim corner buffer vertex i came from. Anything the near
+ * clipper or the size cull reshaped no longer lines up with the corners, so it
+ * stays on the vertex colour. */
+static void PpLitFill(const void* prim, int first, int emitted, int expected, bool reshaped, const int* map)
+{
+	const PpLitEntry* e = (emitted == expected && !reshaped) ? PpLitFind(prim) : nullptr;
+	PpLitZeroTo(first);
+	if (e == nullptr) {
+		PpLitZeroTo(first + emitted);
+		return;
+	}
+	for (int i = 0; i < emitted; i++) {
+		const float* n = &e->n[map[i] * 3];
+		g_ppLitBuffer[first + i][0] = n[0];
+		g_ppLitBuffer[first + i][1] = n[1];
+		g_ppLitBuffer[first + i][2] = n[2];
+		g_ppLitBuffer[first + i][3] = (float)e->kind;
+	}
+	s_ppLitCursor = first + emitted;
+}
+
 static bool s_curPgxpAffine = false;
 static bool s_curNoFlashlight = false;
 static void PGXP_BeginPrim(const void* prim) {
@@ -1993,6 +2070,7 @@ void ClearSplits()
 	currentSplitDebugText = nullptr;
 	g_PsxFrameVerts += g_vertexIndex;
 	g_vertexIndex = 0;
+	s_ppLitCursor = 0;
 	g_splitIndex = 0;
 	g_splits[0].kind = GPU_SPLIT_LEGACY;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
@@ -4115,7 +4193,14 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 			firstVertex[1]._p0 = poly->p1;  // v1
 			firstVertex[2]._p0 = poly->p2;  // v2
 
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 3);
 			g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
+			if (g_PsyX_PpLitActive)
+			{
+				static const int s_triCorners[3] = { 0, 1, 2 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 3, ppReshaped, s_triCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -4177,7 +4262,16 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 			TriangulateQuad();
 
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 6);
 			WM_CYC(8, g_vertexIndex += PgxpEmitPoly(firstVertex, 6));
+			if (g_PsyX_PpLitActive)
+			{
+				/* MakeVertexQuad takes x0 x1 x3 x2 and TriangulateQuad expands that
+				 * to corners 0 1 2 / 1 2 3. */
+				static const int s_quadCorners[6] = { 0, 1, 2, 1, 2, 3 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 6, ppReshaped, s_quadCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;

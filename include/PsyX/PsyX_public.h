@@ -131,6 +131,34 @@ extern int							g_PsyX_NoShadowCast;
  * view-space FIFO as g_PsyX_NoShadowCast. */
 extern float						g_PsyX_CharaFade;
 
+/* PC port: optional per-pixel lighting for the stock world and characters.
+ * The PSX lights every vertex with the GTE and Gouraud-shades the colour
+ * across the face; with this on, the game hands the renderer each lit prim's
+ * view-space corner normals and the frame's light, and the shader re-runs the
+ * same GTE light sum at every pixel. Off (g_PsyX_PpLitActive 0) nothing is
+ * recorded, uploaded or bound, and the shader skips the branch on a uniform. */
+extern int							g_PsyX_PpLitActive;
+typedef struct PsyX_PpLight
+{
+	int		mode;			/* g_WorldEnvWork.field_0: 1 point, 2 directional, 0 none */
+	float	lightPos[3];	/* view space, same units as the GTE view-space capture */
+	float	lightDir[3];	/* the light row (field_74) rotated into view space, Q12 */
+	float	tint[3];		/* world tint, 0..255 */
+	float	lc[3];			/* colour matrix column 0, Q12 */
+	float	bk[3];			/* back colour, 0..255 */
+	float	ambient;		/* field_20 */
+	float	cap;			/* field_3 */
+	float	dqa;			/* depth-cue A the light divide runs under */
+} PsyX_PpLight;
+extern void PsyX_PpLitSetLight(const PsyX_PpLight* light);
+/* kind 1 = world (func_80057658 / func_80057A3C), 2 = character (func_8005AA08).
+ * n holds the corners' view-space normals as the game stores them (inward),
+ * x0 y0 z0 x1 ..., in the prim's own corner order (3 or 4). */
+extern void PsyX_PpLitPrim(const void* prim, int kind, const float* n);
+/* Fill light for characters drawn per pixel, a direction in view space toward
+ * the light and a 0..1 strength. 0 strength leaves the lighting untouched. */
+extern float						g_PsyX_HeroLight[4];
+
 /* Optional per-sound sample replacement. A voice plays from an SPU address; the
  * host may answer that address with its own PCM (any length or rate) instead of
  * the ADPCM resident there, which is how loose-file sound mods bypass both the
