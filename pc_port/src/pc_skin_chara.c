@@ -204,8 +204,10 @@ typedef struct
     float (*d)[3]; /* game-space bind delta */
 } PcSkinMorph;
 
-/* GRIP_L/GRIP_R curl the fingers of game hand 6/10 round a held item. */
-enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_MORPH_GRIP_R, PC_SKIN_MORPH_COUNT };
+/* GRIP_L/GRIP_R curl the fingers of game hand 6/10 round a held item. BREATH
+ * is built from the chest at load, so every model gets it. */
+enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_MORPH_GRIP_R, PC_SKIN_MORPH_BREATH,
+       PC_SKIN_MORPH_COUNT };
 
 typedef struct
 {
@@ -240,6 +242,7 @@ typedef struct
     float       kk[PC_SKIN_BONES];
     PcSkinMorph morph[PC_SKIN_MORPH_COUNT];
     float       blinkClock, blinkNext;
+    float       breathPhase, breathPeriod;
     float       mouth;
     float       grip[2];
     int         female;
@@ -790,6 +793,68 @@ static void Skin_LoadMorphs(PcSkinChara* ch, const cgltf_mesh* mesh, const cgltf
  * bones for the other fingers (or none at all), so this works on the mesh. */
 #define PC_SKIN_GRIP_CURL 3.3f
 
+/* Breathing: the ribcage between waist and neck swells forward (the back
+ * barely), widens a little and lifts, peaking mid-chest and fading out at
+ * both ends so the belt and collar stay put. About 5 mm at the sternum on a
+ * person of Harry's height: enough to read in a close-up, not in a walk. */
+static void Skin_BuildBreath(PcSkinChara* ch, const float* gpos, const float* waist, const float* neck)
+{
+    PcSkinMorph* m = &ch->morph[PC_SKIN_MORPH_BREATH];
+    float span = waist[1] - neck[1], zc = 0.0f;
+    int i, n = 0, zn = 0;
+
+    if (span < 1e-3f)
+        return;
+    for (i = 0; i < ch->vertCount; i++)
+    {
+        float t = (waist[1] - gpos[i * 3 + 1]) / span;
+        if (ch->verts[i].dom == 1 && t > 0.3f && t < 0.9f)
+        {
+            zc += gpos[i * 3 + 2];
+            zn++;
+        }
+    }
+    if (zn == 0)
+        return;
+    zc /= (float)zn;
+    m->v = (u32*)malloc(sizeof(u32) * (size_t)ch->vertCount);
+    m->d = (float(*)[3])malloc(sizeof(float[3]) * (size_t)ch->vertCount);
+    if (m->v == NULL || m->d == NULL)
+    {
+        free(m->v);
+        free(m->d);
+        m->v = NULL;
+        m->d = NULL;
+        return;
+    }
+    for (i = 0; i < ch->vertCount; i++)
+    {
+        const PcSkinVert* sv = &ch->verts[i];
+        const float* v = &gpos[i * 3];
+        float t = ((waist[1] - v[1]) / span - 0.2f) / 0.8f, w1 = 0.0f, k, dz;
+        int q;
+
+        if (t <= 0.0f || t >= 1.0f)
+            continue;
+        for (q = 0; q < sv->n; q++)
+            if (sv->bone[q] == 1)
+                w1 = sv->w[q];
+        k = sinf(3.14159265f * t);
+        k *= k * w1;
+        if (k < 1e-3f)
+            continue;
+        dz = v[2] - zc;
+        m->v[n] = (u32)i;
+        m->d[n][0] = 0.02f * k * (v[0] - waist[0]);
+        m->d[n][1] = -1.0f * k;
+        m->d[n][2] = (dz > 0.0f ? 0.07f : 0.02f) * k * dz;
+        n++;
+    }
+    m->count = n;
+    ch->breathPeriod = 4.0f + (float)(rand() % 1000) / 1000.0f;
+    ch->breathPhase = (float)(rand() % 1000) / 1000.0f;
+}
+
 static void Skin_BuildGrip(PcSkinChara* ch, const float* gpos, float jointPos[][3], const int* handJoint,
                            int indexJoint[][3], float scale, float offX, float offY, float offZ)
 {
@@ -1272,6 +1337,7 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             sv->dom = sv->bone[qc];
         }
     }
+    Skin_BuildBreath(ch, gpos, anchor[1], anchor[2]);
 
     /* Model-side direction of end bones: centroid of the geometry they own. */
     memset(dirSum, 0, sizeof(dirSum));
@@ -2274,6 +2340,20 @@ static float Skin_BlinkWeight(PcSkinChara* ch)
     return 0.0f;
 }
 
+/* Inhale over the first 40% of a 4-5 s cycle, exhale over the rest; still
+ * once the ragdoll has him. */
+static float Skin_BreathWeight(PcSkinChara* ch)
+{
+    float dt = g_DeltaTime / 4096.0f, ph;
+
+    if (s_rd.active && ch->isPlayer)
+        return 0.0f;
+    ch->breathPhase += dt / ch->breathPeriod;
+    ch->breathPhase -= floorf(ch->breathPhase);
+    ph = ch->breathPhase < 0.4f ? ch->breathPhase / 0.4f : 1.0f - (ch->breathPhase - 0.4f) / 0.6f;
+    return 0.5f - 0.5f * cosf(3.14159265f * ph);
+}
+
 /* The mouth follows the voice line's loudness when this character speaks it:
  * by the speaker table, or for an untabled line, when its pitch matches this
  * character's voice. Opening is quick and closing slower, so syllables read
@@ -2326,6 +2406,7 @@ static void Skin_ApplyMorphs(PcSkinChara* ch, float h, float ofx, float ofy, flo
     w[PC_SKIN_MORPH_BLINK] = ch->morph[PC_SKIN_MORPH_BLINK].count ? Skin_BlinkWeight(ch) : 0.0f;
     w[PC_SKIN_MORPH_MOUTH] = ch->morph[PC_SKIN_MORPH_MOUTH].count ? Skin_MouthWeight(ch) : 0.0f;
     Skin_GripWeights(ch, &w[PC_SKIN_MORPH_GRIP_L]);
+    w[PC_SKIN_MORPH_BREATH] = ch->morph[PC_SKIN_MORPH_BREATH].count ? Skin_BreathWeight(ch) : 0.0f;
     for (k = 0; k < PC_SKIN_MORPH_COUNT; k++)
     {
         const PcSkinMorph* m = &ch->morph[k];
