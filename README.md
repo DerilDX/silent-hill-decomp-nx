@@ -242,8 +242,6 @@ Full breakdown, including bundled third-party components: [COPYRIGHT.md](COPYRIG
 
 I'm on Discord as **@KushAstronaut**, and the project has a Discord server: https://discord.gg/JWuNzVsQbr
 
-This is a 100% free project funded from my own pocket. If you'd like to support me, it is greatly appreciated, and you can do so on Ko-fi: [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F3K8V3B)
-
-<br/>
+This is a 100% free project funded from my own pocket. If you'd like to support me, it is greatly appreciated, and you can do so on Ko-fi:<br/> [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F3K8V3B)
 
 Silent Hill is © Konami and this does not contain any game assets. You must provide a legally obtained dump of Silent Hill for PSX to use.
