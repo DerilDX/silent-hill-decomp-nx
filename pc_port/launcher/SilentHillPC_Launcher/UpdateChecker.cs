@@ -77,7 +77,7 @@ namespace SilentHillPC_Launcher
 
         // Realtime index (realtime.json on the source repo's rolling `realtime`
         // release, written by tools/realtime_publish.py). Newest build first; each
-        // build's files are a loose-mode manifest.
+        // build is a zip-mode manifest: one SHPC_rt-<version>.zip plus per-file hashes.
         [DataContract]
         public class RealtimeIndex
         {
@@ -92,6 +92,9 @@ namespace SilentHillPC_Launcher
             [DataMember(Name = "commit")]  public string Commit;
             [DataMember(Name = "date")]    public string Date;
             [DataMember(Name = "summary")] public List<string> Summary;
+            [DataMember(Name = "mode")]     public string Mode;
+            [DataMember(Name = "zip_name")] public string ZipName;
+            [DataMember(Name = "zip_url")]  public string ZipUrl;
             [DataMember(Name = "files")]   public List<FileEntry> Files;
         }
 
@@ -189,7 +192,9 @@ namespace SilentHillPC_Launcher
                 {
                     Version   = rt.Version,
                     Tag       = rt.Id,
-                    Mode      = "loose",
+                    Mode      = string.IsNullOrWhiteSpace(rt.Mode) ? "loose" : rt.Mode,
+                    ZipUrl    = rt.ZipUrl,
+                    ZipName   = rt.ZipName,
                     BuildDate = rt.Date,
                     Stream    = "realtime",
                     Files     = rt.Files ?? new List<FileEntry>(),

@@ -7,23 +7,25 @@ so launchers that predate the feature cannot see it at all: they only ever read
 the nightly repo.
 
 The release holds:
+  SHPC_rt-<version>.zip    one complete Windows build per push, the same layout
+                           as a scripted zip release, so it can be downloaded
+                           and played directly as well as installed by the
+                           launcher (which extracts only the files that changed)
   realtime.json            index of the newest KEEP builds, newest first; each
-                           entry carries a per-file manifest (path, sha256, url)
-                           in the launcher's loose-mode format
+                           entry is a zip-mode manifest (zip_url plus per-file
+                           path/sha256) in the launcher's format
   CHANGELOG_REALTIME.md    every build's commit subjects, newest first (cumulative)
-  <sha12>-<flat path>      the files themselves, named by content hash so a file
-                           that did not change between builds is stored once
   SHPC-linux-x64.tar.gz /
   SHPC-macos-arm64.zip     newest Linux/macOS CI archives (attached by those
                            workflows, left alone here)
 
-Files the Windows CI cannot produce (ANGLE, the ffmpeg runtime, UnRAR.dll, ...)
-are carried forward from the newest official release in the nightly repo, so a
-realtime install has the same file set as a scripted release.
+Files the Windows CI cannot produce (ANGLE, the ffmpeg runtime, UnRAR.dll, and
+the launcher for anyone downloading directly) are carried from the newest
+official release in the nightly repo, so every zip is a full install.
 
-Order matters for anyone mid-update: new file assets are uploaded first, then
-the index that references them, and only then are assets that no retained build
-references deleted.
+Order matters for anyone mid-update: the new zip is uploaded first, then the
+index that references it, and only then are zips no retained build references
+deleted.
 """
 
 import argparse
@@ -32,7 +34,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -42,33 +43,34 @@ import zipfile
 
 INDEX_NAME = "realtime.json"
 CHANGELOG_NAME = "CHANGELOG_REALTIME.md"
+LAUNCHER_NAME = "SilentHillPC_Launcher.exe"
 FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos-arm64.zip"}
 CHANGELOG_MARKER = "<!-- realtime-builds-below -->"
 
-# Never carried from an official release: the launcher only updates itself from
-# scripted releases, the official changelog belongs to that stream, and
-# config.cfg comes from source.
-CARRY_EXCLUDE = {"SilentHillPC_Launcher.exe", "CHANGELOG.md", "config.cfg"}
+# Never carried: the official changelog belongs to the scripted stream and
+# config.cfg comes from source. The launcher is carried into the zip for direct
+# downloads but kept out of the manifest, so the launcher never updates itself
+# from a realtime build.
+CARRY_EXCLUDE = {"CHANGELOG.md", "config.cfg"}
+ZIP_ONLY = {LAUNCHER_NAME}
 
 RELEASE_NOTES = """Automatic builds of every push to `pc-port`, for players who want changes as soon as they land instead of waiting for a release.
 
 **Most players should use the normal releases.** These builds are not tested before they go up.
 
-To follow them, use the launcher: **Build Settings → Realtime updates**. The launcher installs only the files that changed, and you can roll back to any of the last {keep} builds from the same menu. `CHANGELOG_REALTIME.md` lists what each build changed.
+**Newest build: {version}** (`{commit}`, {date} UTC)
+- Windows: [{zip_name}]({zip_url}): unzip into a folder and run `SilentHillPC_Launcher.exe` or `SilentHillPC.exe`. Put your `Silent Hill (USA).bin` in `gamedata/`.
+- Linux: `SHPC-linux-x64.tar.gz` · macOS: `SHPC-macos-arm64.zip` (newest CI builds, below)
 
-Linux and macOS: `SHPC-linux-x64.tar.gz` and `SHPC-macos-arm64.zip` below are the newest CI builds.
-
-Newest build: **{version}** (`{commit}`), {date} UTC."""
+To follow these builds from the launcher instead: **Build Settings → Realtime updates**. It installs only the files that changed, and you can roll back to any of the last {keep} builds from the same menu. `CHANGELOG_REALTIME.md` lists what each build changed."""
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def run(args, check=True, capture=True):
-    r = subprocess.run(args, check=False, text=True,
-                       stdout=subprocess.PIPE if capture else None,
-                       stderr=subprocess.PIPE if capture else None)
+def run(args, check=True):
+    r = subprocess.run(args, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and r.returncode != 0:
         raise RuntimeError(f"{' '.join(args)} failed ({r.returncode}): {r.stderr or ''}")
     return r
@@ -92,10 +94,6 @@ def http_get(url):
         return r.read()
 
 
-def asset_name(path, sha):
-    return f"{sha[:12]}-{path.replace('/', '__')}"
-
-
 def version_key(tag):
     t = tag or ""
     for p in ("beta-", "v"):
@@ -110,7 +108,7 @@ def version_key(tag):
 
 # -- release state ------------------------------------------------------------
 
-def release_state(repo, tag):
+def release_assets(repo, tag):
     r = gh("release", "view", tag, "--repo", repo, "--json", "assets", check=False)
     if r.returncode != 0:
         return None
@@ -147,21 +145,13 @@ def newest_official(nightly):
     return best[1] if best else None
 
 
-def carry_files(nightly, staged_paths, prev_build, prev_carry_source, work):
-    """Returns (carry_source_tag, {path: local_file_or_None}, {path: (sha, url)})."""
+def carry_files(nightly, staged_paths, out_dir):
+    """Copies the official release's files that CI does not stage into out_dir.
+    Returns (official_tag, {path: local_file})."""
     rel = newest_official(nightly)
     if rel is None:
         raise RuntimeError(f"no official release found in {nightly} to carry runtime files from")
     tag = rel["tag_name"]
-
-    # Same official release as last time: reuse the previous build's carried entries.
-    if prev_build and prev_carry_source == tag:
-        reused = {f["path"]: (f["sha256"], f["url"]) for f in prev_build["files"]
-                  if f.get("carried") and f["path"] not in staged_paths}
-        if reused:
-            log(f"Carry: reusing {len(reused)} file(s) from {tag}")
-            return tag, {}, reused
-
     vurl = next((a["browser_download_url"] for a in rel["assets"] if a["name"] == "version.json"), None)
     if vurl is None:
         raise RuntimeError(f"{tag} has no version.json")
@@ -170,11 +160,8 @@ def carry_files(nightly, staged_paths, prev_build, prev_carry_source, work):
               if f["path"] not in staged_paths and f["path"] not in CARRY_EXCLUDE]
     log(f"Carry: {len(wanted)} file(s) from {tag} ({manifest.get('mode') or 'loose'} release)")
 
-    out_dir = os.path.join(work, "carry")
-    os.makedirs(out_dir, exist_ok=True)
     local = {}
     if (manifest.get("mode") or "loose") == "zip":
-        log(f"Carry: downloading {manifest['zip_name']}")
         with zipfile.ZipFile(io.BytesIO(http_get(manifest["zip_url"]))) as z:
             names = {n.replace("\\", "/"): n for n in z.namelist()}
             for f in wanted:
@@ -197,7 +184,7 @@ def carry_files(nightly, staged_paths, prev_build, prev_carry_source, work):
     for f in wanted:
         if sha256_of(local[f["path"]]) != f["sha256"].lower():
             raise RuntimeError(f"carried {f['path']} does not match {tag}'s manifest hash")
-    return tag, local, {}
+    return tag, local
 
 
 # -- changelog -----------------------------------------------------------------
@@ -227,6 +214,18 @@ def build_changelog(prev_text, version, date, commit, subjects, repo):
     return header + "\n".join(section) + "\n" + ("\n" + body if body else "")
 
 
+# -- zip ---------------------------------------------------------------------------
+
+def write_zip(zip_path, files):
+    """files: {relpath: local_file}. Flat, '/'-separated entries in the runtime
+    layout, exactly like a scripted zip release: the launcher matches entries by
+    their full path."""
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for rel in sorted(files):
+            z.write(files[rel], rel)
+        z.writestr("gamedata/save/", b"")
+
+
 # -- main --------------------------------------------------------------------------
 
 def main():
@@ -242,9 +241,9 @@ def main():
     a = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="realtime-")
-    assets = release_state(a.repo, a.tag)
+    assets = release_assets(a.repo, a.tag)
 
-    index = {"schema": 1, "stream": "realtime", "builds": []}
+    index = {"schema": 2, "stream": "realtime", "builds": []}
     prev_changelog = None
     if assets is not None:
         p = download_asset(a.repo, a.tag, INDEX_NAME, work) if INDEX_NAME in assets else None
@@ -255,111 +254,87 @@ def main():
         if p:
             with open(p, encoding="utf-8") as f:
                 prev_changelog = f.read()
+    # Schema-1 builds (one asset per file) are dropped rather than carried along,
+    # but still count toward the day's build numbers so none is ever reused.
+    used_versions = [b["version"] for b in index.get("builds", [])]
+    index["builds"] = [b for b in index.get("builds", []) if b.get("mode") == "zip"]
+    index["schema"] = 2
     prev_build = index["builds"][0] if index["builds"] else None
 
     if prev_build and prev_build["commit"] == a.commit:
         log(f"{a.commit[:9]} is already the newest realtime build. Nothing to do.")
         return 0
 
-    staged = {}
-    for root, _, files in os.walk(a.stage):
-        for name in files:
+    files = {}
+    for root, _, names in os.walk(a.stage):
+        for name in names:
             full = os.path.join(root, name)
-            rel = os.path.relpath(full, a.stage).replace(os.sep, "/")
-            staged[rel] = full
-    if "SilentHillPC.exe" not in staged:
+            files[os.path.relpath(full, a.stage).replace(os.sep, "/")] = full
+    if "SilentHillPC.exe" not in files:
         raise RuntimeError(f"SilentHillPC.exe missing from {a.stage}")
-    staged.pop(CHANGELOG_NAME, None)
+    files.pop(CHANGELOG_NAME, None)
 
-    carry_source, carry_local, carry_reused = carry_files(
-        a.nightly, set(staged), prev_build, index.get("carry_source"), work)
-
-    entries = {}  # path -> dict(sha256, url, carried, local)
-    for path, full in staged.items():
-        entries[path] = {"sha256": sha256_of(full), "local": full, "carried": False}
-    for path, full in carry_local.items():
-        entries[path] = {"sha256": sha256_of(full), "local": full, "carried": True}
-    for path, (sha, url) in carry_reused.items():
-        entries[path] = {"sha256": sha, "url": url, "carried": True}
-
-    avc = [p for p in entries if re.fullmatch(r"avcodec-\d+\.dll", p)]
-    if not avc:
+    carry_source, carried = carry_files(a.nightly, set(files), os.path.join(work, "carry"))
+    files.update(carried)
+    if not any(p.startswith("avcodec-") for p in files):
         log("WARNING: no avcodec-*.dll in the file set; the ffmpeg FMV fallback will be unavailable.")
-
-    if prev_build:
-        prev_game = {f["path"]: f["sha256"] for f in prev_build["files"] if f["path"] != CHANGELOG_NAME}
-        now_game = {p: e["sha256"] for p, e in entries.items()}
-        if prev_game == now_game:
-            log("Game files are identical to the newest realtime build. Nothing to publish.")
-            return 0
 
     now = dt.datetime.now(dt.timezone.utc)
     day = now.strftime("%Y.%m.%d")
-    n = 1 + max([int(b["version"].rsplit(".", 1)[1]) for b in index["builds"]
-                 if b["version"].startswith(day + ".")] or [0])
+    n = 1 + max([int(v.rsplit(".", 1)[1]) for v in used_versions if v.startswith(day + ".")] or [0])
     version = f"{day}.{n}"
     date = now.strftime("%Y-%m-%d %H:%M:%S")
+    build_id = f"rt-{version}"
 
     subjects = commit_subjects(prev_build["commit"] if prev_build else None, a.commit)
-    changelog = build_changelog(prev_changelog, version, date, a.commit, subjects, a.repo)
     cl_path = os.path.join(work, CHANGELOG_NAME)
     with open(cl_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(changelog)
-    entries[CHANGELOG_NAME] = {"sha256": sha256_of(cl_path), "local": cl_path, "carried": False}
+        f.write(build_changelog(prev_changelog, version, date, a.commit, subjects, a.repo))
+    files[CHANGELOG_NAME] = cl_path
 
+    zip_name = f"SHPC_{build_id}.zip"
+    zip_path = os.path.join(work, zip_name)
+    write_zip(zip_path, files)
     base_url = f"https://github.com/{a.repo}/releases/download/{a.tag}/"
-    existing = assets or set()
-    to_upload = []
-    for path, e in sorted(entries.items()):
-        if "url" in e:
-            continue
-        name = asset_name(path, e["sha256"])
-        e["url"] = base_url + name
-        if name not in existing:
-            dst = os.path.join(work, "upload", name)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copyfile(e["local"], dst)
-            to_upload.append(dst)
 
     build = {
-        "id": f"rt-{version}",
+        "id": build_id,
         "version": version,
         "commit": a.commit,
         "date": date,
         "run": a.run,
         "summary": [s for _, s in subjects],
-        "files": [{"path": p, "sha256": e["sha256"], "url": e["url"], **({"carried": True} if e["carried"] else {})}
-                  for p, e in sorted(entries.items())],
+        "mode": "zip",
+        "zip_name": zip_name,
+        "zip_url": base_url + zip_name,
+        "files": [{"path": p, "sha256": sha256_of(files[p])} for p in sorted(files) if p not in ZIP_ONLY],
     }
-    index["builds"] = [build] + index["builds"]
-    index["builds"] = index["builds"][:a.keep]
+    index["builds"] = ([build] + index["builds"])[:a.keep]
     index["carry_source"] = carry_source
     index["updated"] = date
     idx_path = os.path.join(work, INDEX_NAME)
     with open(idx_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(index, f, indent=1)
 
-    referenced = {u.rsplit("/", 1)[1] for b in index["builds"] for u in (f["url"] for f in b["files"])
-                  if u.startswith(base_url)}
-    stale = sorted(n for n in existing if n not in referenced and n not in FIXED_ASSETS)
+    referenced = {b["zip_name"] for b in index["builds"]}
+    stale = sorted(x for x in (assets or set()) if x not in referenced and x not in FIXED_ASSETS)
+    notes = RELEASE_NOTES.format(keep=a.keep, version=version, commit=a.commit[:9], date=date,
+                                 zip_name=zip_name, zip_url=base_url + zip_name)
 
-    log(f"Build {version} from {a.commit[:9]}: {len(entries)} files, {len(to_upload)} new asset(s), "
-        f"{len(stale)} to prune, {len(subjects)} commit(s)")
+    log(f"Build {version} from {a.commit[:9]}: {zip_name} ({os.path.getsize(zip_path) // (1 << 20)} MB, "
+        f"{len(files)} files), {len(stale)} asset(s) to prune, {len(subjects)} commit(s)")
     for _, s in subjects:
         log(f"  - {s}")
     if a.dry_run:
-        log(f"Dry run: index written to {idx_path}, changelog to {cl_path}. Nothing published.")
+        log(f"Dry run: zip at {zip_path}, index at {idx_path}. Nothing published.")
         return 0
 
     if assets is None:
         gh("release", "create", a.tag, "--repo", a.repo, "--prerelease", "--latest=false",
-           "--target", a.commit, "--title", "Realtime builds (every push)",
-           "--notes", RELEASE_NOTES.format(keep=a.keep, version=version, commit=a.commit[:9], date=date))
-    for i in range(0, len(to_upload), 20):
-        gh("release", "upload", a.tag, "--repo", a.repo, *to_upload[i:i + 20])
+           "--target", a.commit, "--title", "Realtime builds (every push)", "--notes", notes)
+    gh("release", "upload", a.tag, "--repo", a.repo, "--clobber", zip_path)
     gh("release", "upload", a.tag, "--repo", a.repo, "--clobber", idx_path, cl_path)
-    gh("release", "edit", a.tag, "--repo", a.repo, "--prerelease", "--latest=false",
-       "--notes", RELEASE_NOTES.format(keep=a.keep, version=version, commit=a.commit[:9], date=date))
+    gh("release", "edit", a.tag, "--repo", a.repo, "--prerelease", "--latest=false", "--notes", notes)
     for name in stale:
         gh("release", "delete-asset", a.tag, name, "--repo", a.repo, "--yes", check=False)
     log("Published.")
