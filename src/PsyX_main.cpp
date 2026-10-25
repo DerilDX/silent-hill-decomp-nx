@@ -1457,6 +1457,13 @@ void PsyX_WaitForTimestep(int count)
 #endif
 			IntrCpuRelax();
 			vbl = PsyX_Sys_GetVBlankCount();
+#if defined(__linux__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+			/* IntrCpuRelax is a no-op here, so this loop held a full core. The
+			 * interrupt thread owns the vblank count; a 1 ms nap only delays
+			 * noticing it, never the count itself or the RCnt2 music clock. */
+			if (vbl - swapLastVbl < count)
+				SDL_Delay(1);
+#endif
 		}
 		while (vbl - swapLastVbl < count);
 
