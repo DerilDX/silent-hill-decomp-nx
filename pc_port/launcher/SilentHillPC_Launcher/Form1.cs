@@ -126,15 +126,9 @@ public partial class Form1 : Form
             if (settings.Realtime) return;
 
             var answer = MessageBox.Show(this,
-                Loc.T("New: realtime updates\n\n" +
-                      "The launcher can now keep you on the very latest build. With realtime updates on, it " +
-                      "offers a new build every time a change is made to the game instead of waiting for the " +
-                      "next release, and you can roll back to an earlier build at any time.\n\n" +
-                      "These builds are made automatically and are not tested first, so they can have new " +
-                      "bugs. Back up your gamedata\\save folder if you turn this on.\n\n" +
-                      "Turn on realtime updates now?\n\n" +
-                      "If you choose No, you can turn them on any time under Build Settings > Realtime " +
-                      "updates. This message will not be shown again."),
+                Loc.T("Would you like to enable realtime updates?\n\n" +
+                      "With this enabled, you will be able to update any time changes are pushed to the repo. This means you will be able to update to the latest untested versions as I am still working on them. If they break the game, you can rollback by going to build settings and choosing an older build.\n\n" +
+                      "It is recommended that you back up your saves before turning this on. This message will not be shown again, but if you change your mind, the setting can be changed from the Build Settings window."),
                 Loc.T("Realtime updates"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
             if (answer != DialogResult.Yes) return;
 
