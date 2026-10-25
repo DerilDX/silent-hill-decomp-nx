@@ -16,9 +16,9 @@ The release holds:
                            path/sha256) in the launcher's format
   CHANGELOG_REALTIME.md    every commit since the last official release, grouped
                            by day, newest first (rebuilt from git each publish)
-  SHPC-linux-x64.tar.gz /
-  SHPC-macos-arm64.zip     newest Linux/macOS CI archives (attached by those
-                           workflows, left alone here)
+  SHPC-linux-x64.tar.gz, SHPC-macos-arm64.zip, SilentHill-ios-unsigned.ipa,
+  SilentHill-android.apk   newest Linux/macOS/iOS/Android CI builds, replaced
+                           in place by those workflows and left alone here
 
 Files the Windows CI cannot produce (ANGLE, the ffmpeg runtime, UnRAR.dll, and
 the launcher for anyone downloading directly) are carried from the newest
@@ -45,7 +45,10 @@ import zipfile
 INDEX_NAME = "realtime.json"
 CHANGELOG_NAME = "CHANGELOG_REALTIME.md"
 LAUNCHER_NAME = "SilentHillPC_Launcher.exe"
-FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos-arm64.zip"}
+# Newest-only builds other workflows replace in place (build-linux/-macos on
+# pc-port, build-ios on ios-port, build-android on android-port). Never pruned.
+FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos-arm64.zip",
+                "SilentHill-ios-unsigned.ipa", "SilentHill-android.apk"}
 
 # Never carried: the official changelog belongs to the scripted stream and
 # config.cfg comes from source. The launcher is carried into the zip for direct
@@ -60,7 +63,9 @@ RELEASE_NOTES = """Automatic builds of every push to `pc-port`, for players who 
 
 **Newest build: {version}** (`{commit}`, {date} UTC)
 - Windows: [{zip_name}]({zip_url}): unzip into a folder and run `SilentHillPC_Launcher.exe` or `SilentHillPC.exe`. Put your `Silent Hill (USA).bin` in `gamedata/`.
-- Linux: `SHPC-linux-x64.tar.gz` · macOS: `SHPC-macos-arm64.zip` (newest CI builds, below)
+- Linux: `SHPC-linux-x64.tar.gz` · macOS: `SHPC-macos-arm64.zip` (newest `pc-port` CI builds, below)
+- iOS: `SilentHill-ios-unsigned.ipa` (newest `ios-port` build; sideload with Sideloadly or AltStore, which sign it for your device)
+- Android: `SilentHill-android.apk` (newest `android-port` build, debug-signed for sideloading)
 
 To follow these builds from the launcher instead: **Build Settings → Realtime updates**. It installs only the files that changed, and you can roll back to any of the last {keep} builds from the same menu. `CHANGELOG_REALTIME.md` lists what each build changed."""
 
