@@ -61,10 +61,12 @@ jobs:
         continue-on-error: true
         run: pacman -S --noconfirm --needed mingw-w64-x86_64-ffmpeg
 
-      - name: Build (build.sh -> Ninja + map DLLs)
+      # Same configure as build.sh, but -k 0 keeps going past the first failure,
+      # so one CI run reports every file a newer MSYS2 toolchain rejects.
+      - name: Build (Ninja + map DLLs)
         run: |
-          cd pc_port
-          ./build.sh
+          cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=ON
+          cmake --build pc_port/build -- -k 0
 
       - name: Stage release files
         run: |
