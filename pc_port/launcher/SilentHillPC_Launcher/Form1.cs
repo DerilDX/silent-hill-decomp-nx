@@ -576,6 +576,7 @@ public partial class Form1 : Form
             RepoUrl        = s.RepoUrl,
             Branch         = s.Branch,
             Build          = UpdateChecker.CustomFamilyLatestToken(s.Build) ?? "latest",
+            Realtime       = s.Realtime,
             OldBuildWarned = s.OldBuildWarned
         };
 
@@ -1836,6 +1837,7 @@ public partial class Form1 : Form
                 Loc.F("A newer build is available: {0}\nBuilt: {1}\nSource: {2}",
                       plan.RemoteVersion, plan.BuildDate, plan.RepoLabel) + "\n\n" +
                 (plan.IsBeta ? Loc.T("This build is on the BETA branch (newer than the latest alpha/stable build).") + "\n\n" : "") +
+                (plan.IsRealtime ? Loc.T("This is an automatic realtime build, made from the latest changes and not tested first.") + "\n\n" : "") +
                 (plan.IsCustom
                     ? Loc.F("This is the experimental build \"{0}\", not a normal release. " +
                             "You stay on it until you pick another branch in Build Settings.",
@@ -2055,6 +2057,13 @@ public partial class Form1 : Form
     private void btnChangelog_Click(object sender, EventArgs e)
     {
         string changelogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CHANGELOG.md");
+        string realtimePath  = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LauncherSettings.RealtimeChangelogFile);
+        if (LauncherSettings.Load(config).UsesRealtime && File.Exists(realtimePath))
+        {
+            ChangelogViewer.Show(this, Loc.T("Silent Hill PC Port — Realtime builds (installed)"),
+                File.ReadAllText(realtimePath, System.Text.Encoding.UTF8));
+            return;
+        }
         string text = File.Exists(changelogPath)
             ? File.ReadAllText(changelogPath, System.Text.Encoding.UTF8)
             : Loc.T("CHANGELOG.md not found next to the launcher.\n\n" +
