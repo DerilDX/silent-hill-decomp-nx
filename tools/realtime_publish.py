@@ -14,7 +14,8 @@ The release holds:
   realtime.json            index of the newest KEEP builds, newest first; each
                            entry is a zip-mode manifest (zip_url plus per-file
                            path/sha256) in the launcher's format
-  CHANGELOG_REALTIME.md    every build's commit subjects, newest first (cumulative)
+  CHANGELOG_REALTIME.md    every commit since the last official release, grouped
+                           by day, newest first (rebuilt from git each publish)
   SHPC-linux-x64.tar.gz /
   SHPC-macos-arm64.zip     newest Linux/macOS CI archives (attached by those
                            workflows, left alone here)
@@ -45,7 +46,6 @@ INDEX_NAME = "realtime.json"
 CHANGELOG_NAME = "CHANGELOG_REALTIME.md"
 LAUNCHER_NAME = "SilentHillPC_Launcher.exe"
 FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos-arm64.zip"}
-CHANGELOG_MARKER = "<!-- realtime-builds-below -->"
 
 # Never carried: the official changelog belongs to the scripted stream and
 # config.cfg comes from source. The launcher is carried into the zip for direct
@@ -147,7 +147,7 @@ def newest_official(nightly):
 
 def carry_files(nightly, staged_paths, out_dir):
     """Copies the official release's files that CI does not stage into out_dir.
-    Returns (official_tag, {path: local_file})."""
+    Returns (official_tag, official_git_commit, {path: local_file})."""
     rel = newest_official(nightly)
     if rel is None:
         raise RuntimeError(f"no official release found in {nightly} to carry runtime files from")
@@ -184,7 +184,7 @@ def carry_files(nightly, staged_paths, out_dir):
     for f in wanted:
         if sha256_of(local[f["path"]]) != f["sha256"].lower():
             raise RuntimeError(f"carried {f['path']} does not match {tag}'s manifest hash")
-    return tag, local
+    return tag, manifest.get("git_commit"), local
 
 
 # -- changelog -----------------------------------------------------------------
@@ -201,17 +201,33 @@ def commit_subjects(prev_commit, commit):
     return [out.split("\t", 1)] if "\t" in out else [[commit[:9], ""]]
 
 
-def build_changelog(prev_text, version, date, commit, subjects, repo):
-    header = ("# Silent Hill PC Port - Realtime builds\n\n"
-              "One section per automatic build, newest first. Each line is a commit that landed in that build.\n\n"
-              + CHANGELOG_MARKER + "\n")
-    section = [f"\n## {version} ({date} UTC, `{commit[:9]}`)\n"]
-    for short, subj in subjects:
-        section.append(f"- {subj} ([{short}](https://github.com/{repo}/commit/{short}))")
-    body = ""
-    if prev_text and CHANGELOG_MARKER in prev_text:
-        body = prev_text.split(CHANGELOG_MARKER, 1)[1].lstrip("\n")
-    return header + "\n".join(section) + "\n" + ("\n" + body if body else "")
+def build_changelog(official_tag, official_commit, commit, repo):
+    """Every commit since the official release, grouped by the day it was made,
+    newest first. Rebuilt from git on each publish, so it always covers exactly
+    what a realtime build has on top of the release, and starts over when the
+    next release ships."""
+    lines = ["# Silent Hill PC Port - Realtime builds", ""]
+    rng = commit
+    if official_commit and run(["git", "merge-base", "--is-ancestor", official_commit, commit],
+                               check=False).returncode == 0:
+        rng = f"{official_commit}..{commit}"
+        lines.append(f"Everything that has landed since the last official release, **{official_tag}**, "
+                     "newest first. Each line is one change.")
+    else:
+        lines.append("Recent changes, newest first. Each line is one change.")
+    out = run(["git", "log", "--no-merges", "--date=format:%Y-%m-%d",
+               "--format=%cd%x09%h%x09%s", rng]).stdout
+    # Grouped explicitly: git log's order can interleave days (a commit written
+    # earlier and landed later), which would otherwise repeat a heading.
+    days = {}
+    for row in out.splitlines()[:None if official_commit else 200]:
+        parts = row.split("\t", 2)
+        if len(parts) == 3:
+            d, short, subj = parts
+            days.setdefault(d, []).append(f"- {subj} ([{short}](https://github.com/{repo}/commit/{short}))")
+    for d in sorted(days, reverse=True):
+        lines += ["", f"## {d}", ""] + days[d]
+    return "\n".join(lines) + "\n"
 
 
 # -- zip ---------------------------------------------------------------------------
@@ -244,16 +260,11 @@ def main():
     assets = release_assets(a.repo, a.tag)
 
     index = {"schema": 2, "stream": "realtime", "builds": []}
-    prev_changelog = None
     if assets is not None:
         p = download_asset(a.repo, a.tag, INDEX_NAME, work) if INDEX_NAME in assets else None
         if p:
             with open(p, encoding="utf-8") as f:
                 index = json.load(f)
-        p = download_asset(a.repo, a.tag, CHANGELOG_NAME, work) if CHANGELOG_NAME in assets else None
-        if p:
-            with open(p, encoding="utf-8") as f:
-                prev_changelog = f.read()
     # Schema-1 builds (one asset per file) are dropped rather than carried along,
     # but still count toward the day's build numbers so none is ever reused.
     used_versions = [b["version"] for b in index.get("builds", [])]
@@ -274,7 +285,7 @@ def main():
         raise RuntimeError(f"SilentHillPC.exe missing from {a.stage}")
     files.pop(CHANGELOG_NAME, None)
 
-    carry_source, carried = carry_files(a.nightly, set(files), os.path.join(work, "carry"))
+    carry_source, official_commit, carried = carry_files(a.nightly, set(files), os.path.join(work, "carry"))
     files.update(carried)
     if not any(p.startswith("avcodec-") for p in files):
         log("WARNING: no avcodec-*.dll in the file set; the ffmpeg FMV fallback will be unavailable.")
@@ -289,7 +300,7 @@ def main():
     subjects = commit_subjects(prev_build["commit"] if prev_build else None, a.commit)
     cl_path = os.path.join(work, CHANGELOG_NAME)
     with open(cl_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(build_changelog(prev_changelog, version, date, a.commit, subjects, a.repo))
+        f.write(build_changelog(carry_source, official_commit, a.commit, a.repo))
     files[CHANGELOG_NAME] = cl_path
 
     zip_name = f"SHPC_{build_id}.zip"
