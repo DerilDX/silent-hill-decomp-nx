@@ -885,8 +885,8 @@ static void MainMenu_MainTextDraw(void) // 0x8003B568
         }
         id = s_MainMenu_Order[i];
 
-        /* Translated entries have different widths — recentre from the
-         * actual string ('[' is 6px wide); untranslated keeps the constant. */
+        /* Translated entries and patch-specific selection markers can have
+         * different widths; untranslated retail rows keep their constants. */
         {
             const char* tr   = Pc_LangMenuText(MAIN_MENU_ENTRY_STRINGS[id]);
             /* STR_OFFSETS_X holds hand-measured centres for the retail rows, so
@@ -895,7 +895,8 @@ static void MainMenu_MainTextDraw(void) // 0x8003B568
              * them from the measured width in every language, English included. */
             s32         offX = (tr == MAIN_MENU_ENTRY_STRINGS[id] && id < MainMenuEntry_Achievements)
                                    ? STR_OFFSETS_X[id]
-                                   : ((Pc_LangMenuTextWidth(tr) + 6) >> 1);
+                                   : ((Pc_LangMenuTextWidth(tr) +
+                                       Pc_LangMenuTextWidth(Pc_LangMenuText("["))) >> 1);
             Gfx_StringSetPosition(COLUMN_POS_X - offX, rowY + (slot * MAINMENU_ROW_PITCH));
         }
         Gfx_StringSetColor(StringColorId_White);
@@ -982,7 +983,8 @@ static void MainMenu_DifficultyTextDraw(s32 idx) // 0x8003B678
             const char* tr   = Pc_LangMenuText(DIFFICULTY_MENU_ENTRY_STRINGS[i]);
             s32         offX = (tr == DIFFICULTY_MENU_ENTRY_STRINGS[i])
                                    ? STR_OFFSETS_X[i]
-                                   : ((Pc_LangMenuTextWidth(tr) + 6) >> 1);
+                                   : ((Pc_LangMenuTextWidth(tr) +
+                                       Pc_LangMenuTextWidth(Pc_LangMenuText("["))) >> 1);
             Gfx_StringSetPosition(COLUMN_POS_X - offX, COLUMN_POS_Y + (i * STR_OFFSET_Y));
         }
 #else
