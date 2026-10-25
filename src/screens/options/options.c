@@ -550,7 +550,7 @@ enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
        QO_X_TPSRESTX, QO_X_TPSRESTY, QO_X_TPSAIMX, QO_X_TPSAIMY,
        QO_X_OTSRESTX, QO_X_OTSRESTY, QO_X_OTSAIMX, QO_X_OTSAIMY,
        QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE,
-       QO_X_LINEGAP };
+       QO_X_LINEGAP, QO_X_CHARALIGHT };
 
 /* display_aspect = crt puts the picture on (4:3 x trim), so one framebuffer
  * pixel lands on screen this many times wider than tall at trim 1.0. It is the
@@ -639,6 +639,8 @@ const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz)
         return Pc_LangQuickMenu(g_PcConfig.dreamBlur ? "On" : "Off");
     case QO_X_DPADMOVE:
         return Pc_LangQuickMenu(g_PcConfig.disableDpadMovement ? "On" : "Off");
+    case QO_X_CHARALIGHT:
+        return Pc_LangQuick(g_PcConfig.charaPerPixelLight ? "Per Pixel" : "Per Vertex");
     case QO_X_LINEGAP: {
         int i = PcOpt_LineGapIndex();
         return (i == 0) ? Pc_LangQuickMenu("Off") : Pc_LangQuick(QO_LINEGAP_LBL[i]);
@@ -1088,6 +1090,12 @@ void PcOpt_QuickExtraAdjust(int which, int dir)
         g_PcConfig.dreamBlur = !g_PcConfig.dreamBlur;
         g_cfg_dreamFeedback  = g_PcConfig.dreamBlur;
         PcConfig_SaveKeyValue("dream_blur", g_PcConfig.dreamBlur ? "1" : "0");
+        Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+        break;
+    /* Read by the skinned-character draw each frame, so it applies live. */
+    case QO_X_CHARALIGHT:
+        g_PcConfig.charaPerPixelLight = !g_PcConfig.charaPerPixelLight;
+        PcConfig_SaveKeyValue("chara_per_pixel_light", g_PcConfig.charaPerPixelLight ? "1" : "0");
         Sd_PlaySfx(Sfx_MenuMove, 0, 64);
         break;
     /* Read every frame by the gameplay gate in game_main.c, so it applies live. */
