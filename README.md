@@ -228,14 +228,6 @@ A controller drives the free camera too: left stick moves, right stick looks, R1
 
 With the free camera **off**, the numpad keys nudge the normal game camera, a live camera-tuning aid. (Camera *styles*, meaning third-person, OTS, and first-person, are cycled with the Change Camera key, `F9` by default. The **F10 quick-options overlay** exposes most of the graphics/debug toggles below without memorizing keys.)
 
-## Support
-
-I'm on Discord as **@KushAstronaut**, and the project has a Discord server: https://discord.gg/JWuNzVsQbr
-
-<br/>
-
-Silent Hill is © Konami and this does not contain any game assets. You must provide a legally obtained dump of Silent Hill for PSX to use.
-
 ## Licensing at a glance
 
 **The PC port is GPL-3.0.** That covers `pc_port/` (engine, launcher, tooling, docs) and every `SH_PC_PORT` addition to the decompiled sources. Files carrying an `SPDX-License-Identifier: GPL-3.0-or-later` header are the ones being licensed here.
@@ -245,3 +237,13 @@ Silent Hill is © Konami and this does not contain any game assets. You must pro
 **No game data is included.** Silent Hill is © Konami. A legally obtained copy of the PlayStation disc is required to play; nothing from it ships here or in any release.
 
 Full breakdown, including bundled third-party components: [COPYRIGHT.md](COPYRIGHT.md).
+
+## Support
+
+I'm on Discord as **@KushAstronaut**, and the project has a Discord server: https://discord.gg/JWuNzVsQbr
+
+This is a 100% free project funded from my own pocket. If you'd like to support me, it is greatly appreciated, and you can do so on Ko-fi: [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F3K8V3B)
+
+<br/>
+
+Silent Hill is © Konami and this does not contain any game assets. You must provide a legally obtained dump of Silent Hill for PSX to use.
