@@ -27,6 +27,9 @@ static void switch_dbg(const char* fmt, ...) { (void)fmt; }
 #include "lang_text.h"     /* Pc_LangMenuText — port-written menu translations. */
 #include "pc_kanji.h"      /* NTSC-J SJIS glyph atlas. */
 #include "main/fileinfo.h" /* g_GameRegion */
+#include "pc_config.h"     /* g_PcConfig.textSize */
+
+#include <string.h>
 
 /* Retail PAL renders TEN map-message lines where NTSC-U/J render nine
  * (g_PcMapMsgLineMax, font_region.h); identical to FONT_12X16_LINE_COUNT_MAX on
@@ -48,6 +51,103 @@ static s32         s_PageNext; /* where the next page starts; 0 = none pending *
  * re-sets the colour to white every frame, so both have to be carried over. */
 static s16         s_PageColorId;
 static s32         s_PageAlign;
+
+/** Text index 2D layer.
+ * If modifying `Gfx_StringSetPosition`, when setting it to
+ * a value lower than 6, text will not be affected by the fade effect.
+ */
+static s32 g_Strings2dLayerIdx = 6;
+
+/* Text Size (g_PcConfig.textSize) for the message being drawn: Q12 factor and
+ * the 240-line Y it grows from. 1.0 leaves every glyph on the original path. */
+static s32         s_MsgScale = Q12(1.0f);
+static s32         s_MsgAnchorY;
+
+/* One scaled message glyph. The layout is still computed at 1x; each glyph is
+ * then mapped about (0, s_MsgAnchorY), which scales its size, the advance and
+ * the line spacing together. A SPRT draws texels 1:1 and cannot be resized, so
+ * the low-res path draws a POLY_FT4 as well, from the same packet cursor its
+ * SPRTs would have used. Its UVs match the high-res FT4 the game already emits. */
+static void Pc_MsgGlyphQuad(GsOT* ot, PACKET** lowResPacket, s32 x, s32 y,
+                            u32 u, u32 v, u32 clut, u32 page, u32 color)
+{
+    bool      hiRes = g_SysWork.enableHighResGlyphs;
+    POLY_FT4* poly  = (POLY_FT4*)(hiRes ? GsOUT_PACKET_P : *lowResPacket);
+    s32       yMul  = hiRes ? 2 : 1;
+    s32       ay    = s_MsgAnchorY * yMul;
+    s32       x0    = (x * s_MsgScale) >> 12;
+    s32       y0    = ay + (((y * yMul) - ay) * s_MsgScale >> 12);
+    s32       w     = (FONT_12X16_GLYPH_SIZE_X * s_MsgScale) >> 12;
+    s32       h     = ((hiRes ? g_FontLayout->hiResGlyphBottom : 15) * s_MsgScale) >> 12;
+
+    setPolyFT4(poly);
+    setRGB0(poly, (s8)color, (s8)(color >> 8), (s8)(color >> 16));
+    setXY4(poly, x0, y0, x0, y0 + h, x0 + w, y0, x0 + w, y0 + h);
+
+    *((u32*)&poly->u0) = u + (v << 8) + (clut << 16);
+    *((u32*)&poly->u1) = u + (page << 16) + ((v + 15) << 8);
+    *((u16*)&poly->u2) = (u16)(u + FONT_12X16_GLYPH_SIZE_X + (v << 8));
+    *((u16*)&poly->u3) = (u16)(u + FONT_12X16_GLYPH_SIZE_X + ((v + 15) << 8));
+
+    addPrim(ot, poly);
+    if (hiRes)
+        GsOUT_PACKET_P = (PACKET*)poly + sizeof(POLY_FT4);
+    else
+        *lowResPacket = (PACKET*)poly + sizeof(POLY_FT4);
+}
+
+/* DISABLED, and it must stay disabled until the exemption can name primitives
+ * rather than a bucket. A scaled glyph is a POLY_FT4 (a SPRT draws texels 1:1
+ * and cannot be resized) and the renderer's rule is that a POLY on a world
+ * frame IS world geometry, so enlarged text was filtered like a wall. Naming
+ * the strings bucket fixed that -- but g_Strings2dLayerIdx is bucket 6 of
+ * g_OtTags0, the SAME ordering table the world draws into, so every tree and
+ * snow billboard that sorted into bucket 6 was exempted along with the text
+ * and drawn as screen-space 2D. Stretched diamond billboards in map0_s00.
+ * Worse, the value persists once set, so one scaled message poisoned every
+ * later frame. Blurry large text is the lesser fault by far. */
+static void Pc_MsgMarkUiBucket(void)
+{
+    extern int g_PsxUi2dBucket;
+
+    g_PsxUi2dBucket = -1;
+}
+
+/* Pick the scale for a message block and where it grows from: boxes at the
+ * bottom of the screen grow upward from their last line, the rest downward
+ * from their first. Shrunk as needed so the widest line and the whole block
+ * stay on screen. Lines are centred on x = 0 unless an inset (~T) starts them
+ * at -120, which is the extent that has to fit then. */
+static void Pc_MsgScaleSetup(s32 blockTop, s32 lineCount, s32 longestLineWidth, u8 positionIdx, bool inset)
+{
+    s32 scale   = (s32)((g_PcConfig.textSize * 4096.0f) / 100.0f);
+    s32 height  = lineCount * FONT_12X16_GLYPH_SIZE_Y;
+    int fromBot = (positionIdx == 1 || positionIdx == 3 || positionIdx == 4);
+    s32 halfW   = longestLineWidth >> 1;
+    s32 room;
+
+    if (inset)
+        halfW = (longestLineWidth - 120 > 120) ? (longestLineWidth - 120) : 120;
+
+    s_MsgAnchorY = fromBot ? (blockTop + height) : blockTop;
+
+    if (scale <= Q12(1.0f) || lineCount <= 0)
+    {
+        s_MsgScale = Q12(1.0f);
+        Pc_MsgMarkUiBucket();
+        return;
+    }
+
+    if (halfW > 0 && ((s64)halfW * scale >> 12) > 152)
+        scale = (s32)(((s64)152 << 12) / halfW);
+
+    room = fromBot ? (s_MsgAnchorY + 116) : (116 - s_MsgAnchorY);
+    if (height > 0 && ((s64)height * scale >> 12) > room)
+        scale = (s32)(((s64)room << 12) / height);
+
+    s_MsgScale = (scale > Q12(1.0f)) ? scale : Q12(1.0f);
+    Pc_MsgMarkUiBucket();
+}
 
 void Pc_MapMsgPageReset(void)
 {
@@ -130,11 +230,6 @@ static s16 g_StringColorId = StringColorId_White;
 
 // 2 bytes of padding.
 
-/** Text index 2D layer.
- * If modifying `Gfx_StringSetPosition`, when setting it to
- * a value lower than 6, text will not be affected by the fade effect.
- */
-static s32 g_Strings2dLayerIdx = 6;
 
 
 // ========================================
@@ -181,6 +276,61 @@ void Gfx_StringSetPosition(s32 x, s32 y) // 0x8004A87C
     #undef OFFSET_Y
 }
 
+#ifdef SH_PC_PORT
+/* String space, as g_StringPosition; empty when x1 <= x0. */
+static s32 s_PcClipX0;
+static s32 s_PcClipX1;
+
+void Gfx_PcStringSetClipX(s32 x0, s32 x1)
+{
+    s_PcClipX0 = x0 - SCREEN_POSITION_X(50.0f);
+    s_PcClipX1 = x1 - SCREEN_POSITION_X(50.0f);
+}
+
+/* False when the 12 px glyph cell at posX lies wholly outside the window. */
+static bool Pc_GlyphClip(s32 posX, s32* cutL, s32* cutR)
+{
+    *cutL = 0;
+    *cutR = 0;
+    if (s_PcClipX1 <= s_PcClipX0)
+    {
+        return true;
+    }
+    if (posX + FONT_12X16_GLYPH_SIZE_X <= s_PcClipX0 || posX >= s_PcClipX1)
+    {
+        return false;
+    }
+    if (posX < s_PcClipX0)
+    {
+        *cutL = s_PcClipX0 - posX;
+    }
+    if (posX + FONT_12X16_GLYPH_SIZE_X > s_PcClipX1)
+    {
+        *cutR = posX + FONT_12X16_GLYPH_SIZE_X - s_PcClipX1;
+    }
+    return true;
+}
+
+static void Pc_GlyphClipPoly(POLY_FT4* poly, s32 cutL, s32 cutR)
+{
+    poly->x0 += cutL;
+    poly->x1 += cutL;
+    poly->u0 += cutL;
+    poly->u1 += cutL;
+    poly->x2 -= cutR;
+    poly->x3 -= cutR;
+    poly->u2 -= cutR;
+    poly->u3 -= cutR;
+}
+
+static void Pc_GlyphClipSprt(SPRT* sprt, s32 cutL, s32 cutR)
+{
+    sprt->x0 += cutL;
+    sprt->u0 += cutL;
+    sprt->w  -= cutL + cutR;
+}
+#endif
+
 void Gfx_Strings2dLayerIdxSet(s32 idx) // 0x8004A8C0
 {
     g_Strings2dLayerIdx = idx;
@@ -225,13 +375,17 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
     DR_TPAGE* tPage;
     POLY_FT4* glyphPoly;
     SPRT*     glyphSprt;
+#ifdef SH_PC_PORT
+    s32       cutL;
+    s32       cutR;
+#endif
 
     // Create local argument copies.
 #ifdef SH_PC_PORT
     /* Menu-translation chokepoint: every menu/UI string funnels through this
      * function, so a single exact-match lookup localizes them all (misses —
      * item text, digits, US discs — return the input untouched). */
-    strCpy  = (u8*)Pc_LangMenuText(str);
+    strCpy  = g_PcLangMenuVerbatim ? (u8*)str : (u8*)Pc_LangMenuText(str);
 #else
     strCpy  = str;
 #endif
@@ -337,7 +491,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
 #ifdef SH_PC_PORT
         /* NTSC-J: SJIS pairs (the select-prompt options like Yes/No route the
          * JP map messages through this drawer) — one 12x16 kanji atlas cell. */
-        else if (g_GameRegion == Region_JPN && Pc_KanjiIsLead(charCode) && strCpy[1] != '\0')
+        else if (Pc_LangSjisActive() && Pc_KanjiIsLead(charCode) && strCpy[1] != '\0')
         {
             unsigned int   kPage;
             int            kU, kV;
@@ -345,7 +499,8 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
 
             sizeCpy--;
 
-            if (Pc_KanjiCell((u16)(((u32)charCode << 8) | strCpy[1]), &kPage, &kU, &kV, &kClut))
+            if (Pc_GlyphClip(posX, &cutL, &cutR) &&
+                Pc_KanjiCell((u16)(((u32)charCode << 8) | strCpy[1]), &kPage, &kU, &kV, &kClut))
             {
                 if (g_SysWork.enableHighResGlyphs)
                 {
@@ -363,6 +518,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
                     *((u32*)&glyphPoly->u1) = (u32)kU + (kPage << 16) + (((u32)kV + 15) << 8);
                     *((u16*)&glyphPoly->u2) = (u16)(kU + FONT_12X16_GLYPH_SIZE_X + (kV << 8));
                     *((u16*)&glyphPoly->u3) = (u16)(kU + FONT_12X16_GLYPH_SIZE_X + ((kV + 15) << 8));
+                    Pc_GlyphClipPoly(glyphPoly, cutL, cutR);
 
                     addPrim(ot, glyphPoly);
                     GsOUT_PACKET_P = (u8*)glyphPoly + sizeof(POLY_FT4);
@@ -378,6 +534,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
                     *((u32*)&glyphSprt->r0)   = glyphColor;
                     *((u32*)(&glyphSprt->x0)) = posXCpy + (posY << 16);
                     *((u32*)&glyphSprt->u0)   = (u32)kU + ((u32)kV << 8) + ((u32)kClut << 16);
+                    Pc_GlyphClipSprt(glyphSprt, cutL, cutR);
 
                     packet += sizeof(SPRT);
 
@@ -397,7 +554,13 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
          * With the USA layout the emitted prim words are bit-identical to the
          * hardcoded originals kept in the #else. Bytes >= 0x80 are the PAL
          * accents (up to 2 emissions: combining mark + base letter). */
-        else if ((charCode >= GLYPH_TABLE_ASCII_OFFSET && charCode <= 'z') || charCode >= 0x80)
+        /* No 'z' upper bound: 'z' is the last cell of the 84-glyph US strip, but
+         * the 126-cell EUR atlas keeps going — bytes 0x7B-0x7F are its cells
+         * 84-88, which a Cyrillic PAL repaint uses for Ъ Ы Ь Э Ю. Font_MapChar
+         * range-checks against the active layout's glyphCount, so on the US
+         * atlas those bytes still emit nothing and US/NTSC-J rendering is
+         * unchanged; no retail or port string contains 0x7B-0x7F either way. */
+        else if (charCode >= GLYPH_TABLE_ASCII_OFFSET)
         {
             s_GlyphEmit emits[2];
             s32         emitCount;
@@ -421,6 +584,12 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
                 page       = g_FontLayout->tpageBase + (row / g_FontLayout->rowsPerPage);
                 u0         = (glyphIdx % FONT_12X16_ATLAS_COLUMN_COUNT) * FONT_12X16_GLYPH_SIZE_X;
 
+                if (!Pc_GlyphClip(posX, &cutL, &cutR))
+                {
+                    posX += glyphWidth;
+                    continue;
+                }
+
                 // Draw glyph sprite.
                 if (g_SysWork.enableHighResGlyphs)
                 {
@@ -438,6 +607,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
                     *((u32*)&glyphPoly->u1) = u0 + (page << 16) + ((vTop + 15) << 8);              // `u1`, `v1`, `page`.
                     *((u16*)&glyphPoly->u2) = (u16)(u0 + FONT_12X16_GLYPH_SIZE_X + (vTop << 8));   // `u2`, `v2`.
                     *((u16*)&glyphPoly->u3) = (u16)(u0 + FONT_12X16_GLYPH_SIZE_X + ((vTop + 15) << 8)); // `u3`, `v3`.
+                    Pc_GlyphClipPoly(glyphPoly, cutL, cutR);
 
                     addPrim(ot, glyphPoly);
                     GsOUT_PACKET_P = (u8*)glyphPoly + sizeof(POLY_FT4);
@@ -453,6 +623,7 @@ bool Gfx_StringDraw(char* str, s32 strLength) // 0x8004A8E8
                     *((u32*)&glyphSprt->r0)   = glyphColor;
                     *((u32*)(&glyphSprt->x0)) = posXCpy + (drawY << 16);
                     *((u32*)&glyphSprt->u0)   = u0 + (vTop << 8) + (g_FontLayout->packedClut << 16); // `u0`, `v0`, `clut`.
+                    Pc_GlyphClipSprt(glyphSprt, cutL, cutR);
 
                     packet += sizeof(SPRT);
 
@@ -699,7 +870,7 @@ s32 Gfx_MapMsg_CalculateWidths(s32 mapMsgIdx) // 0x8004ACF4
 
 #ifdef SH_PC_PORT
                 /* NTSC-J: an SJIS pair is one fixed-width kanji cell. */
-                if (g_GameRegion == Region_JPN && Pc_KanjiIsLead((u8)charCode) && mapMsg[1] != '\0')
+                if (Pc_LangSjisActive() && Pc_KanjiIsLead((u8)charCode) && mapMsg[1] != '\0')
                 {
                     g_MapMsg_Widths[g_MapMsg_WidthIdx - 1] += FONT_12X16_GLYPH_SIZE_X;
                     mapMsg += 2;
@@ -890,6 +1061,13 @@ s32 Gfx_MapMsg_StringDraw(char* mapMsg, s32 strLength) // 0x8004AF18
             g_StringPositionX1 = -120;
             glyphPosX          = -120;
         }
+    }
+
+    {
+        char tabCode[3] = { MAP_MSG_CODE_MARKER, MAP_MSG_CODE_TAB, '\0' };
+
+        Pc_MsgScaleSetup(g_StringPosition.vy, g_MapMsg_WidthIdx, longestLineWidth, (u8)D_800C38B0.positionIdx,
+                         result == MapMsgCode_SetByT || strstr(mapMsg, tabCode) != NULL);
     }
 #endif
 
@@ -1120,7 +1298,7 @@ s32 Gfx_MapMsg_StringDraw(char* mapMsg, s32 strLength) // 0x8004AF18
             /* NTSC-J: an SJIS pair draws one 12x16 kanji cell from the PC
              * atlas — same SPRT/FT4 shape as the Latin glyphs, different
              * uv/page/clut. Absent glyphs advance silently. */
-            if (g_GameRegion == Region_JPN && Pc_KanjiIsLead((u8)charCode) && ((u8*)mapMsg)[1] != '\0')
+            if (Pc_LangSjisActive() && Pc_KanjiIsLead((u8)charCode) && ((u8*)mapMsg)[1] != '\0')
             {
                 unsigned int   kPage;
                 int            kU, kV;
@@ -1129,7 +1307,12 @@ s32 Gfx_MapMsg_StringDraw(char* mapMsg, s32 strLength) // 0x8004AF18
                 if (Pc_KanjiCell((u16)(((u32)(u8)charCode << 8) | ((u8*)mapMsg)[1]),
                                  &kPage, &kU, &kV, &kClut))
                 {
-                    if (g_SysWork.enableHighResGlyphs)
+                    if (s_MsgScale != Q12(1.0f))
+                    {
+                        Pc_MsgGlyphQuad(ot, &packet, glyphPosX, glyphPosY,
+                                        (u32)kU, (u32)kV, (u32)kClut, kPage, color);
+                    }
+                    else if (g_SysWork.enableHighResGlyphs)
                     {
                         glyphPoly = (POLY_FT4*)GsOUT_PACKET_P;
 
@@ -1216,7 +1399,12 @@ s32 Gfx_MapMsg_StringDraw(char* mapMsg, s32 strLength) // 0x8004AF18
                     page      = g_FontLayout->tpageBase + (row / g_FontLayout->rowsPerPage);
                     temp_a0   = (idx % FONT_12X16_ATLAS_COLUMN_COUNT) * FONT_12X16_GLYPH_SIZE_X;
 
-                    if (g_SysWork.enableHighResGlyphs)
+                    if (s_MsgScale != Q12(1.0f))
+                    {
+                        Pc_MsgGlyphQuad(ot, &packet, glyphPosX, drawY, (u32)temp_a0, (u32)vTop,
+                                        (u32)g_FontLayout->packedClut, page, color);
+                    }
+                    else if (g_SysWork.enableHighResGlyphs)
                     {
                         glyphPoly = (POLY_FT4*)GsOUT_PACKET_P;
 

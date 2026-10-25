@@ -19,8 +19,10 @@
 
 #include <PsyX/PsyX_public.h>
 #include <PsyX/PsyX_render.h>
+#include <PsyX/PsyX_globals.h> /* g_windowWidth/Height = the scene-target size */
 #include <PsyX/util/timer.h>
 #include <PsyX/common/glad.h>
+#include <PsyX/PsyX_backend.h>
 
 #include <psx/libgpu.h>
 #include <psx/libetc.h>
@@ -352,12 +354,9 @@ static GLuint s_fmvVAO = 0;
 static GLuint s_fmvVBO = 0;
 static GLuint s_fmvProgram = 0;
 
+/* No #version here: PsyX_Shader_Preamble prepends the one the live context
+ * takes, so this body also builds on the ANGLE-backed ES 3.0 backends. */
 static const char* s_fmvVertSrc =
-#if defined(__SWITCH__)
-    "#version 300 es\n"
-#else
-    "#version 140\n"
-#endif
     "in vec2 a_pos;\n"
     "in vec2 a_uv;\n"
     "out vec2 v_uv;\n"
@@ -367,12 +366,6 @@ static const char* s_fmvVertSrc =
     "}\n";
 
 static const char* s_fmvFragSrc =
-#if defined(__SWITCH__)
-    "#version 300 es\n"
-#else
-    "#version 140\n"
-#endif
-    "precision highp float;\n"
     "in vec2 v_uv;\n"
     "out vec4 fragColor;\n"
     "uniform sampler2D s_texture;\n"
@@ -386,7 +379,8 @@ static void InitBlitResources(void)
         return;
 
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &s_fmvVertSrc, NULL);
+    { const char* src[2] = { PsyX_Shader_Preamble(0, PSYX_GLSL_MODERN), s_fmvVertSrc };
+      glShaderSource(vs, 2, src, NULL); }
     glCompileShader(vs);
     {
         GLint ok = 0;
@@ -399,7 +393,8 @@ static void InitBlitResources(void)
     }
 
     GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &s_fmvFragSrc, NULL);
+    { const char* src[2] = { PsyX_Shader_Preamble(1, PSYX_GLSL_MODERN), s_fmvFragSrc };
+      glShaderSource(fs, 2, src, NULL); }
     glCompileShader(fs);
     {
         GLint ok = 0;
@@ -468,6 +463,7 @@ static void RestoreGLState(const FmvGLState* s)
     if (s->blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     if (s->scissor_test) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
     glViewport(s->viewport[0], s->viewport[1], s->viewport[2], s->viewport[3]);
+    GR_InvalidateViewScissorCache();
     glClearColor(s->clear_color[0], s->clear_color[1], s->clear_color[2], s->clear_color[3]);
     glActiveTexture(s->active_texture);
     glBindTexture(GL_TEXTURE_2D, s->bound_texture);
@@ -483,6 +479,7 @@ static int s_fmvTexW = 0, s_fmvTexH = 0, s_fmvTexRgba = -1;
 /* Cover mode (fill the window, crop the overflow) for the PS1 boot splash —
  * a 4:3 video on a 16:9 screen letterboxed into bars looks dead. */
 static int s_fmvCoverMode = 0;
+extern "C" GLuint GR_ScreenFBO(void);
 
 static void DrawVideoFrameEx(const unsigned char* pixels, int image_w, int image_h, int rgba)
 {
@@ -502,7 +499,13 @@ static void DrawVideoFrameEx(const unsigned char* pixels, int image_w, int image
         }
     }
 
-    PsyX_GetScreenSize(&windowWidth, &windowHeight);
+    /* Size of the SCENE TARGET, not the OS window: in borderless the scene
+     * renders into an internal target at the chosen resolution and the present
+     * blit stretches it over the window. Sizing the viewport by the window
+     * put only the bottom-left render-size corner of it inside the target.
+     * These globals ARE the window size whenever no internal target exists. */
+    windowWidth  = g_windowWidth;
+    windowHeight = g_windowHeight;
 
     float video_aspect = (float)image_w / (float)image_h;
     float window_aspect = (float)windowWidth / (float)windowHeight;
@@ -546,6 +549,14 @@ static void DrawVideoFrameEx(const unsigned char* pixels, int image_w, int image
 
     FmvGLState saved;
     SaveGLState(&saved);
+
+    /* Draw into the SCENE target, not whatever happens to be bound. In
+     * borderless the scene renders into an internal target that is stretched
+     * over the whole window at present, and that blit would paint straight over
+     * a movie drawn to the window -- which is why FMVs went black as soon as the
+     * borderless resolution differed from the desktop. GR_ScreenFBO() is 0 in
+     * every other mode, so this is the same target it always used. */
+    glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
     glViewport(0, 0, windowWidth, windowHeight);
     glClearColor(0, 0, 0, 1);
@@ -594,7 +605,14 @@ static void DrawVideoFrameEx(const unsigned char* pixels, int image_w, int image
 
     RestoreGLState(&saved);
 
-    SDL_GL_SwapWindow(g_window);
+    /* FMV presents its own frames outside the normal render loop, but it must
+     * present through GR_SwapWindow like every other frame: that is where the
+     * internal target gets blitted onto the real window in borderless. The
+     * movie was drawn INTO that target above, so swapping the window directly
+     * showed only the stale black backbuffer — FMVs went dark exactly when the
+     * borderless resolution was below the desktop's. GR_SwapWindow also picks
+     * the right swap call for the backend (ANGLE never goes through SDL). */
+    GR_SwapWindow();
 }
 
 static void DrawVideoFrame(int image_w, int image_h)
@@ -892,6 +910,7 @@ typedef struct {
     int               isOpen;
     int32_t           lastSamples[2][2]; /* [channel][prev0=newer, prev1=older] */
     int               sectorsDecoded;
+    int               holdPaused;        /* device stays paused until the first frame is shown */
 } FmvAudioState;
 
 static FmvAudioState s_fmvAudio;
@@ -1066,13 +1085,17 @@ static void FmvAudio_OnSector(const uint8_t* sector, void* user)
             printf("[FMV] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
             return;
         }
-        SDL_PauseAudioDevice(st->dev, 0);
-        printf("[FMV] XA audio opened: requested=%dHz got=%dHz %s chan=%d\n",
-               sampleRate, got.freq, isStereo ? "stereo" : "mono",
-               (int)got.channels);
+        st->sampleRate = got.freq;
+        st->isStereo   = (got.channels == 2);
+        SDL_PauseAudioDevice(st->dev, st->holdPaused ? 1 : 0);
+        printf("[FMV] XA audio opened: %d Hz %s (coding=0x%02X)
+",
+               sampleRate, isStereo ? "stereo" : "mono", coding);
 #endif
+#if defined(__SWITCH__)
         st->sampleRate = sampleRate;
         st->isStereo   = isStereo;
+#endif
         st->isOpen     = 1;
     }
 
@@ -1461,11 +1484,51 @@ static int PlayFromBin(int table_idx, int max_frames)
     static uint16_t bs[STR_FRAME_BS_MAX_HALFWORDS];
     mdec_ctx_t ctx;
     int ctx_initialized = 0;
-    uint8_t* rgb = NULL;
-    int rgb_w = 0, rgb_h = 0;
 
     str_frame_info_t info;
     size_t bs_halfwords = 0;
+
+    /* Decoded frames are kept a few ahead of the presentation clock. The
+     * STR interleaves its XA sectors with the video, so demuxing ahead is
+     * what fills the SDL queue ahead: with one sector per 1/15 s tick the
+     * queue sat at 0-1 sectors while the device pulled 4096-sample
+     * callbacks, and every movie opened with underrun crackle. The device
+     * is held paused until the first frame is shown so audio time zero
+     * still lines up with video time zero. */
+    enum { FMV_PREROLL_FRAMES = 4 };
+    struct FmvFrameSlot { uint8_t* rgb; int w; int h; };
+    FmvFrameSlot ring[FMV_PREROLL_FRAMES] = {};
+    int ringHead = 0, ringCount = 0, eof = 0;
+    s_fmvAudio.holdPaused = 1;
+
+    auto demuxOne = [&]() -> int {
+        if (eof || ringCount >= FMV_PREROLL_FRAMES) return 0;
+        int r = str_read_frame(&stream, bs, &info, &bs_halfwords);
+        if (r <= 0) { eof = 1; return 0; } /* EOF or demux error */
+
+        FmvFrameSlot& slot = ring[(ringHead + ringCount) % FMV_PREROLL_FRAMES];
+        if (slot.w != info.width || slot.h != info.height) {
+            ::free(slot.rgb);
+            slot.rgb = (uint8_t*)calloc((size_t)info.width * info.height * 3u, 1);
+            slot.w = info.width;
+            slot.h = info.height;
+        }
+        if (!ctx_initialized) {
+            mdec_init(&ctx, info.width, info.height);
+            ctx_initialized = 1;
+        }
+        if (!slot.rgb) { eof = 1; return 0; }
+
+        int mb = mdec_decode_frame(&ctx, (const uint8_t*)bs, bs_halfwords * 2u, slot.rgb);
+        if (mb < 0) {
+            /* Decode failure — emit a blank frame so timing still ticks. */
+            memset(slot.rgb, 0, (size_t)info.width * info.height * 3u);
+        }
+        ringCount++;
+        return 1;
+    };
+
+    while (demuxOne()) {}
 
     timerCtx_t fmvTimer;
     Util_InitHPCTimer(&fmvTimer);
@@ -1509,41 +1572,27 @@ static int PlayFromBin(int table_idx, int max_frames)
             continue;
         }
 
-        int r = str_read_frame(&stream, bs, &info, &bs_halfwords);
-        if (r <= 0) break; /* EOF or demux error */
+        if (ringCount == 0 && !demuxOne()) break; /* EOF or demux error */
 
         if (max_frames > 0 && done_frames >= max_frames) break;
 
-        /* (Re)allocate RGB buffer if dimensions changed (shouldn't for a
-         * single FMV, but cheap to be defensive). */
-        if (info.width != rgb_w || info.height != rgb_h) {
-            ::free(rgb);
-            rgb = (uint8_t*)calloc((size_t)info.width * info.height * 3u, 1);
-            rgb_w = info.width;
-            rgb_h = info.height;
-            if (!ctx_initialized) {
-                mdec_init(&ctx, info.width, info.height);
-                ctx_initialized = 1;
-            }
-        }
-        if (!rgb) break;
-
-        int mb = mdec_decode_frame(&ctx,
-                                   (const uint8_t*)bs,
-                                   bs_halfwords * 2u,
-                                   rgb);
-        if (mb < 0) {
-            /* Decode failure — emit a blank frame so timing still ticks. */
-            memset(rgb, 0, (size_t)info.width * info.height * 3u);
-        }
+        FmvFrameSlot& slot = ring[ringHead];
+        ringHead = (ringHead + 1) % FMV_PREROLL_FRAMES;
+        ringCount--;
 
         /* Move into the persistent decode buffer for DrawVideoFrame, then
          * blit. We copy because s_decodeBuffer is what DrawVideoFrame
          * uploads to GL — keeping that contract stable. */
-        size_t bytes = (size_t)info.width * info.height * 3u;
+        size_t bytes = (size_t)slot.w * slot.h * 3u;
         if (EnsureDecodeBuffer(bytes) == 0) {
-            memcpy(s_decodeBuffer, rgb, bytes);
-            DrawVideoFrame(info.width, info.height);
+            memcpy(s_decodeBuffer, slot.rgb, bytes);
+            DrawVideoFrame(slot.w, slot.h);
+        }
+
+        if (done_frames == 0) {
+            s_fmvAudio.holdPaused = 0;
+            if (s_fmvAudio.dev)
+                SDL_PauseAudioDevice(s_fmvAudio.dev, 0);
         }
 
         /* PSX STR videos target 15fps (every other NTSC frame). */
@@ -1551,9 +1600,23 @@ static int PlayFromBin(int table_idx, int max_frames)
         done_frames++;
 
         if (want_quit) break;
+
+        demuxOne();
     }
 
-    ::free(rgb);
+    /* PSX movie_main cuts the CD audio when the movie ends (SsSetSerialVol
+     * 0), so the queued tail is dropped rather than left to bleed into the
+     * next scene. Closing also matters on its own: SDL2 caps open devices at
+     * 16, and leaving one open per movie made later movies open silent. */
+    if (s_fmvAudio.dev) {
+        SDL_PauseAudioDevice(s_fmvAudio.dev, 1);
+        SDL_ClearQueuedAudio(s_fmvAudio.dev);
+        SDL_CloseAudioDevice(s_fmvAudio.dev);
+        s_fmvAudio.dev    = 0;
+        s_fmvAudio.isOpen = 0;
+    }
+    for (int i = 0; i < FMV_PREROLL_FRAMES; i++)
+        ::free(ring[i].rgb);
     fclose(bin);
 
     /* Wait for skip keys to release before returning so the still-held key
@@ -2335,9 +2398,42 @@ static int PlayFromFFmpeg(const char* path)
         printf("[FMV] ffmpeg: cannot open '%s'\n", path);
         return -1;
     }
-    if (avformat_find_stream_info(fmt, NULL) < 0) {
-        printf("[FMV] ffmpeg: no stream info in '%s'\n", path);
-        goto cleanup;
+    /* Cap how far ffmpeg analyses before it will report the streams.
+     *
+     * These bound STREAM DISCOVERY only, so nothing here can shorten playback:
+     * once the streams are known the demuxer reads the whole file exactly as
+     * before, and the frame loop still ends on EOF rather than on any byte
+     * budget.
+     *
+     * The default analyzeduration is 5 s, sized for formats that genuinely
+     * have to be scanned (MPEG-TS and friends). Our containers are MP4 and
+     * AVI, whose headers already declare every codec parameter, so 2 s is
+     * generous and simply stops a badly muxed file from spending the whole
+     * budget before the first frame can appear.
+     *
+     * The retry is what makes this safe rather than merely likely-safe: if the
+     * tighter budget ever fails to identify the streams, the caps are lifted
+     * and the probe runs again exactly as it used to. The worst case is
+     * today's behaviour plus one cheap failed attempt. */
+    {
+        Uint32 probeStart = SDL_GetTicks();
+        int    rc;
+
+        av_opt_set_int(fmt, "probesize",       8 * 1024 * 1024, 0);
+        av_opt_set_int(fmt, "analyzeduration", 2 * 1000 * 1000, 0);
+
+        rc = avformat_find_stream_info(fmt, NULL);
+        if (rc < 0) {
+            printf("[FMV] ffmpeg: capped probe found no stream info, retrying uncapped\n");
+            av_opt_set_int(fmt, "probesize",       5 * 1000 * 1000, 0);
+            av_opt_set_int(fmt, "analyzeduration", 5 * 1000 * 1000, 0);
+            rc = avformat_find_stream_info(fmt, NULL);
+        }
+        if (rc < 0) {
+            printf("[FMV] ffmpeg: no stream info in '%s'\n", path);
+            goto cleanup;
+        }
+        printf("[FMV] ffmpeg: probe %u ms\n", (unsigned)(SDL_GetTicks() - probeStart));
     }
 
     vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);

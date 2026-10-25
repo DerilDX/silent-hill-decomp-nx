@@ -1567,7 +1567,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[1].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_ShotgunShells0))
         {
@@ -1575,7 +1579,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[2].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_ShotgunShells1))
         {
@@ -1591,7 +1599,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[4].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_HandgunBullets0))
         {
@@ -1599,7 +1611,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[5].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 0, 0, -1, 1) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_HandgunBullets1))
         {
@@ -1607,7 +1623,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 2, -1, 2) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[6].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 2, -1, 2) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_HandgunBullets2))
         {
@@ -1615,7 +1635,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[7].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_Ampoule1))
         {
@@ -1623,7 +1647,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 2, -1, 2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[8].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 2, -1, 2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_HealthDrink0))
         {
@@ -1639,7 +1667,11 @@ void Map_WorldObjectsUpdate(void) // 0x800DDA84
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 2, -1, 2)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[10].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 2, -1, 2))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M1S02_HealthDrink1))
         {

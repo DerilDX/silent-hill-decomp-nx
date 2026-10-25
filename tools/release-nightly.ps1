@@ -22,16 +22,34 @@
 # subjects since the previous release of the SAME stream) and PAUSE so it can be
 # hand-edited before anything is hashed/zipped/uploaded.
 #
+#   custom - a NAMED build for users to opt into (a modded or experimental
+#            build such as an open-world test): -Name "Open World Test". Always
+#            a zip release, published as a PRERELEASE on the `custom` branch
+#            with tag custom-<slug>-YYYY.MM.DD.N. The launcher lists it under
+#            Branch "Custom builds" by its name; it never counts as "latest"
+#            for anyone (the launcher orders by the version in beta-/v tags, a
+#            custom tag parses as 0, and GitHub's own latest skips prereleases),
+#            so a normal release afterwards is NOT needed. No CHANGELOG.md
+#            section is written and the cross-platform CI gate is skipped, since
+#            the build usually comes from a branch CI never built. The LAUNCHER
+#            is left out of a custom build unless -WithLauncher is passed: the
+#            launcher self-updates on version alone and never downgrades, so a
+#            build meant to be opt-in would otherwise hand its launcher to every
+#            tester and keep it there after they switch back. Pass -WithLauncher
+#            only when the launcher itself is what you are testing.
+#
 # Usage:
 #   .\tools\release-nightly.ps1 [-Mode zip|loose] [-DryRun] [-BuildDir path]
 #                               [-Notes string] [-NoPause] [-BetaBranch beta]
 #                               [-SkipCrossPlatform]
+#   .\tools\release-nightly.ps1 -Name "Open World Test" [-WithLauncher]
+#                               [-Notes string] [-DryRun]
 #
 # Linux + macOS builds are included BY DEFAULT and are VERIFIED BEFORE anything
 # is published: the release is NOT created until the build-linux.yml /
 # build-macos.yml CI runs for THIS EXACT commit have finished successfully on the
-# source repo. Their artifacts are attached as standalone zips, kept OUT of
-# version.json so the Windows launcher ignores them. Pass -SkipCrossPlatform for
+# source repo. Their artifacts are attached as standalone zips (plus the macOS
+# app as a .dmg), kept OUT of version.json so the Windows launcher ignores them. Pass -SkipCrossPlatform for
 # a deliberate Windows-only release.
 #
 # Cross-platform gate (runs BEFORE the release is created -- so a not-ready build
@@ -73,7 +91,14 @@ param(
     # cannot affect the launcher. Linux/macOS users download these zips by hand.
     # Pass -SkipCrossPlatform to publish a Windows-only release.
     [switch]$SkipCrossPlatform,
-    [string]$CrossPlatformBranch = "pc-port"
+    [string]$CrossPlatformBranch = "pc-port",
+    # Custom named build (see the header): the display name users pick in the
+    # launcher, e.g. "Open World Test". Implies zip mode on the custom branch.
+    [string]$Name         = "",
+    [string]$CustomBranch = "custom",
+    # Ship the launcher inside a CUSTOM build (it always ships in beta/loose).
+    # Off by default: see the -Name notes in the header.
+    [switch]$WithLauncher
 )
 
 $ErrorActionPreference = "Stop"
@@ -147,8 +172,26 @@ function Get-CrossPlatformRunForCommit {
     if ($LASTEXITCODE -ne 0 -or -not $rawJson) { return $null }
     $parsedRuns = $rawJson | ConvertFrom-Json
     $runs = @($parsedRuns)
-    return ($runs | Where-Object { $_.headSha -eq $Commit } |
-                     Sort-Object -Property createdAt -Descending | Select-Object -First 1)
+    $exact = $runs | Where-Object { $_.headSha -eq $Commit } |
+                     Sort-Object -Property createdAt -Descending | Select-Object -First 1
+    if ($exact) { return $exact }
+
+    # The build workflows' paths-ignore (pc_port/launcher/**, **.md) means a
+    # launcher- or docs-only commit never gets a Linux/macOS run at all, so an
+    # exact match would never appear. A successful build of an ancestor whose
+    # diff to $Commit touches only those ignored paths is the same binary.
+    $candidates = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' } |
+                            Sort-Object -Property createdAt -Descending)
+    foreach ($r in $candidates) {
+        $sha = "$($r.headSha)".Trim()
+        try {
+            git merge-base --is-ancestor $sha $Commit 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }
+            git diff --quiet $sha $Commit -- . ':(exclude)pc_port/launcher' ':(exclude)*.md' 2>$null
+            if ($LASTEXITCODE -eq 0) { return $r }
+        } catch { }
+    }
+    return $null
 }
 
 # Is this commit present on the source repo at all? If not, CI cannot have built
@@ -213,6 +256,27 @@ function Invoke-CrossPlatformDownload {
     return @(Get-ChildItem -Recurse -File $outDir -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 }
 
+# Download every artifact of one platform's run. Returns empty if any is missing,
+# unless -AllowPartial (an older run predating an artifact still yields the rest).
+function Invoke-TargetDownload {
+    param([string]$SourceSlug, [string]$RunId, $Target, [string]$DlRoot, [switch]$AllowPartial)
+    $all = @()
+    foreach ($a in $Target.Artifacts) {
+        $f = @(Invoke-CrossPlatformDownload -SourceSlug $SourceSlug -RunId $RunId -Artifact $a -DlRoot $DlRoot)
+        if ($f.Count -eq 0) {
+            Write-Host "  ! Download of $a (run $RunId) failed." -ForegroundColor Red
+            if (-not $AllowPartial) { return @() }
+            continue
+        }
+        $all += $f
+    }
+    # GitHub turns the spaces in "Silent Hill PC.dmg" into dots; give it the
+    # platform's artifact name instead.
+    return @($all | ForEach-Object {
+        if ($_ -like '*.dmg') { (Rename-Item -LiteralPath $_ -NewName "$($Target.Artifacts[0]).dmg" -PassThru).FullName } else { $_ }
+    })
+}
+
 # Resolve the Linux + macOS builds for THIS commit BEFORE the release is created.
 # Waits for in-progress builds; on failure/missing/not-pushed it STOPS and asks
 # (or aborts unattended). Returns @{ Proceed=$bool; Assets=@(paths); DlRoot=path }.
@@ -229,8 +293,8 @@ function Resolve-CrossPlatformArtifacts {
     $sourceSlug  = $SourceRepoUrl -replace '^https?://github\.com/', '' -replace '/$', ''
     $shortCommit = if ($SourceCommit) { $SourceCommit.Substring(0, [Math]::Min(9, $SourceCommit.Length)) } else { '(none)' }
     $targets = @(
-        @{ Name = 'Linux'; Workflow = 'build-linux.yml'; Artifact = 'SHPC-linux-x64' },
-        @{ Name = 'macOS'; Workflow = 'build-macos.yml'; Artifact = 'SHPC-macos-arm64' }
+        @{ Name = 'Linux'; Workflow = 'build-linux.yml'; Artifacts = @('SHPC-linux-x64') },
+        @{ Name = 'macOS'; Workflow = 'build-macos.yml'; Artifacts = @('SHPC-macos-arm64', 'SHPC-macos-arm64-app') }
     )
 
     # gh run download creates the dir tree; only made when we actually download,
@@ -270,7 +334,15 @@ function Resolve-CrossPlatformArtifacts {
                     } else {
                         Write-Host "  Waiting for $($t.Workflow) (run $($entry.RunId)) to finish -- Ctrl+C aborts the release..." -ForegroundColor Cyan
                         $ok = $false
-                        try { gh run watch $entry.RunId --repo $sourceSlug --interval 15 --exit-status; $ok = ($LASTEXITCODE -eq 0) }
+                        # Out-Host, not bare: `gh run watch` streams progress to
+                        # stdout, and inside a function that stdout becomes part of
+                        # the RETURN VALUE -- the caller then gets an array instead
+                        # of the result hashtable and `$xplat.Proceed` throws under
+                        # StrictMode. Only happens when a build is still running,
+                        # which is why a second run right after succeeded.
+                        # Out-Host keeps the live progress visible and leaves
+                        # $LASTEXITCODE intact.
+                        try { gh run watch $entry.RunId --repo $sourceSlug --interval 15 --exit-status | Out-Host; $ok = ($LASTEXITCODE -eq 0) }
                         catch { $ok = $false }
                         $entry.State = if ($ok) { 'ok' } else { 'failed' }
                     }
@@ -286,7 +358,14 @@ function Resolve-CrossPlatformArtifacts {
         foreach ($e in $status) {
             $label = $e.Target.Name.PadRight(6)
             switch ($e.State) {
-                'ok'         { Write-Host "  $label : OK (run $($e.RunId))" -ForegroundColor Green }
+                'ok'         {
+                    $rsha = "$($e.Run.headSha)"
+                    if ($rsha -ne $SourceCommit) {
+                        Write-Host "  $label : OK (run $($e.RunId), built from $($rsha.Substring(0, [Math]::Min(9, $rsha.Length))) -- only launcher/docs changed since)" -ForegroundColor Green
+                    } else {
+                        Write-Host "  $label : OK (run $($e.RunId))" -ForegroundColor Green
+                    }
+                }
                 'failed'     { Write-Host "  $label : BUILD FAILED -- $($e.Url)" -ForegroundColor Red }
                 'running'    { Write-Host "  $label : still building -- $($e.Url)" -ForegroundColor Yellow }
                 'no-run'     {
@@ -318,9 +397,8 @@ function Resolve-CrossPlatformArtifacts {
             $assets = @()
             $allDownloaded = $true
             foreach ($e in $status) {
-                $files = @(Invoke-CrossPlatformDownload -SourceSlug $sourceSlug -RunId $e.RunId -Artifact $e.Target.Artifact -DlRoot $dlRoot)
+                $files = @(Invoke-TargetDownload -SourceSlug $sourceSlug -RunId $e.RunId -Target $e.Target -DlRoot $dlRoot)
                 if ($files.Count -eq 0) {
-                    Write-Host "  ! Download of $($e.Target.Artifact) (run $($e.RunId)) failed." -ForegroundColor Red
                     $allDownloaded = $false
                 } else {
                     $files | ForEach-Object { $assets += $_; Write-Host "  + $([IO.Path]::GetFileName($_)) (run $($e.RunId))" -ForegroundColor Gray }
@@ -376,7 +454,10 @@ function Resolve-CrossPlatformArtifacts {
                     Write-Host "  Couldn't find a git remote for $sourceSlug -- push manually, then choose R." -ForegroundColor Red
                 } else {
                     Write-Host "  Pushing '$CrossPlatformBranch' to $pr..." -ForegroundColor Cyan
-                    try { git push $pr $CrossPlatformBranch } catch { Write-Host "  Push error: $_" -ForegroundColor Red }
+                    # Out-Host for the same reason as `gh run watch` above: this is
+                    # inside Resolve-CrossPlatformArtifacts, so bare native output
+                    # would ride out as part of the returned object.
+                    try { git push $pr $CrossPlatformBranch | Out-Host } catch { Write-Host "  Push error: $_" -ForegroundColor Red }
                     if ($LASTEXITCODE -ne 0) {
                         Write-Host "  Push failed -- resolve and choose R to re-check." -ForegroundColor Red
                     } else {
@@ -400,17 +481,16 @@ function Resolve-CrossPlatformArtifacts {
                         Get-NewestSuccessfulRun -SourceSlug $sourceSlug -Workflow $e.Target.Workflow -Branch $CrossPlatformBranch
                     }
                     if (-not $useRun) {
-                        Write-Host "  ! No successful $($e.Target.Workflow) build exists at all -- skipping $($e.Target.Artifact)." -ForegroundColor Red
+                        Write-Host "  ! No successful $($e.Target.Workflow) build exists at all -- skipping $($e.Target.Name)." -ForegroundColor Red
                         continue
                     }
                     $rid = "$($useRun.databaseId)".Trim()
                     $sha = "$($useRun.headSha)".Trim()
                     if ($SourceCommit -and $sha -ne $SourceCommit) {
-                        Write-Host "  Attaching $($e.Target.Artifact) from OLDER commit $($sha.Substring(0, [Math]::Min(9, $sha.Length)))." -ForegroundColor Yellow
+                        Write-Host "  Attaching $($e.Target.Name) from OLDER commit $($sha.Substring(0, [Math]::Min(9, $sha.Length)))." -ForegroundColor Yellow
                     }
-                    $files = @(Invoke-CrossPlatformDownload -SourceSlug $sourceSlug -RunId $rid -Artifact $e.Target.Artifact -DlRoot $dlRoot)
-                    if ($files.Count -eq 0) { Write-Host "  ! Download of $($e.Target.Artifact) failed." -ForegroundColor Red }
-                    else { $files | ForEach-Object { $assets += $_ } }
+                    $files = @(Invoke-TargetDownload -SourceSlug $sourceSlug -RunId $rid -Target $e.Target -DlRoot $dlRoot -AllowPartial)
+                    $files | ForEach-Object { $assets += $_ }
                 }
                 $result.Assets = $assets
                 return $result
@@ -448,6 +528,24 @@ $launcherVersion = if (Test-Path $launcherExe) { Get-LauncherVersion $launcherEx
 
 # ---- Resolve release mode ---------------------------------------------------
 
+$isCustom   = ($Name.Trim().Length -gt 0)
+$customSlug = ""
+if ($isCustom) {
+    $Name = $Name.Trim()
+    $customSlug = ($Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+    if (-not $customSlug) { throw "-Name '$Name' has no letters or digits to make a tag from." }
+    $Mode = 'zip'
+    $SkipCrossPlatform = $true
+    Write-Host ""
+    Write-Host "Custom build: '$Name'  (tag prefix custom-$customSlug-, branch '$CustomBranch', prerelease)" -ForegroundColor Magenta
+    Write-Host "  No CHANGELOG.md section; Linux/macOS CI gate skipped." -ForegroundColor Gray
+    if ($WithLauncher) {
+        Write-Host "  -WithLauncher: the launcher IS included. Testers keep it after switching back." -ForegroundColor Yellow
+    } else {
+        Write-Host "  Launcher NOT included, so this build cannot change anyone's launcher." -ForegroundColor Gray
+    }
+}
+
 if (-not $Mode) {
     Write-Host ""
     Write-Host "Release mode:" -ForegroundColor Magenta
@@ -457,7 +555,12 @@ if (-not $Mode) {
     $Mode = if ($ans.Trim() -eq '2') { 'zip' } else { 'loose' }
 }
 $isZip     = ($Mode -eq 'zip')
-$tagPrefix = if ($isZip) { 'beta-' } else { 'v' }
+$tagPrefix = if ($isCustom) { "custom-$customSlug-" } elseif ($isZip) { 'beta-' } else { 'v' }
+$zipBranch = if ($isCustom) { $CustomBranch } else { $BetaBranch }
+# The launcher updates itself from any release of the official repo whose
+# launcher_version is newer, regardless of branch, and never downgrades. Keep it
+# out of an opt-in build unless it is the thing being tested.
+$includeLauncher = (-not $isCustom) -or $WithLauncher
 Write-Host "Mode: $Mode" -ForegroundColor Magenta
 
 # ---- Find the previous release of THIS stream -------------------------------
@@ -472,9 +575,10 @@ function Get-LatestStreamReleaseTag {
     if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
     $rels = $json | ConvertFrom-Json
     if (-not $rels) { return $null }
-    $prefix = if ($Zip) { 'beta-' } else { 'v' }
-    $stream = if ($Zip) { $rels | Where-Object { $_.tagName -like 'beta-*' } }
-              else       { $rels | Where-Object { $_.tagName -notlike 'beta-*' } }
+    $prefix = if ($isCustom) { $tagPrefix } elseif ($Zip) { 'beta-' } else { 'v' }
+    $stream = if ($isCustom) { $rels | Where-Object { $_.tagName -like "$tagPrefix*" } }
+              elseif ($Zip)  { $rels | Where-Object { $_.tagName -like 'beta-*' -and $_.tagName -notlike 'custom-*' } }
+              else           { $rels | Where-Object { $_.tagName -notlike 'beta-*' -and $_.tagName -notlike 'custom-*' } }
     if (-not $stream) { return $null }
     # Sort by the PARSED version (YYYY.MM.DD.N), NOT createdAt: the nightly repo's
     # release timestamps are all identical (a bulk re-upload reset them), so a
@@ -521,7 +625,7 @@ $sourceFooter = "`r`n`r`n---`r`nBuilt from source commit $curCommitShort`r`nSour
 # newest release of the OTHER stream -- so the FIRST release of a stream still
 # lists commits since the last release of any kind instead of "(no commits)".
 $baseManifest = $prevManifest
-if (-not $baseManifest) {
+if (-not $baseManifest -and -not $isCustom) {
     $otherTag = Get-LatestStreamReleaseTag -Zip (-not $isZip)
     if ($otherTag) {
         try {
@@ -594,11 +698,14 @@ $newVersion = "$today.$counter"
 $newTag     = "$tagPrefix$newVersion"
 
 Write-Host ""
-Write-Host "New version: $newVersion  tag: $newTag  branch: $(if ($isZip) { $BetaBranch } else { 'default' })" -ForegroundColor Magenta
+Write-Host "New version: $newVersion  tag: $newTag  branch: $(if ($isZip) { $zipBranch } else { 'default' })" -ForegroundColor Magenta
 
 # ---- Prepend release section to local CHANGELOG.md --------------------------
+# A custom build is not part of the release history: no section, no pause.
 
-if (Test-Path $changelogPath) {
+if ($isCustom) {
+    Write-Host "Custom build: CHANGELOG.md left untouched." -ForegroundColor Cyan
+} elseif (Test-Path $changelogPath) {
     $existingBytes = [System.IO.File]::ReadAllBytes($changelogPath)
     $bomStart = 0
     if ($existingBytes.Length -ge 3 -and $existingBytes[0] -eq 0xEF -and $existingBytes[1] -eq 0xBB -and $existingBytes[2] -eq 0xBF) {
@@ -635,7 +742,7 @@ if (Test-Path $changelogPath) {
 
 # ---- Pause for manual changelog edit ----------------------------------------
 
-if (-not $NoPause) {
+if (-not $NoPause -and -not $isCustom) {
     Write-Host ""
     Write-Host "==> CHANGELOG.md updated with auto-generated notes for $newTag." -ForegroundColor Yellow
     Write-Host "    Edit and SAVE it now if you want (e.g. add command usage)." -ForegroundColor Yellow
@@ -670,7 +777,7 @@ if ($isZip) {
     # stream, not whatever the dev's local config points at.
     $cfgTemplate = Join-Path $PSScriptRoot "..\pc_port\config.cfg"
 
-    if (-not (Test-Path $launcherExe)) {
+    if ($includeLauncher -and -not (Test-Path $launcherExe)) {
         throw "Launcher exe not found at $launcherExe. Build the launcher (Release) before a zip release."
     }
 
@@ -680,8 +787,10 @@ if ($isZip) {
 
     try {
         # Top-level files.
-        Copy-Item $exe         (Join-Path $stage "SilentHillPC.exe") -Force
-        Copy-Item $launcherExe (Join-Path $stage "SilentHillPC_Launcher.exe") -Force
+        Copy-Item $exe (Join-Path $stage "SilentHillPC.exe") -Force
+        if ($includeLauncher) {
+            Copy-Item $launcherExe (Join-Path $stage "SilentHillPC_Launcher.exe") -Force
+        }
         if (Test-Path $changelogPath) { Copy-Item $changelogPath (Join-Path $stage "CHANGELOG.md") -Force }
         if (Test-Path $cfgTemplate)   { Copy-Item $cfgTemplate   (Join-Path $stage "config.cfg")   -Force }
 
@@ -768,10 +877,12 @@ if ($isZip) {
             version    = $newVersion
             tag        = $newTag
             mode       = "zip"
-            branch     = $BetaBranch
+            branch     = $zipBranch
+            stream     = $(if ($isCustom) { "custom" } else { "beta" })
+            name       = $(if ($isCustom) { $Name } else { $null })
             build_date = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             git_commit = $curCommitFull
-            launcher_version = $launcherVersion
+            launcher_version = $(if ($includeLauncher) { $launcherVersion } else { $null })
             zip_name   = $zipName
             zip_url    = "$baseUrl/$zipName"
             files      = $files
@@ -789,13 +900,17 @@ if ($isZip) {
                 if ($parts.Count -eq 2) { $Notes = $parts[1].Trim() }
             }
         }
-        if (-not $Notes) { $Notes = "Beta zip release $newVersion" }
+        if (-not $Notes) {
+            $Notes = if ($isCustom) {
+                "$Name -- custom build $newVersion.`r`n`r`nAn opt-in build: in the launcher open Build Settings, pick Branch 'Custom builds' and this build. It never replaces the normal latest release."
+            } else { "Beta zip release $newVersion" }
+        }
         $Notes = $Notes + $sourceFooter
         $notesFile = Join-Path ([IO.Path]::GetTempPath()) "release_notes_$newVersion.txt"
         [System.IO.File]::WriteAllText($notesFile, $Notes)
 
         if ($DryRun) {
-            Write-Host "[DryRun] Would publish $newTag to branch '$BetaBranch' with:" -ForegroundColor Yellow
+            Write-Host "[DryRun] Would publish $newTag to branch '$zipBranch'$(if ($isCustom) { ' as a PRERELEASE' }) with:" -ForegroundColor Yellow
             Write-Host "  $zipName ($zipSize MB) + version.json ($($files.Count) files)" -ForegroundColor Gray
             Write-Host "  Zip kept at: $zipPath" -ForegroundColor Gray
             Remove-Item $manifestPath, $notesFile -Force -ErrorAction SilentlyContinue
@@ -805,19 +920,19 @@ if ($isZip) {
         # Ensure the beta branch exists (releases target it). Create it from the
         # repo's default branch head on first use.
         $branchOk = $true
-        try { gh api "repos/$Repo/branches/$BetaBranch" 2>$null | Out-Null }
+        try { gh api "repos/$Repo/branches/$zipBranch" 2>$null | Out-Null }
         catch { }
         if ($LASTEXITCODE -ne 0) { $branchOk = $false }
         if (-not $branchOk) {
-            Write-Host "Creating '$BetaBranch' branch on $Repo..." -ForegroundColor Cyan
+            Write-Host "Creating '$zipBranch' branch on $Repo..." -ForegroundColor Cyan
             $defBranch = (gh api "repos/$Repo" --jq ".default_branch").Trim()
             $defSha    = (gh api "repos/$Repo/git/refs/heads/$defBranch" --jq ".object.sha").Trim()
-            if (-not $defSha) { throw "Couldn't resolve $Repo default branch head to seed '$BetaBranch'." }
-            gh api "repos/$Repo/git/refs" -f "ref=refs/heads/$BetaBranch" -f "sha=$defSha" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Failed to create '$BetaBranch' branch." }
+            if (-not $defSha) { throw "Couldn't resolve $Repo default branch head to seed '$zipBranch'." }
+            gh api "repos/$Repo/git/refs" -f "ref=refs/heads/$zipBranch" -f "sha=$defSha" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create '$zipBranch' branch." }
         }
 
-        Write-Host "Creating release $newTag on branch '$BetaBranch'..." -ForegroundColor Cyan
+        Write-Host "Creating release $newTag on branch '$zipBranch'$(if ($isCustom) { ' (prerelease)' })..." -ForegroundColor Cyan
         # CHANGELOG.md goes up as its OWN asset (next to version.json) so the
         # launcher can preview it without downloading the whole zip. Betas are
         # REGULAR releases (not prereleases) so they appear on the repo's Releases
@@ -825,11 +940,17 @@ if ($isZip) {
         # and picks the newest build across both streams by parsed version.
         $betaAssets = @($zipPath, $manifestPath)
         if (Test-Path $changelogPath) { $betaAssets += $changelogPath }
+        # A custom build is a PRERELEASE: GitHub's releases/latest then skips it, so
+        # even a third-party-repo launcher on plain "latest" never lands on it.
+        $releaseTitle = if ($isCustom) { "$Name $newVersion" } else { "Beta $newVersion" }
+        $releaseFlags = @()
+        if ($isCustom) { $releaseFlags += "--prerelease" }
         gh release create $newTag `
             --repo $Repo `
-            --target $BetaBranch `
-            --title "Beta $newVersion" `
+            --target $zipBranch `
+            --title $releaseTitle `
             --notes-file $notesFile `
+            @releaseFlags `
             @betaAssets
         if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE). Release was NOT published." }
 
@@ -838,9 +959,14 @@ if ($isZip) {
         Remove-Item $zipPath, $manifestPath, $notesFile -Force -ErrorAction SilentlyContinue
         if ($xplat.DlRoot -and (Test-Path $xplat.DlRoot)) { Remove-Item -Recurse -Force $xplat.DlRoot -ErrorAction SilentlyContinue }
         Write-Host ""
-        Write-Host "Done. Beta zip release published: https://github.com/$Repo/releases/tag/$newTag" -ForegroundColor Green
-        Write-Host "Commit the updated CHANGELOG.md when ready:" -ForegroundColor Cyan
-        Write-Host "  git add pc_port/CHANGELOG.md && git commit -m 'changelog: $newTag'" -ForegroundColor Gray
+        if ($isCustom) {
+            Write-Host "Done. Custom build '$Name' published: https://github.com/$Repo/releases/tag/$newTag" -ForegroundColor Green
+            Write-Host "Users opt in via Build Settings > Branch 'Custom builds' > '$Name $newVersion'. Latest is unaffected." -ForegroundColor Cyan
+        } else {
+            Write-Host "Done. Beta zip release published: https://github.com/$Repo/releases/tag/$newTag" -ForegroundColor Green
+            Write-Host "Commit the updated CHANGELOG.md when ready:" -ForegroundColor Cyan
+            Write-Host "  git add pc_port/CHANGELOG.md && git commit -m 'changelog: $newTag'" -ForegroundColor Gray
+        }
     }
     finally {
         if (Test-Path $stage) { Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue }

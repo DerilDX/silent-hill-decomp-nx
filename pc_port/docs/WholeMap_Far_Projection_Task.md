@@ -1,6 +1,57 @@
 # Whole-Map Far Projection — Task Spec (dedicated session)
 
-Status: **v4 DEPTH FIX 2026-07-16 (awaiting in-game test).**
+Status: **VISUALS DONE 2026-10-15 (user: "perfect"). PERF = the open item; fast far path planned below.**
+
+## Performance (2026-10-15)
+
+[WMPROBE] timing, whole-town view (~107k GT4 prims/frame through the PSX path):
+frame 134 ms = chunk submit 44 ms (vertex transform 10, mesh emission 31 = emulated
+GTE colour + packet build + PGXP shadow copies) + OT parse 69 ms (~1600 cycles per
+GT4: vertex build 646 = shadow-table misses because the OT walk is depth-ordered,
+depth 566, begin 177) + draws 2 ms + ~20 ms GPU (the flashlight shadow pass redraws
+every legacy split, i.e. the whole town). Micro-optimisations done: address-ordered
+shadow hash, view-space lookups skipped past 64u, PSX fog-overlay colour skipped on PC
+(~10% total). The per-prim PSX emulation cost is structural.
+
+### Fast far path (plan)
+1. Per chunk (cached, rebuilt on lighting / material-slot change): world-space prims
+   (4 float verts, uv, tpage, clut, lit colours computed once with the game's GTE
+   colour code). Standard unlit/Gfx_MeshDraw models only; lit (field_B_0), chained
+   (field_B_4) models and billboards stay on the PSX path.
+2. Per frame: float view transform + projection, float backface (PSX NCLIP
+   semantics), frustum reject, bucket by max view depth (own sorted list, PSX
+   painter order: bucket then reverse submission).
+3. Draw: custom 0xB_ packet at the head of the last OT bucket; PsyCross emits the
+   prepared prims straight into g_vertexBuffer + AddSplit (ApplyHiresOverride per
+   prim, so packs/virtual slots work), fog byte from the fog ramp, FLAT world depth.
+4. Chunks near the player (vanilla range) keep the full PSX/PGXP path.
+Also: the shadow pass should skip far splits.
+
+
+## v5 (2026-10-15): why v4 still stacked blocks and trees
+
+v4 gave saturated far polys a real depth, but under PGXP opaque world geometry
+draws **GL_ALWAYS** (the coplanar painter, `g_PsxWorldDepthAlways`), so world
+depth was never compared: far world-vs-world order stayed submission order. Two
+drawers also never reported any SZ, so their prims took the last OT bucket's
+seed depth (~64u) and covered the whole far town: **billboards** (the "spammed
+trees") and **lit world models** (`func_8005AC50`).
+
+Fix (main 5b887aa22, PsyCross c011c70):
+- `PsyX_SetNextPrimSz` tags a FLAT prim **far** when `g_PsxWholeMapFar` and its
+  max SZ is at/past the last bucket (`2047 << (arg3+2)`). Far FLAT prims get
+  `SPLIT_DEPTH_WORLD_FAR`, which draws GL_LEQUAL on the per-vertex PGXP depth
+  (`_p1` path, linear over 2^18 SZ = 1024u). Near world keeps the painter;
+  the far bucket draws first, so near-over-far is ordinary painter order.
+- Billboards arm `PsyX_SetNextPrimDepthSz(true SZ)` (EXACT kind, unclamped).
+- Lit world models arm their per-vertex `screenZ_168` SZ inside the chunk loop
+  only (`SH_WHOLEMAP_LIT_SZ`), so characters keep stock depth.
+- Console `wholemap [0|1]`: live, unsaved; forces PGXP on while active (the
+  per-vertex depth only exists under PGXP) and restores it on off.
+
+Known residual: a near poly entirely inside the OT range can still paint over a
+far poly that straddles into the near band (ordinary PSX painter class).
+
 
 ## v4 (2026-07-16): the ACTUAL root cause, proven from the disc
 

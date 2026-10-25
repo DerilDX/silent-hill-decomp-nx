@@ -79,9 +79,9 @@ public partial class Form1 : Form
     {
         switch (region)
         {
-            case "USA": return "NTSC-U (USA)";
-            case "PAL": return "PAL (Europe)";
-            case "JAP": return "NTSC-J (Japan)";
+            case "USA": return Loc.T("NTSC-U (USA)");
+            case "PAL": return Loc.T("PAL (Europe)");
+            case "JAP": return Loc.T("NTSC-J (Japan)");
             default:    return region;
         }
     }
@@ -93,14 +93,304 @@ public partial class Form1 : Form
         PopulateDisplayOptions();
         LoadConfig();
         SetupTooltips();
+        SetupLanguageButton();
+        trackFog.ValueChanged += (s, e) => UpdateFogValueLabel();
+        // On release, not while dragging, and never from LoadConfig setting
+        // the slider.
+        trackFog.MouseUp += (s, e) => AskPgxpForDistantWorld();
+        trackFog.KeyUp   += (s, e) => AskPgxpForDistantWorld();
         this.Shown += (s, e) =>
         {
             CleanupOldFiles();
             UpdateChecker.CleanupStaleTemp();
             CheckDiscImage();
             FfmpegCheck.WarnIfNeeded(this, AppDomain.CurrentDomain.BaseDirectory);
+            OfferRealtimeUpdatesOnce();
             SilentAutoCheckForUpdates();
         };
+    }
+
+    // One-time offer of realtime updates. The flag is set before asking and never
+    // cleared, so the question is asked once ever, not once per update.
+    private void OfferRealtimeUpdatesOnce()
+    {
+        try
+        {
+            if (config.Get("launcher_realtime_offered", "0").Trim() == "1") return;
+            var settings = LauncherSettings.Load(config);
+            if (!settings.IsDefaultRepo) return;
+
+            config.EnsureLauncherSection();
+            config.Set("launcher_realtime_offered", "1");
+            config.Save();
+            if (settings.Realtime) return;
+
+            var answer = MessageBox.Show(this,
+                Loc.T("Would you like to enable realtime updates?\n\n" +
+                      "With this enabled, you will be able to update any time changes are pushed to the repo. This means you will be able to update to the latest untested versions as I am still working on them. If they break the game, you can rollback by going to build settings and choosing an older build.\n\n" +
+                      "It is recommended that you back up your saves before turning this on. This message will not be shown again, but if you change your mind, the setting can be changed from the Build Settings window."),
+                Loc.T("Realtime updates"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (answer != DialogResult.Yes) return;
+
+            settings.Realtime = true;
+            settings.Build    = "latest";
+            settings.Save(config);
+            // Same as ticking the box in Build Settings: the new stream's first
+            // check offers its newest build outright.
+            settings.ClearSeen(config);
+        }
+        catch { /* best effort: never block startup over this */ }
+    }
+
+
+    // ---- launcher language -------------------------------------------------
+
+    private Button btnLang;
+    private readonly ToolTip _langTip = new ToolTip();
+
+    /// <summary>
+    /// The flag button in the bottom-right corner, sitting in the space the
+    /// update progress bar gave up. Clicking it opens the language picker; the
+    /// flag itself is the current language's, so the setting is readable at a
+    /// glance without opening anything.
+    /// </summary>
+    private void SetupLanguageButton()
+    {
+        try { Loc.Current = LauncherSettings.Load(config).Language; }
+        catch { Loc.Current = LauncherLang.English; }
+
+        LocalizeValueLists();
+
+        btnLang = new Button
+        {
+            /* Bottom-right corner, on the Help/Reset/Report Bug row;
+             * lblUpdateStatus was narrowed to end before it. Created in code
+             * rather than the designer (the flag is custom-painted), so it
+             * cannot be nudged from the design surface; re-check this against
+             * Form1.Designer.cs after any layout change. */
+            Location = new System.Drawing.Point(420, 616),
+            Size = new System.Drawing.Size(30, 22),
+            Text = "",
+            FlatStyle = FlatStyle.Standard,
+            TabStop = false
+        };
+        // The flag is PAINTED, not typed: emoji flags are regional-indicator
+        // pairs that only DirectWrite ligates, so GDI would draw "US".
+        btnLang.Paint += (s2, e2) =>
+        {
+            var box = new System.Drawing.Rectangle(4, 4, btnLang.Width - 9, btnLang.Height - 9);
+            FlagIcon.Draw(e2.Graphics, box, Loc.Current);
+        };
+        btnLang.Click += btnLang_Click;
+        Controls.Add(btnLang);
+        btnLang.BringToFront();
+        _langTip.SetToolTip(btnLang, Loc.T("Launcher language"));
+
+        Loc.Changed += OnLanguageChanged;
+        if (Loc.Current != LauncherLang.English) OnLanguageChanged();
+    }
+
+    private readonly Dictionary<Control, Func<string>> _dynText =
+        new Dictionary<Control, Func<string>>();
+
+    /// <summary>
+    /// Set a control's text from its English, and remember how to redo it.
+    ///
+    /// Loc.Apply can only restore the text a control was BORN with, so anything
+    /// the update flow rewrites at runtime ("Update available!", the status
+    /// line) would snap back to its designer text on a language switch. These
+    /// are re-applied after Apply instead.
+    /// </summary>
+    private void SetText(Control c, string english, params object[] args)
+    {
+        if (c == null) return;
+        Func<string> f = () => (args == null || args.Length == 0)
+            ? Loc.T(english)
+            : string.Format(Loc.T(english), args);
+        _dynText[c] = f;
+        c.Text = f();
+    }
+
+    /// <summary>
+    /// Combos whose items are words rather than data. Only these get owner-draw
+    /// translation — resolution, refresh rate, FPS cap, disc image and level are
+    /// left alone because their selected text is what gets written to config.cfg.
+    /// </summary>
+    /// Codes parallel to comboGameLang's items. Never read the item text: it is
+    /// translated, the codes are not.
+    private readonly List<string> _gameLangCodes = new List<string>();
+
+    /* The "Native (PSX)" resolution entry: config native_resolution = 1, with
+     * width/height kept as the WINDOW size the game scales its own modes into. */
+    private string _nativeResText;
+
+    /// Build the Game Language row: Automatic, the languages every disc family
+    /// carries, then whatever packs are installed in gamedata/lang.
+    ///
+    /// The launcher does not know which disc will be mounted, so it offers all
+    /// of them and lets the game decide -- it already falls back to Automatic
+    /// for anything this disc cannot render, and says so in its log.
+    /// The dropdown's current code -- the user's intent, saved or not.
+    private string CurrentGameLanguageCode()
+    {
+        int i = comboGameLang.SelectedIndex;
+        return (i >= 0 && i < _gameLangCodes.Count) ? _gameLangCodes[i] : config.Get("language", "auto");
+    }
+
+    private void BuildGameLangList()
+    {
+        comboGameLang.Items.Clear();
+        _gameLangCodes.Clear();
+
+        void Add(string name, string code)
+        {
+            if (_gameLangCodes.Any(c => string.Equals(c, code, StringComparison.OrdinalIgnoreCase)))
+                return;
+            comboGameLang.Items.Add(name);
+            _gameLangCodes.Add(code);
+        }
+
+        // "en" is NOT PAL English: it is the disc's own, so on a USA disc it is
+        // US English and on every disc it is what Automatic already gives. The
+        // PAL script travels as the en_pal pack, and that is its code anywhere.
+        Add("Automatic",   "auto");
+        Add("US English",  "en_us");
+        Add("PAL English", "en_pal");
+        Add("German",      "de");
+        Add("French",      "fr");
+        Add("Spanish",     "es");
+        Add("Italian",     "it");
+
+        try
+        {
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gamedata", "lang");
+
+            if (Directory.Exists(dir))
+            {
+                foreach (string f in Directory.GetFiles(dir, "*.lang").OrderBy(x => x))
+                {
+                    string code = null, name = null;
+
+                    // Only the headers, which the format puts first.
+                    foreach (string line in File.ReadLines(f, Encoding.UTF8).Take(16))
+                    {
+                        if (line.StartsWith("!code=")) code = line.Substring(6).Trim();
+                        else if (line.StartsWith("!name=")) name = line.Substring(6).Trim();
+                        if (code != null && name != null) break;
+                    }
+
+                    if (!string.IsNullOrEmpty(code))
+                        Add(string.IsNullOrEmpty(name) ? code : name, code);
+                }
+            }
+        }
+        catch
+        {
+            // An unreadable pack folder costs the extra rows, nothing else.
+        }
+    }
+
+    private void LocalizeValueLists()
+    {
+        // "はい"/"いいえ" and "Nein" are wider than "Yes"/"No", and each of these
+        // sits at the end of its row with free space to the right.
+        foreach (var r in new[] { radioVsyncYes, radioVsyncNo, radioDecalsYes, radioDecalsNo, radioPreloadYes, radioPreloadNo,
+                                  pgxpYes, pgxpNo, loggingYes, loggingNo, consoleYes, consoleNo })
+            r.AutoSize = true;
+
+        Loc.LocalizeItems(comboGameLang);
+        Loc.LocalizeItems(comboFullscreen);
+        Loc.LocalizeItems(comboSkipIntros);
+        Loc.LocalizeItems(comboPillarbox);
+        Loc.LocalizeItems(comboFiltering);
+        Loc.LocalizeItems(comboDithering);
+        Loc.LocalizeItems(comboScaling);
+        Loc.LocalizeItems(comboAA);
+        Loc.LocalizeItems(comboPost);
+        Loc.LocalizeItems(comboTone);
+        Loc.LocalizeItems(comboFlash);
+        Loc.LocalizeItems(comboLineGap);
+        Loc.LocalizeItems(comboAudioOut);
+        Loc.LocalizeItems(comboRender);
+        Loc.LocalizeItems(comboMinimap);
+        Loc.LocalizeItems(comboDisc);
+        // Only the description after the id is words; the id itself is what
+        // SaveConfig splits off and writes.
+        Loc.LocalizeItems(comboMap, item =>
+        {
+            int sep = item.IndexOf("  -  ", StringComparison.Ordinal);
+            return sep < 0 ? Loc.T(item) : item.Substring(0, sep + 5) + Loc.T(item.Substring(sep + 5));
+        });
+    }
+
+    private readonly Dictionary<Label, int> _labelHome = new Dictionary<Label, int>();
+
+    /// <summary>
+    /// Nudge a label left when its translation would otherwise run under the
+    /// control beside it — the labels are AutoSize, so a longer word grows to
+    /// the right and paints over the combo it belongs to.
+    ///
+    /// A label is never moved past whatever is to its left, and never past its
+    /// designed position, so this only ever consumes slack the row already had.
+    /// </summary>
+    private void FitLabels(Control root)
+    {
+        foreach (Control c in root.Controls)
+        {
+            var lbl = c as Label;
+            if (lbl == null) { FitLabels(c); continue; }
+
+            int home;
+            if (!_labelHome.TryGetValue(lbl, out home)) { home = lbl.Left; _labelHome[lbl] = home; }
+            lbl.Left = home;
+
+            int rightX = int.MaxValue, leftEdge = 4;
+            foreach (Control o in root.Controls)
+            {
+                if (ReferenceEquals(o, lbl) || Math.Abs(o.Top - lbl.Top) > 12) continue;
+                if (o.Left > home && o.Left < rightX) rightX = o.Left;
+                if (o.Right <= home && o.Right + 4 > leftEdge) leftEdge = o.Right + 4;
+            }
+            if (rightX == int.MaxValue) continue;
+
+            int w = TextRenderer.MeasureText(lbl.Text, lbl.Font).Width;
+            int want = rightX - 4 - w;
+            if (want < home) lbl.Left = Math.Max(leftEdge, want);
+        }
+    }
+
+    private void OnLanguageChanged()
+    {
+        Loc.Apply(this);
+        SetupTooltips();
+        foreach (var kv in _dynText) kv.Key.Text = kv.Value();
+        UpdateDiscUi();
+        if (!btnUpdate.Enabled) btnPlay.Enabled = false; // an update is running
+        FitLabels(this);
+        if (btnLang != null)
+        {
+            btnLang.Invalidate();
+            _langTip.SetToolTip(btnLang, Loc.T("Launcher language"));
+        }
+    }
+
+    private void btnLang_Click(object sender, EventArgs e)
+    {
+        var before = Loc.Current;
+        using (var dlg = new LanguageDialog(Loc.Current))
+        {
+            dlg.ShowDialog(this);
+            Loc.Set(dlg.Selected);
+        }
+        if (Loc.Current == before) return;
+
+        try
+        {
+            var st = LauncherSettings.Load(config);
+            st.Language = Loc.Current;
+            st.Save(config);
+        }
+        catch { /* config not writable - the choice still applies this session */ }
     }
 
     /// <summary>
@@ -151,11 +441,11 @@ public partial class Form1 : Form
         if (_discs.Count == 0)
         {
             _regionUiUpdating = false;
-            lblDisc.Text = "No disc image found in gamedata\\";
+            SetText(lblDisc, "No disc image found in gamedata\\");
             MessageBox.Show(this,
-                "No Silent Hill disc image found.\n\n" +
-                "Please put a Silent Hill .bin (USA or PAL/European release)\n" +
-                "in the gamedata folder!",
+                Loc.T("No Silent Hill disc image found.\n\n" +
+                      "Please put a Silent Hill .bin (USA or PAL/European release)\n" +
+                      "in the gamedata folder!"),
                 "Silent Hill PC",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -269,7 +559,7 @@ public partial class Form1 : Form
         if (!disc.Supported)
         {
             lblDisc.ForeColor = Color.Firebrick;
-            lblDisc.Text      = text + " — " + (string.IsNullOrEmpty(disc.UnsupportedReason)
+            lblDisc.Text      = text + " — " + Loc.T(string.IsNullOrEmpty(disc.UnsupportedReason)
                                                 ? "not supported yet"
                                                 : disc.UnsupportedReason);
             btnPlay.Enabled   = false;
@@ -281,7 +571,7 @@ public partial class Form1 : Form
             // Fan translation / patched image: the game reads its text and
             // voices straight off the disc.
             lblDisc.ForeColor = Color.RoyalBlue;
-            lblDisc.Text      = text + " — fan patch";
+            lblDisc.Text      = text + " — " + Loc.T("fan patch");
         }
         else
         {
@@ -312,17 +602,26 @@ public partial class Form1 : Form
     // running an old build isn't flagged). Build switching is the Download Build
     // button's job.
     private static LauncherSettings ForceLatest(LauncherSettings s)
-        => new LauncherSettings { RepoUrl = s.RepoUrl, Branch = s.Branch, Build = "latest", OldBuildWarned = s.OldBuildWarned };
+        // A custom (opt-in) build tracks ITS OWN named build: forcing plain "latest"
+        // would measure it against a different mod's newest release, or the beta one.
+        => new LauncherSettings
+        {
+            RepoUrl        = s.RepoUrl,
+            Branch         = s.Branch,
+            Build          = UpdateChecker.CustomFamilyLatestToken(s.Build) ?? "latest",
+            Realtime       = s.Realtime,
+            OldBuildWarned = s.OldBuildWarned
+        };
 
     private async void SilentAutoCheckForUpdates()
     {
         var settings = LauncherSettings.Load(config);
         string installDir = AppDomain.CurrentDomain.BaseDirectory;
-        btnUpdate.Text     = "Check for Updates";
-        downloadBuild.Text = "Download Build";
+        SetText(btnUpdate, "Check for Updates");
+        SetText(downloadBuild, "Download Build");
         try
         {
-            lblUpdateStatus.Text = "Checking for updates...";
+            SetText(lblUpdateStatus, "Checking for updates...");
             var plan = await UpdateChecker.CheckAsync(installDir, ForceLatest(settings));
 
             // If the install already matches the latest, remember that so it
@@ -332,14 +631,14 @@ public partial class Form1 : Form
             bool available = LauncherSettings.CompareVersions(plan.RemoteVersion, settings.GetSeen(config)) > 0;
             if (available)
             {
-                btnUpdate.Text = "Update available!";
+                SetText(btnUpdate, "Update available!");
                 lblUpdateStatus.ForeColor = Color.LightGreen;
-                lblUpdateStatus.Text = $"Update available: {plan.RemoteVersion}";
+                SetText(lblUpdateStatus, "Update available: {0}", plan.RemoteVersion);
             }
             else
             {
                 lblUpdateStatus.ForeColor = Color.LightGray;
-                lblUpdateStatus.Text = $"Up to date ({plan.RemoteVersion}).";
+                SetText(lblUpdateStatus, "Up to date ({0}).", plan.RemoteVersion);
             }
 
             // "Download Build" vs "Redownload Build": is the SELECTED build already
@@ -348,12 +647,12 @@ public partial class Form1 : Form
             bool selectedInstalled = settings.IsLatestBuild
                 ? !plan.HasUpdate
                 : !(await UpdateChecker.CheckAsync(installDir, settings)).HasUpdate;
-            downloadBuild.Text = selectedInstalled ? "Redownload Build" : "Download Build";
+            SetText(downloadBuild, selectedInstalled ? "Redownload Build" : "Download Build");
         }
         catch
         {
             // Silent — no internet, no nightly repo yet, etc.
-            lblUpdateStatus.Text = "";
+            SetText(lblUpdateStatus, "");
         }
     }
 
@@ -363,19 +662,31 @@ public partial class Form1 : Form
     /// long enough to explain non-obvious behavior, short enough to read at
     /// a glance.
     /// </summary>
+    private ToolTip _tip;
+
     private void SetupTooltips()
     {
-        var tip = new ToolTip
-        {
-            AutoPopDelay = 12000,  // keep visible up to 12s while hovered
-            InitialDelay = 400,
-            ReshowDelay  = 200,
-            ShowAlways   = true,
-        };
+        // Reused across language switches: a second ToolTip would leave the
+        // first one's (old-language) text popping up alongside the new one.
+        if (_tip == null)
+            _tip = new ToolTip
+            {
+                AutoPopDelay = 12000,  // keep visible up to 12s while hovered
+                InitialDelay = 400,
+                ReshowDelay  = 200,
+                ShowAlways   = true,
+            };
+        var tip = _tip;
 
+        /* Tooltips are localized here rather than at each call site: the English
+         * text IS the dictionary key, so every Set() below stays readable and a
+         * missing translation falls through to English on its own. SetupTooltips
+         * is re-run by OnLanguageChanged, because a ToolTip's text is not a
+         * control property and Loc.Apply cannot reach it. */
         void Set(Control c, string text)
         {
             if (c == null) return;
+            text = Loc.T(text);
             tip.SetToolTip(c, text);
             // Radio buttons sit inside panels; attach to the panel too so
             // hovering between buttons doesn't drop the tooltip.
@@ -384,201 +695,230 @@ public partial class Form1 : Form
         }
 
         const string fullscreenTip =
-            "Fullscreen = exclusive fullscreen at the chosen resolution.\n" +
-            "Windowed = a normal window at the chosen resolution.\n" +
-            "Borderless = covers the screen at desktop resolution\n" +
-            "(no mode switch, fast alt-tab; refresh-rate setting not used).";
+            "Fullscreen: exclusive fullscreen at the chosen resolution.\n" +
+            "Windowed: a normal window at the chosen resolution.\n" +
+            "Borderless: fills the screen at desktop resolution (fast alt-tab).";
         Set(fullscreenLabel,   fullscreenTip);
         Set(comboFullscreen,   fullscreenTip);
 
         const string vsyncTip =
-            "Synchronize frame presentation to your monitor's refresh rate.\n" +
-            "Yes = no tearing, may add a frame of input latency.\n" +
-            "No = lowest latency, possible tearing.";
+            "Sync frames to your monitor's refresh rate.\n" +
+            "Yes: no tearing, may add a frame of input lag.\n" +
+            "No: lowest input lag, possible tearing.";
         Set(vsyncLabel,     vsyncTip);
         Set(radioVsyncYes,  vsyncTip);
         Set(radioVsyncNo,   vsyncTip);
 
         const string fpsTip =
-            "Maximum frames per second. 0 = unlimited.\n" +
-            "Game logic ticks at 30 Hz internally; higher caps just refresh\n" +
-            "the screen more often (smoother input + camera sampling).";
+            "Frame rate cap (0 = unlimited). Game logic always runs at 30 Hz;\n" +
+            "a higher cap makes the camera and input smoother.";
         Set(fpsLabel,  fpsTip);
         Set(comboFps,  fpsTip);
 
         const string filteringTip =
-            "Off = crisp PSX pixels, no smoothing.\n" +
-            "Dithering = recreates the PSX 24→15-bit dither pattern (recommended).\n" +
-            "Bilinear = blurs textures; can hide pixel-art detail.";
+            "Off: crisp PSX pixels.\n" +
+            "Bilinear: smooths textures.\n" +
+            "Trilinear: bilinear plus mip blending (only replacement textures with mips).\n" +
+            "Anisotropic: sharper surfaces at steep angles; higher costs more GPU.";
         Set(filteringLabel, filteringTip);
         Set(comboFiltering, filteringTip);
 
+        const string ditheringTip =
+            "The PSX 4x4 ordered dither plus a 5-bit quantize: the original look.\n" +
+            "It also hides texture-page seams as noise instead of hard edges.\n" +
+            "Separate from Filtering, so the two can be combined.";
+        Set(ditheringLabel, ditheringTip);
+        Set(comboDithering, ditheringTip);
+
+        const string scalingTip =
+            "How a render resolution SMALLER than the window is scaled up to fill it.\n" +
+            "Integer: whole-number scale, centred, with a border. Nothing shimmers.\n" +
+            "Nearest Neighbor: fills the screen, no blending, edges can crawl.\n" +
+            "Bilinear: fills the screen, smoothly blended. Default.\n" +
+            "Sharp Bilinear: whole-number scale first, then blend the remainder.\n" +
+            "No effect when the resolution already matches the window.";
+        Set(scalingLabel, scalingTip);
+        Set(comboScaling, scalingTip);
+
         const string menuFilterTip =
-            "Also apply bilinear filtering to menus and 2D screens (title, main menu,\n" +
-            "save/load, options). Off by default, and independent of the in-game Filtering\n" +
-            "setting above. Note: this smooths menu text as well as the artwork.";
+            "Also smooth menus and 2D screens with bilinear filtering.\n" +
+            "Separate from Filtering; softens menu text too.";
         Set(lblMenu, menuFilterTip);
         Set(checkBox1, menuFilterTip);
 
         const string pgxpTip =
-            "On: sub-pixel-precision vertices and perspective-correct textures\n" +
-            "(reduced PSX vertex jitter and texture warping).\n" +
-            "Off: authentic PSX look (affine textures, vertex snapping).\n" +
-            "Press F1 in-game to toggle on the fly.";
+            "On: precise vertices and perspective-correct textures (less wobble and warping).\n" +
+            "Off: authentic PSX look. Toggle in-game with F1.";
         Set(pgxpLabel,  pgxpTip);
         Set(pgxpYes,    pgxpTip);
         Set(pgxpNo,     pgxpTip);
 
         const string skipIntrosTip =
-            "How much of the boot sequence to skip.\n" +
-            "Don't Skip = warning screen, logos and intro movie, as the\n" +
-            "             original game does.\n" +
-            "Skip to Menu = straight to the title screen.\n" +
-            "Skip to Game = straight into gameplay: starts a New Game on\n" +
-            "             NORMAL at the map set on the Advanced page, and\n" +
-            "             skips the opening movie.";
+            "Don't Skip: warning, logos and intro movie, as in the original.\n" +
+            "Skip to Menu: straight to the title screen.\n" +
+            "Skip to Game: starts a New Game (Normal) on the map chosen under Level.";
         Set(skipIntrosLabel,  skipIntrosTip);
         Set(comboSkipIntros,  skipIntrosTip);
 
+        const string decalsTip =
+            "Bullet holes on walls where your shots land.\n" +
+            "Not in the original game, so off by default.";
+        Set(decalsLabel,      decalsTip);
+        Set(radioDecalsYes,   decalsTip);
+        Set(radioDecalsNo,    decalsTip);
+
+        const string renderTip =
+            "Graphics API. OpenGL (native) is the default and the best tested.\n" +
+            "The others run through ANGLE: try Direct3D 11 or Vulkan if OpenGL misbehaves.\n" +
+            "WARP and Software render on the CPU (very slow).\n" +
+            "ANGLE needs libEGL.dll and libGLESv2.dll next to the exe.";
+        Set(lblRender,        renderTip);
+        Set(comboRender,      renderTip);
+
+        const string shadowTip =
+            "Flashlight shadow map size (shadow flashlight modes only).\n" +
+            "Higher is sharper but costs more GPU; 8192 needs a recent GPU.\n" +
+            "Console: shadowres <size>";
+        Set(lblShadow,        shadowTip);
+        Set(comboShadow,      shadowTip);
+
+        const string minimapTip =
+            "Minimap shape and screen corner.\n" +
+            "Size and opacity are in the in-game options. Console: minimap";
+        Set(lblMinimap,       minimapTip);
+        Set(comboMinimap,     minimapTip);
+
         const string preloadTip =
-            "Preload all map chunks at level start instead of streaming\n" +
-            "them in as you walk. Eliminates pop-in but uses more memory\n" +
-            "and lengthens the initial load. Yes is recommended; No =\n" +
-            "original PSX streaming.";
+            "Load every map chunk at level start instead of streaming them as you walk.\n" +
+            "No pop-in, but more memory and a longer first load. Recommended.";
         Set(chunksLabel,      preloadTip);
         Set(radioPreloadYes,  preloadTip);
         Set(radioPreloadNo,   preloadTip);
 
         const string pillarboxTip =
-            "How 4:3 black bars (pillarboxes) are applied on a widescreen\n" +
-            "(16:9 / wider) display. No effect on a 4:3 window.\n" +
-            "  Menus Only (default): 2D menus / save-load / load screen are\n" +
-            "  pillarboxed; 3D gameplay fills the screen (widescreen Hor+).\n" +
-            "  Yes: pillarbox everything - 2D menus AND 3D gameplay get bars.\n" +
-            "  No: no bars anywhere - 3D gameplay is Hor+ and menus stretch.";
+            "4:3 black bars on widescreen displays:\n" +
+            "Menus Only (default): bars on 2D screens; 3D gameplay fills the screen.\n" +
+            "Yes: bars everywhere.\n" +
+            "No: no bars; menus are stretched.";
         Set(refreshLabel,        pillarboxTip);
         Set(comboPillarbox,      pillarboxTip);
 
         const string discTip =
-            "Which disc image file to boot (discs are identified by their\n" +
-            "ISO boot serial, filenames don't matter). Auto = USA, then PAL,\n" +
-            "then NTSC-J; picking a file boots exactly that image.\n" +
-            "[modified] marks fan translations / patched discs — their voice\n" +
-            "dub, story and item text are read straight off the disc. For a\n" +
-            "Spanish (or other) fan translation, also pick the matching\n" +
-            "Language in the title screen's options so the menus follow\n" +
-            "(or set `language = es` in config.cfg). PAL carries\n" +
-            "EN/DE/FR/ES/IT text; NTSC-J plays with English story text\n" +
-            "replaced by Japanese (Rev 1/2 discs).";
+            "Disc image to boot. Discs are detected by serial, so filenames don't matter.\n" +
+            "Auto picks USA, then PAL, then NTSC-J. PAL carries EN/DE/FR/ES/IT text.\n" +
+            "[modified] marks fan translations and patched discs; also pick the matching\n" +
+            "Language in the title screen options (or set language = es in config.cfg).";
         Set(regionLabel, discTip);
         Set(comboDisc,   discTip);
         Set(lblDisc,     discTip);
 
         const string levelTip =
-            "Which map to load when you start a New Game. Default map0_s00\n" +
-            "is the intro alley. Useful for jumping straight to a specific\n" +
-            "scene during testing.";
+            "Map a New Game starts on (default map0_s00, the intro alley).\n" +
+            "Handy for jumping to a specific scene when testing.";
         Set(label1,   levelTip);
         Set(comboMap, levelTip);
 
         const string audioTip =
-            "Speaker layout. Auto detects your Windows sound setup\n" +
-            "(a 5.1 system gets surround automatically). With rear\n" +
-            "speakers active, monster cries / doors / world sounds pan\n" +
-            "all around you and diffuse ambience layers play from the\n" +
-            "surrounds. HRTF = binaural 3D for headphones.\n" +
-            "Also live-switchable in-game: console AUDIOOUT.";
+            "Speaker layout. Auto follows your Windows sound setup.\n" +
+            "With surround speakers, sounds pan all around you. HRTF = 3D audio for headphones.\n" +
+            "In-game console: AUDIOOUT";
         Set(audioLabel,    audioTip);
         Set(comboAudioOut, audioTip);
 
         Set(chkRandomizer,
-            "Randomizer gamemode.\n\n" +
-            "New Game always opens in the police station (map2_s04). Every door\n" +
-            "then leads somewhere random — another area, another room, a miniboss,\n" +
-            "or nothing at all if it rolls locked. The door you came in through\n" +
-            "stays shut for 10 seconds.\n\n" +
-            "Monsters and item pickups are rerolled every time you enter an area.\n" +
-            "After 10 areas (or a 1% chance on any door) you land at the final\n" +
-            "boss, and your score picks which of the four endings you get.\n\n" +
-            "Takes over the Level dropdown, and forces the global chara pool on.");
+            "Randomizer mode: New Game starts in the police station and every door\n" +
+            "leads somewhere random. Monsters and items reroll each time you enter an area.\n" +
+            "After 10 areas you face the final boss; your score picks the ending.\n" +
+            "Overrides the Level setting.");
 
         const string uncensoredTip =
-            "Censor the school child enemies on a PAL/European disc.\n\n" +
-            "PAL is the only version that censored them into \"Mumblers\"; the\n" +
-            "original Grey Child model ships on the disc unused.\n\n" +
-            "Checked (default) = Mumblers, matching the retail PAL disc.\n" +
-            "Unchecked = restore the Grey Children, matching the US/NTSC content\n" +
-            "— so a PAL disc (which also carries every language) plays like the\n" +
-            "uncensored US version. No effect on USA / NTSC-J discs.";
+            "PAL and NTSC-J discs. Checked (default): the censored \"Mumblers\", as on\n" +
+            "the retail disc. Unchecked: the original Grey Children, as on the US disc.\n" +
+            "PAL censors them everywhere, NTSC-J in the school and the amusement park.\n" +
+            "No effect on a USA disc, which was never censored.";
+        Set(lblMenuType,   Loc.T("Which main menu the game shows: the US picture, "
+                                + "PAL's fog-only title, or the Japanese logo. "
+                                + "Auto follows the disc."));
+        Set(comboMenuType, Loc.T("Which main menu the game shows: the US picture, "
+                                + "PAL's fog-only title, or the Japanese logo. "
+                                + "Auto follows the disc."));
+        const string gameLangTip =
+            "Which language the game runs in. Automatic follows the disc: US English" +
+            " on a USA disc, PAL English on a PAL one, Japanese on NTSC-J.";
+        Set(lblGameLang,   Loc.T(gameLangTip));
+        Set(comboGameLang, Loc.T(gameLangTip));
         Set(lblUncensored,  uncensoredTip);
         Set(chkUncensored,  uncensoredTip);
 
         const string loggingTip =
-            "Write SH_DBG output to SilentHill.log next to the executable.\n" +
-            "Required for diagnosing crashes/regressions; small disk-write\n" +
-            "overhead. Leave set to Yes if you might report a bug.";
+            "Write a log to SilentHill.log next to the game.\n" +
+            "Needed to diagnose crashes; keep it on if you might report a bug.";
         Set(loggingLabel,  loggingTip);
         Set(loggingYes,    loggingTip);
         Set(loggingNo,     loggingTip);
 
         const string consoleTip =
-            "Yes = open a separate external console window that mirrors\n" +
-            "SH_DBG_ECHO output live. The in-game console can be toggled by\n" +
-            "holding ~ at any time if debug controls are enabled, so this is\n" +
-            "optional.";
+            "Open a separate console window with live debug output.\n" +
+            "Optional: with debug controls on, hold ~ in-game for the built-in console.";
         Set(consoleLabel,  consoleTip);
         Set(consoleYes,    consoleTip);
         Set(consoleNo,     consoleTip);
 
         const string aaTip =
-            "Antialiasing (MSAA) smooths jagged polygon edges in the 3D world.\n" +
-            "Higher = smoother but more GPU cost; textures, dither and 2D UI\n" +
-            "stay sharp. Falls back to Off automatically if the GPU can't\n" +
-            "provide it.";
+            "MSAA: smooths jagged 3D edges; higher costs more GPU.\n" +
+            "Textures and 2D UI stay sharp. Turns itself off if the GPU can't do it.";
         Set(aaLabel,   aaTip);
         Set(comboAA,   aaTip);
 
         const string postTip =
-            "Full-screen post-process look applied to the final image\n" +
-            "(CRT, scanlines, vignette, color grade, film grain, sharpen,\n" +
-            "PSX downsample, cinematic). Press F2 in-game to cycle it live.";
+            "Full-screen post-processing look (CRT, scanlines, vignette, film grain…).\n" +
+            "Cycle in-game with F2.";
         Set(postLabel, postTip);
         Set(comboPost, postTip);
 
         const string toneTip =
-            "Tone mapping operator on the final image (Reinhard, ACES, Filmic).\n" +
-            "Softens highlights for a more filmic look. Press F3 in-game to cycle.";
+            "Tone mapping (Reinhard, ACES, Filmic): softens highlights for a filmic look.\n" +
+            "Cycle in-game with F3.";
         Set(toneLabel, toneTip);
         Set(comboTone, toneTip);
 
         const string flashTip =
-            "Flashlight rendering.\n" +
-            "Classic: the original PSX flashlight (per-vertex lighting - each\n" +
-            "  polygon corner is lit and the light is blended across the surface).\n" +
-            "Classic + Shadows: a per-pixel (fragment-shader) cone calibrated to\n" +
-            "  match the original's beam shape, brightness, room color and falloff\n" +
-            "  exactly - the classic look plus real-time shadows (monsters/props\n" +
-            "  cast dynamic shadows in the beam).\n" +
-            "Modern: a stylized per-pixel spotlight - hard dark surround, per-\n" +
-            "  surface shading and its own warm beam, like a modern horror game.\n" +
-            "Modern + Shadows: the Modern spotlight with real-time shadows.\n" +
-            "Per-pixel modes compute the light at every pixel instead of per\n" +
-            "  polygon corner. Cycle in-game with F4; beam brightness/size are\n" +
-            "  tunable with [ and ] or the flint/flsize console commands.";
+            "Classic: the original PSX flashlight (per-vertex).\n" +
+            "Classic + Shadows: the same look per-pixel, with real-time shadows.\n" +
+            "Modern: a stylized per-pixel spotlight.\n" +
+            "Modern + Shadows: Modern with real-time shadows.\n" +
+            "Cycle in-game with F4; [ and ] adjust the beam.";
         Set(flashLabel, flashTip);
         Set(comboFlash, flashTip);
 
-        Set(btnManager, "Manage texture packs, load-folder mods, and FMV mods: enable/disable and set load order.");
+        const string fogTip =
+            "How far you can see through the fog. The default (1.10) is the classic game.\n" +
+            "Anything below 1.00 lets you see the world beyond the fog: the whole town is\n" +
+            "drawn out to the horizon. Below about 0.70 the fog has only a minimal effect.\n" +
+            "Also in game: F10 > Graphics.";
+        Set(lblFog, fogTip);
+        Set(trackFog, fogTip);
+        Set(lblFogValue, fogTip);
 
-        Set(btnPlay, "Save current settings to config.cfg and launch SilentHillPC.exe.");
+        const string lineGapTip =
+            "Emulates the PlayStation's CD seek before each spoken line in cutscenes.\n" +
+            "On the console a voice line started a beat after its subtitle while the disc\n" +
+            "sought the clip; the PC loads instantly. Scene and subtitle timing are unchanged,\n" +
+            "only the voice starts later. Normal is the default.";
+        Set(lblLineGap, lineGapTip);
+        Set(comboLineGap, lineGapTip);
+
+        Set(btnManager, "Manage texture packs, load-folder and FMV mods: enable, disable and set load order.");
+
+        Set(btnPlay, "Save settings and start the game.");
 
         // RA's tip reflects live sign-in state, so it gets its own refreshable pass.
         RefreshRaTooltip();
-        Set(btnChangelog, "Shows the LOCAL copy of CHANGELOG.md that's currently installed. (Build Settings and the update prompt preview other builds' changelogs.)");
-        Set(btnControls, "Customize keyboard and controller bindings, and toggle debug/cheat keys.");
-        Set(btnUpdate, "Check the selected branch for a build newer than any you've installed, and offer to update + switch to the latest.");
-        Set(btnBuildSettings, "Choose the repo, branch, and specific build the launcher tracks for updates.");
-        Set(downloadBuild, "Download (or re-download) the exact build selected in Build Settings, replacing your game files with it.");
+        Set(btnChangelog, "Show the changelog of the installed build.");
+        Set(btnControls, "Keyboard and controller bindings, plus debug/cheat keys.");
+        Set(btnUpdate, "Check the selected branch for a newer build and offer to update.");
+        Set(btnBuildSettings, "Choose the repo, branch and build to track for updates.");
+        Set(downloadBuild, "Download the build selected in Build Settings, replacing your game files.");
     }
 
     /// <summary>
@@ -684,6 +1024,38 @@ public partial class Form1 : Form
 
     private void PopulateDisplayOptions()
     {
+        /* Renderer backends. Filled HERE because the constructor runs
+         * PopulateDisplayOptions() before LoadConfig(), and LoadConfig sets
+         * comboRender.SelectedIndex — an empty combo makes that throw
+         * ArgumentOutOfRangeException and the launcher never opens. It first
+         * lived in LocalizeValueLists(), which runs after LoadConfig, and did
+         * exactly that.
+         *
+         * Display text is paired with the config value by INDEX through
+         * RendererValues, so what lands in config.cfg never depends on the
+         * label: the labels are PsyX_Backend's descriptions, the values are
+         * what PsyX_Backend_FromName parses. */
+        comboRender.Items.Clear();
+        comboRender.Items.AddRange(new object[] {
+            "OpenGL (native)", "OpenGL ES 3.0", "Direct3D 11 (ANGLE)",
+            "Vulkan (ANGLE)", "Direct3D 11 WARP (CPU)", "Software (SwiftShader)" });
+
+        /* Same index-pairing rule as the renderer: the visible text is localized,
+         * the config value comes from the parallel array, so a translation can
+         * never change what is written to config.cfg. */
+        comboShadow.Items.Clear();
+        comboShadow.Items.AddRange(new object[] {
+            "256 x 256", "512 x 512", "1024 x 1024", "2048 x 2048", "4096 x 4096",
+            "8192 x 8192" });
+
+        comboMinimap.Items.Clear();
+        comboMinimap.Items.AddRange(new object[] {
+            "Off",
+            "Circle + Top Left",     "Circle + Top Right",
+            "Circle + Bottom Left",  "Circle + Bottom Right",
+            "Square + Top Left",     "Square + Top Right",
+            "Square + Bottom Left",  "Square + Bottom Right" });
+
         var modes = DisplayModes.GetModes();
 
         // Unique resolutions, LARGEST FIRST. A HashSet enumerates in whatever
@@ -697,10 +1069,46 @@ public partial class Form1 : Form
             if (seen.Add($"{m.width}x{m.height}"))
                 resolutions.Add((m.width, m.height));
         }
+        /* PSX-native and its doubles, which no monitor reports as a display mode
+         * but which people ask for by name. Harmless in exclusive fullscreen --
+         * SDL_GetClosestDisplayMode picks the nearest real mode -- and exact in
+         * windowed. Added only if the driver did not already list them. */
+        foreach (var r in new[] { (320, 240), (640, 480), (960, 720) })
+        {
+            if (seen.Add($"{r.Item1}x{r.Item2}"))
+                resolutions.Add((r.Item1, r.Item2));
+        }
+
+        /* Standard 16:9 sizes the panel is big enough to frame. Some drivers --
+         * and every remote-desktop, capture or virtual display -- enumerate a
+         * handful of modes and nothing else, so a 1440p-capable screen could
+         * come up with no 2560x1440 entry at all. Bounded by the largest width
+         * and height actually reported, so nothing is offered to a display that
+         * cannot show it: exclusive fullscreen snaps to the nearest real mode
+         * (SDL_GetClosestDisplayMode) and windowed is exact. */
+        int maxW = 0, maxH = 0;
+        foreach (var r in resolutions)
+        {
+            if (r.w > maxW) maxW = r.w;
+            if (r.h > maxH) maxH = r.h;
+        }
+        foreach (var r in new[] { (1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160) })
+        {
+            if (r.Item1 > maxW || r.Item2 > maxH)
+                continue;
+            if (seen.Add($"{r.Item1}x{r.Item2}"))
+                resolutions.Add((r.Item1, r.Item2));
+        }
+
         resolutions.Sort((a, b) => a.w != b.w ? b.w.CompareTo(a.w) : b.h.CompareTo(a.h));
 
         foreach (var r in resolutions)
             comboResolution.Items.Add($"{r.w}x{r.h}");
+
+        /* Last, under 320x240: every screen at the resolution the game itself
+         * uses (320x224 play, 640x448 Konami, 320x448 menus), not one fixed size. */
+        _nativeResText = Loc.T("Native (PSX)");
+        comboResolution.Items.Add(_nativeResText);
 
         // Unique refresh rates, highest first.
         var refreshRates = new List<int>();
@@ -715,6 +1123,27 @@ public partial class Form1 : Form
             comboRefresh.Items.Add(hz.ToString());
     }
 
+
+    /* Keeps the largest-first order PopulateDisplayOptions established. */
+    private void InsertResolutionSorted(string res)
+    {
+        var parts = res.Split('x');
+        int w, h;
+        if (parts.Length != 2 || !int.TryParse(parts[0], out w) || !int.TryParse(parts[1], out h) ||
+            w <= 0 || h <= 0)
+            return;
+
+        int at = comboResolution.Items.Count;
+        for (int i = 0; i < comboResolution.Items.Count; i++)
+        {
+            var p = comboResolution.Items[i].ToString().Split('x');
+            int iw, ih;
+            if (p.Length != 2 || !int.TryParse(p[0], out iw) || !int.TryParse(p[1], out ih))
+                continue;
+            if (w > iw || (w == iw && h > ih)) { at = i; break; }
+        }
+        comboResolution.Items.Insert(at, res);
+    }
 
     private void LoadConfig()
     {
@@ -755,6 +1184,31 @@ public partial class Form1 : Form
         // (censored) → checked, so the box defaults on.
         chkUncensored.Checked = config.Get("uncensored", "0") == "0";
 
+        // Game language. Built once, then selected by code, because the row is
+        // a mix of what every disc carries and whatever packs are installed.
+        BuildGameLangList();
+        {
+            string gl = config.Get("language", "auto").Trim();
+            int    at = _gameLangCodes.FindIndex(
+                            c => string.Equals(c, gl, StringComparison.OrdinalIgnoreCase));
+
+            // An unknown or removed code lands on Automatic rather than on
+            // whatever happens to be first, which is what the game does too.
+            comboGameLang.SelectedIndex = at >= 0 ? at : 0;
+        }
+
+        // Main-menu style. "auto" is the disc's own, which is what every
+        // existing config says and what the game defaults to, so it stays the
+        // first item rather than silently pinning a style on the next save.
+        {
+            string ms = config.Get("menu_style", "auto").Trim().ToLowerInvariant();
+            comboMenuType.SelectedIndex =
+                  ms == "us" || ms == "western" || ms == "ntsc" ? 1
+                : ms == "pal" || ms == "eur"                    ? 2
+                : ms == "japanese" || ms == "jp" || ms == "ntscj" ? 3
+                : 0;
+        }
+
         // fullscreen
         // fullscreen: 0 = windowed, 1 = exclusive fullscreen, 2 = borderless.
         // Dropdown order: Fullscreen(0), Windowed(1), Borderless(2).
@@ -794,13 +1248,42 @@ public partial class Form1 : Form
         else
             comboFps.SelectedItem = "30";
 
-        // Filtering: int in config (0/1/2) <-> dropdown index
-        // 0 = Off, 1 = Dithering, 2 = Bilinear
+        /* Dithering and Filtering used to share one key (psx_dither), which meant
+         * the authentic dither could not be combined with a smoothing mode. They
+         * are separate keys now; a config that still only has the old one is
+         * translated here the same way the game translates it, so the launcher
+         * shows what is actually in effect.
+         *
+         * texture_filter indexes comboFiltering directly: 0 off, 1 bilinear,
+         * 2 trilinear, 3..6 anisotropic 2x/4x/8x/16x. */
+        int ditherOn = config.Get("dithering", "") == "1" ? 1 : 0;
         int filterIdx;
-        if (!int.TryParse(config.Get("psx_dither", "1"), out filterIdx))
-            filterIdx = 1; // default to dithering
-        if (filterIdx < 0 || filterIdx > 2) filterIdx = 1;
+        bool haveNewKeys = config.Get("dithering", "") != "" ||
+                           config.Get("texture_filter", "") != "";
+
+        if (!int.TryParse(config.Get("texture_filter", "0"), out filterIdx))
+            filterIdx = 0;
+
+        if (!haveNewKeys)
+        {
+            int legacy;
+            if (!int.TryParse(config.Get("psx_dither", "1"), out legacy))
+                legacy = 1;
+            ditherOn  = (legacy == 1) ? 1 : 0;
+            filterIdx = (legacy <= 1) ? 0 : legacy - 1;  // 2..7 -> 1..6
+        }
+
+        if (filterIdx < 0 || filterIdx >= comboFiltering.Items.Count) filterIdx = 0;
         comboFiltering.SelectedIndex = filterIdx;
+        comboDithering.SelectedIndex = ditherOn;
+
+        /* Scaling: how a render resolution below the window is scaled up to it.
+         * 0 integer, 1 nearest, 2 bilinear, 3 sharp bilinear. */
+        int scaleIdx;
+        if (!int.TryParse(config.Get("scaling", "2"), out scaleIdx))
+            scaleIdx = 2;
+        if (scaleIdx < 0 || scaleIdx >= comboScaling.Items.Count) scaleIdx = 2;
+        comboScaling.SelectedIndex = scaleIdx;
 
         // "Menus:" checkbox — also bilinear-filter menu/2D screens (config key menu_filter)
         checkBox1.Checked = config.Get("menu_filter", "0") == "1";
@@ -845,6 +1328,27 @@ public partial class Form1 : Form
             comboFlash.SelectedIndex = fmIdx;
         }
 
+        // cutscene_line_gap_ms: minimum pause after a voiced cutscene line.
+        // Presets only; a hand-set value that matches none shows the nearest
+        // preset and stays in the file unless the dropdown is changed.
+        {
+            int ms;
+            if (!int.TryParse(config.Get("cutscene_line_gap_ms", "300"), out ms)) ms = 300;
+            _lineGapLoadedIdx = LineGapIndexFor(ms);
+            comboLineGap.SelectedIndex = _lineGapLoadedIdx;
+        }
+
+        // fog_strength, snapped to the slider's 0.05 steps. A value the slider
+        // cannot show (set in game above 1.20) stays in the file unless moved.
+        {
+            float fs;
+            if (!float.TryParse(config.Get("fog_strength", "1.10"), System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out fs)) fs = 1.10f;
+            _fogLoadedStep = Math.Max(trackFog.Minimum, Math.Min(trackFog.Maximum, (int)Math.Round(fs / FogStep)));
+            trackFog.Value = _fogLoadedStep;
+            UpdateFogValueLabel();
+        }
+
         // Audio output (speaker layout): auto = OpenAL detects the system
         // layout. With rears active the game pans SFX on the full circle and
         // sends wide-stereo BGM layers to the surrounds.
@@ -857,7 +1361,20 @@ public partial class Form1 : Form
         // resolution
         string w = config.Get("width", "640");
         string h = config.Get("height", "480");
-        comboResolution.SelectedItem = $"{w}x{h}";
+        string res = $"{w}x{h}";
+        /* A size set by hand in config.cfg, or one this machine's driver does
+         * not enumerate, still has to be selectable: without this the box comes
+         * up blank and the next Save writes whatever the user picks instead. */
+        if (config.Get("native_resolution", "0") == "1" && _nativeResText != null)
+        {
+            comboResolution.SelectedItem = _nativeResText;
+        }
+        else
+        {
+            if (!comboResolution.Items.Contains(res))
+                InsertResolutionSorted(res);
+            comboResolution.SelectedItem = res;
+        }
 
         // refresh rate is config-only now (auto-detected by default); keep the
         // hidden combo populated harmlessly so its references stay valid.
@@ -881,6 +1398,46 @@ public partial class Form1 : Form
         comboSkipIntros.SelectedIndex = skipIntrosLevel;
 
         // preload_chunks (recommended: Yes — matches engine default)
+        // bullet_decals — off by default, matching the engine default.
+        radioDecalsYes.Checked = config.Get("bullet_decals", "0") == "1";
+        radioDecalsNo.Checked = !radioDecalsYes.Checked;
+        {
+            /* Never assign SelectedIndex without checking the item count. A
+             * combo that is empty (or shorter than expected) throws, and a
+             * throw in LoadConfig happens in the constructor, so the launcher
+             * dies before it draws a window — no UI, no log, nothing the user
+             * can act on. Clamping costs nothing and the worst case is a
+             * dropdown showing the wrong entry. */
+            int ri = Array.IndexOf(RendererValues, config.Get("renderer", "gl").Trim().ToLowerInvariant());
+            /* Unknown, or the retired "auto" — both mean OpenGL. GR_ResolveBackend
+             * maps PSYX_BACKEND_AUTO straight to PSYX_BACKEND_GL with no probing
+             * of any kind, so "Automatic" was a second name for the entry below
+             * it and is no longer offered. A config that still says auto lands
+             * here and shows what it actually gets. */
+            if (ri < 0) ri = 0;
+            if (ri >= comboRender.Items.Count) ri = 0;
+            comboRender.SelectedIndex = comboRender.Items.Count > 0 ? ri : -1;
+        }
+        {
+            int si = Array.IndexOf(ShadowResValues, config.Get("shadow_resolution", "1024").Trim());
+            if (si < 0 || si >= comboShadow.Items.Count) si = 2; /* 1024 */
+            comboShadow.SelectedIndex = comboShadow.Items.Count > 0 ? si : -1;
+        }
+        {
+            /* One dropdown over two keys: `minimap` is 0 off / 1 square / 2 circle,
+             * `minimap_corner` is 0..3. Off collapses both. */
+            int shape  = ParseIntOr(config.Get("minimap", "0"), 0);
+            int corner = ParseIntOr(config.Get("minimap_corner", "0"), 0);
+            if (corner < 0 || corner > 3) corner = 0;
+
+            int mi;
+            if (shape == 2)      mi = 1 + corner;   /* circle */
+            else if (shape == 1) mi = 5 + corner;   /* square */
+            else                 mi = 0;            /* off */
+
+            if (mi >= comboMinimap.Items.Count) mi = 0;
+            comboMinimap.SelectedIndex = comboMinimap.Items.Count > 0 ? mi : -1;
+        }
         radioPreloadYes.Checked = config.Get("preload_chunks", "1") == "1";
         radioPreloadNo.Checked = !radioPreloadYes.Checked;
 
@@ -894,9 +1451,36 @@ public partial class Form1 : Form
             "0");                                        // Windowed
         config.Set("vsync", radioVsyncYes.Checked ? "1" : "0");
         // resolution
-        if (comboResolution.SelectedItem != null)
+        if (comboResolution.SelectedItem != null &&
+            comboResolution.SelectedItem.ToString() == _nativeResText)
+        {
+            /* The render size follows the game, so width/height only size the
+             * window: the desktop when fullscreen, otherwise the largest whole
+             * multiple of 320x240 that leaves room on the screen. */
+            var scr = Screen.PrimaryScreen;
+            int ww, wh;
+
+            if (comboFullscreen.SelectedIndex != 1)
+            {
+                ww = scr.Bounds.Width;
+                wh = scr.Bounds.Height;
+            }
+            else
+            {
+                int k = Math.Min(scr.WorkingArea.Width * 9 / 10 / 320,
+                                 scr.WorkingArea.Height * 9 / 10 / 240);
+                if (k < 2) k = 2;
+                ww = 320 * k;
+                wh = 240 * k;
+            }
+            config.Set("native_resolution", "1");
+            config.Set("width", ww.ToString());
+            config.Set("height", wh.ToString());
+        }
+        else if (comboResolution.SelectedItem != null)
         {
             var parts = comboResolution.SelectedItem.ToString().Split('x');
+            config.Set("native_resolution", "0");
             config.Set("width", parts[0]);
             config.Set("height", parts[1]);
         }
@@ -918,6 +1502,15 @@ public partial class Form1 : Form
         config.Set("skip_intros", comboSkipIntros.SelectedIndex.ToString());
 
         // preload_chunks
+        config.Set("bullet_decals", radioDecalsYes.Checked ? "1" : "0");
+        config.Set("renderer", RendererValues[comboRender.SelectedIndex >= 0 ? comboRender.SelectedIndex : 1]);
+        config.Set("shadow_resolution", ShadowResValues[comboShadow.SelectedIndex >= 0 ? comboShadow.SelectedIndex : 2]);
+        {
+            int mi = comboMinimap.SelectedIndex;
+            if (mi < 0) mi = 0;
+            config.Set("minimap",        mi == 0 ? "0" : (mi <= 4 ? "2" : "1"));
+            config.Set("minimap_corner", mi == 0 ? "0" : ((mi <= 4 ? mi - 1 : mi - 5)).ToString());
+        }
         config.Set("preload_chunks", radioPreloadYes.Checked ? "1" : "0");
 
         // enable debug logging
@@ -933,9 +1526,15 @@ public partial class Form1 : Form
         if (comboFps.SelectedItem != null)
             config.Set("fps_cap", comboFps.SelectedItem.ToString());
 
-        // Filtering: dropdown index (0=Off, 1=Dithering, 2=Bilinear) -> int
+        /* Filtering and Dithering are independent keys. psx_dither is deliberately
+         * not written back: it only exists so an old config still loads, and
+         * leaving it alone keeps it from overriding these two on the next boot. */
         if (comboFiltering.SelectedIndex >= 0)
-            config.Set("psx_dither", comboFiltering.SelectedIndex.ToString());
+            config.Set("texture_filter", comboFiltering.SelectedIndex.ToString());
+        if (comboDithering.SelectedIndex >= 0)
+            config.Set("dithering", comboDithering.SelectedIndex == 1 ? "1" : "0");
+        if (comboScaling.SelectedIndex >= 0)
+            config.Set("scaling", comboScaling.SelectedIndex.ToString());
         config.Set("menu_filter", checkBox1.Checked ? "1" : "0");
 
         // Antialiasing (MSAA): dropdown index 0..3 -> msaa 0/2/4/8
@@ -965,6 +1564,13 @@ public partial class Form1 : Form
             config.Set("flashlight_shadows", (fmIdx == 1 || fmIdx == 3) ? "1" : "0");
         }
 
+        if (comboLineGap.SelectedIndex >= 0 &&
+            (comboLineGap.SelectedIndex != _lineGapLoadedIdx || config.Get("cutscene_line_gap_ms", "") == ""))
+            config.Set("cutscene_line_gap_ms", LineGapValues[comboLineGap.SelectedIndex].ToString());
+
+        if (trackFog.Value != _fogLoadedStep)
+            config.Set("fog_strength", (trackFog.Value * FogStep).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+
         // Audio output dropdown -> audio_output string id.
         if (comboAudioOut.SelectedIndex >= 0)
             config.Set("audio_output", AudioOutputIds[comboAudioOut.SelectedIndex]);
@@ -978,6 +1584,22 @@ public partial class Form1 : Form
 
         config.Set("randomizer", chkRandomizer.Checked ? "1" : "0");
         config.Set("uncensored", chkUncensored.Checked ? "0" : "1"); // checked = censored
+
+        // By INDEX into the parallel code list, for the same reason as below:
+        // the visible names are translated, the codes are not.
+        if (comboGameLang.SelectedIndex >= 0 &&
+            comboGameLang.SelectedIndex < _gameLangCodes.Count)
+            config.Set("language", _gameLangCodes[comboGameLang.SelectedIndex]);
+
+        // Read by INDEX, never by item text: the items are region codes the
+        // game parses, and Loc must never be able to change what lands here.
+        switch (comboMenuType.SelectedIndex)
+        {
+            case 1:  config.Set("menu_style", "us");       break;
+            case 2:  config.Set("menu_style", "pal");      break;
+            case 3:  config.Set("menu_style", "japanese"); break;
+            default: config.Set("menu_style", "auto");     break;
+        }
 
         // Level: persist only the map id, not the " - description" suffix. Skipped
         // while the randomizer owns the row — the selection is the synthetic
@@ -994,6 +1616,58 @@ public partial class Form1 : Form
 
     // Dropdown index -> audio_output config id (matches the game's parser).
     private static readonly string[] AudioOutputIds = { "auto", "stereo", "quad", "51", "71", "hrtf" };
+
+    // Fog/World Visibility slider -> fog_strength. Capped at 1.20 rather than
+    // the game's 2.0: past that the town is already fully fogged out.
+    private const float FogStep = 0.05f;
+    private int _fogLoadedStep = 22;
+
+    // A "No" holds until the launcher is closed; "Do Not Ask Again" is saved.
+    private static bool s_pgxpFogDeclined;
+
+    private void AskPgxpForDistantWorld()
+    {
+        if (trackFog.Value * FogStep >= 0.999f || pgxpYes.Checked || s_pgxpFogDeclined)
+            return;
+        if (config.Get("launcher_warn_pgxp_fog", "1").Trim() == "0")
+            return;
+
+        using (var dlg = new SilentHillPC_Launcher.PgxpFogDialog())
+        {
+            dlg.ShowDialog(this);
+            switch (dlg.Result)
+            {
+                case SilentHillPC_Launcher.PgxpFogDialog.Choice.Yes:
+                    pgxpYes.Checked = true;
+                    break;
+                case SilentHillPC_Launcher.PgxpFogDialog.Choice.NeverAsk:
+                    config.EnsureLauncherSection();
+                    config.Set("launcher_warn_pgxp_fog", "0");
+                    config.Save();
+                    break;
+                default:
+                    s_pgxpFogDeclined = true;
+                    break;
+            }
+        }
+    }
+
+    private void UpdateFogValueLabel()
+    {
+        lblFogValue.Text = (trackFog.Value * FogStep).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // Dialog Pause dropdown -> cutscene_line_gap_ms (CD seek before each voice
+    // line). 300 is the engine default.
+    private static readonly int[] LineGapValues = { 0, 150, 300, 600 };
+    private int _lineGapLoadedIdx = 2;
+    private static int LineGapIndexFor(int ms)
+    {
+        if (ms <= 0)   return 0;
+        if (ms <= 220) return 1;
+        if (ms <= 450) return 2;
+        return 3;
+    }
 
     private const string RandomizerMapEntry = "Randomizer Enabled";
 
@@ -1095,15 +1769,41 @@ public partial class Form1 : Form
 
         if (!File.Exists(exePath))
         {
-            MessageBox.Show("SilentHillPC.exe not found.");
+            MessageBox.Show(Loc.T("SilentHillPC.exe not found."));
             return;
         }
 
         try
         {
-            var p = Process.Start(exePath);
+            // The game opens config.cfg relative to its working directory; a
+            // shortcut with another "Start in" folder made it read (and write
+            // binds to) a different file than the one this launcher edits.
+            var p = Process.Start(new ProcessStartInfo(exePath)
+            {
+                WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                UseShellExecute  = false,
+            });
             if (p != null)
             {
+                /* THE stale-settings bug. The launcher loads config.cfg once at
+                 * startup, and this handler saves the UI state before every
+                 * launch -- so: Play, change options in-game (the game writes
+                 * them to config.cfg correctly), quit, Play again... and this
+                 * SaveConfig() just overwrote the in-game changes with whatever
+                 * the launcher was showing from before. Reload the UI from disk
+                 * the moment the game exits, so the launcher always reflects the
+                 * most recent writer. */
+                try
+                {
+                    p.EnableRaisingEvents = true;
+                    p.Exited += (s2, e2) =>
+                    {
+                        try { BeginInvoke((Action)(() => LoadConfig())); }
+                        catch { /* launcher closing; nothing to refresh */ }
+                    };
+                }
+                catch { }
+
                 // Grant the child process permission to come to the foreground.
                 AllowSetForegroundWindow((uint)p.Id);
 
@@ -1122,7 +1822,7 @@ public partial class Form1 : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Failed to launch SilentHillPC.exe: " + ex.Message);
+            MessageBox.Show(Loc.F("Failed to launch SilentHillPC.exe: {0}", ex.Message));
             return;
         }
 
@@ -1140,7 +1840,7 @@ public partial class Form1 : Form
         var settings = LauncherSettings.Load(config);
 
         SetUpdateBusy(true);
-        lblUpdateStatus.Text = "Checking for updates...";
+        SetText(lblUpdateStatus, "Checking for updates...");
         progUpdate.Style   = ProgressBarStyle.Marquee;
         progUpdate.Visible = true;
         try
@@ -1151,32 +1851,37 @@ public partial class Form1 : Form
             bool available = LauncherSettings.CompareVersions(plan.RemoteVersion, settings.GetSeen(config)) > 0;
             if (!available)
             {
-                btnUpdate.Text = "Check for Updates";
-                lblUpdateStatus.Text = $"Up to date ({plan.RemoteVersion}).";
+                SetText(btnUpdate, "Check for Updates");
+                SetText(lblUpdateStatus, "Up to date ({0}).", plan.RemoteVersion);
                 progUpdate.Visible = false;
                 MessageBox.Show(this,
-                    $"You're up to date!\n\nSource: {plan.RepoLabel}\nLatest: {plan.RemoteVersion}",
-                    "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    Loc.F("You're up to date!\n\nSource: {0}\nLatest: {1}", plan.RepoLabel, plan.RemoteVersion),
+                    Loc.T("Check for Updates"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            btnUpdate.Text = "Update available!";
+            SetText(btnUpdate, "Update available!");
             lblUpdateStatus.ForeColor = Color.LightGreen;
 
             // Always re-promptable: clicking the button offers the update every
             // time, even if you said "no" before. (View Changelog previews the
             // incoming build's notes without downloading it.)
-            bool wantUpdate = PromptUpdate("Update available",
-                $"A newer build is available: {plan.RemoteVersion}\n" +
-                $"Built: {plan.BuildDate}\n" +
-                $"Source: {plan.RepoLabel}\n\n" +
-                (plan.IsBeta ? "This build is on the BETA branch (newer than the latest alpha/stable build).\n\n" : "") +
-                (settings.IsLatestBuild ? "" : $"You currently have build '{settings.Build}' selected.\n") +
-                "Update to the latest build and switch to it now?",
+            bool wantUpdate = PromptUpdate(Loc.T("Update available"),
+                Loc.F("A newer build is available: {0}\nBuilt: {1}\nSource: {2}",
+                      plan.RemoteVersion, plan.BuildDate, plan.RepoLabel) + "\n\n" +
+                (plan.IsBeta ? Loc.T("This build is on the BETA branch (newer than the latest alpha/stable build).") + "\n\n" : "") +
+                (plan.IsRealtime ? Loc.T("This is an automatic realtime build, made from the latest changes and not tested first.") + "\n\n" : "") +
+                (plan.IsCustom
+                    ? Loc.F("This is the experimental build \"{0}\", not a normal release. " +
+                            "You stay on it until you pick another branch in Build Settings.",
+                            string.IsNullOrWhiteSpace(plan.BuildName) ? "custom" : plan.BuildName) + "\n\n"
+                    : "") +
+                (settings.IsLatestBuild ? "" : Loc.F("You currently have build '{0}' selected.", settings.Build) + "\n") +
+                Loc.T("Update to the latest build and switch to it now?"),
                 plan.ChangelogUrl);
             if (!wantUpdate)
             {
-                lblUpdateStatus.Text = $"Update {plan.RemoteVersion} skipped.";
+                SetText(lblUpdateStatus, "Update {0} skipped.", plan.RemoteVersion);
                 progUpdate.Visible = false;
                 return;
             }
@@ -1184,26 +1889,28 @@ public partial class Form1 : Form
             bool applied = await RunApplyAsync(installDir, plan, showFileConfirm: false);
             if (applied)
             {
-                settings.Build = "latest";   // switch to latest
+                // Stay with whatever stream the user is on: a custom build keeps
+                // following its own named build, everything else tracks latest.
+                settings.Build = UpdateChecker.CustomFamilyLatestToken(settings.Build) ?? "latest";
                 if (!string.IsNullOrEmpty(plan.MigrateToBranch))
                     settings.Branch = plan.MigrateToBranch;   // auto-migrate alpha -> beta
                 settings.Save(config);
                 settings.RecordInstalled(config, plan.RemoteVersion);
-                btnUpdate.Text = "Check for Updates";
-                downloadBuild.Text = "Redownload Build"; // latest is now installed
+                SetText(btnUpdate, "Check for Updates");
+                SetText(downloadBuild, "Redownload Build"); // latest is now installed
                 lblUpdateStatus.ForeColor = Color.LightGray;
-                lblUpdateStatus.Text = $"Up to date ({plan.RemoteVersion}).";
-                MessageBox.Show(this, "Update complete!", "Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SetText(lblUpdateStatus, "Up to date ({0}).", plan.RemoteVersion);
+                MessageBox.Show(this, Loc.T("Update complete!"), Loc.T("Update"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                lblUpdateStatus.Text = $"Update {plan.RemoteVersion} skipped.";
+                SetText(lblUpdateStatus, "Update {0} skipped.", plan.RemoteVersion);
             }
         }
         catch (Exception ex)
         {
-            lblUpdateStatus.Text = "Update failed (see message).";
-            MessageBox.Show(this, "Update failed:\n\n" + ex.Message, "Update error",
+            SetText(lblUpdateStatus, "Update failed (see message).");
+            MessageBox.Show(this, Loc.F("Update failed:\n\n{0}", ex.Message), Loc.T("Update error"),
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -1222,7 +1929,7 @@ public partial class Form1 : Form
         var settings = LauncherSettings.Load(config);
 
         SetUpdateBusy(true);
-        lblUpdateStatus.Text = "Checking selected build...";
+        SetText(lblUpdateStatus, "Checking selected build...");
         progUpdate.Style   = ProgressBarStyle.Marquee;
         progUpdate.Visible = true;
         try
@@ -1232,25 +1939,25 @@ public partial class Form1 : Form
             if (!plan.HasUpdate)
             {
                 progUpdate.Visible = false;
-                lblUpdateStatus.Text = $"Build {plan.RemoteVersion} is installed.";
+                SetText(lblUpdateStatus, "Build {0} is installed.", plan.RemoteVersion);
                 MessageBox.Show(this,
-                    $"Build {plan.RemoteVersion} is already installed.\n\nSource: {plan.RepoLabel}",
-                    "Download Build", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    Loc.F("Build {0} is already installed.\n\nSource: {1}", plan.RemoteVersion, plan.RepoLabel),
+                    Loc.T("Download Build"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             var others = plan.Changed.Where(f => !UpdateChecker.IsLauncherFile(f.Path)).ToList();
             var sb = new StringBuilder();
-            sb.AppendLine($"Download build {plan.RemoteVersion}?");
-            sb.AppendLine($"Built: {plan.BuildDate}");
-            sb.AppendLine($"Source: {plan.RepoLabel}");
+            sb.AppendLine(Loc.F("Download build {0}?", plan.RemoteVersion));
+            sb.AppendLine(Loc.F("Built: {0}", plan.BuildDate));
+            sb.AppendLine(Loc.F("Source: {0}", plan.RepoLabel));
             sb.AppendLine();
-            sb.AppendLine($"{others.Count} file(s) will be replaced with this build:");
+            sb.AppendLine(Loc.F("{0} file(s) will be replaced with this build:", others.Count));
             int i = 0;
             foreach (var f in others)
             {
                 if (i++ < 10) sb.AppendLine($"  • {f.Path}");
-                else { sb.AppendLine($"  • ... and {others.Count - 10} more"); break; }
+                else { sb.AppendLine("  • " + Loc.F("... and {0} more", others.Count - 10)); break; }
             }
             sb.AppendLine();
             bool hasExisting = File.Exists(Path.Combine(installDir, "SilentHillPC.exe"));
@@ -1258,20 +1965,20 @@ public partial class Form1 : Form
             MessageBoxIcon promptIcon;
             if (hasExisting)
             {
-                sb.AppendLine("This will overwrite your existing files. Are you sure you want to continue?");
-                promptTitle = "Overwrite existing files?";
+                sb.AppendLine(Loc.T("This will overwrite your existing files. Are you sure you want to continue?"));
+                promptTitle = Loc.T("Overwrite existing files?");
                 promptIcon  = MessageBoxIcon.Warning;
             }
             else
             {
-                sb.AppendLine("Download and install now?");
-                promptTitle = "Download Build";
+                sb.AppendLine(Loc.T("Download and install now?"));
+                promptTitle = Loc.T("Download Build");
                 promptIcon  = MessageBoxIcon.Information;
             }
             if (MessageBox.Show(this, sb.ToString(), promptTitle,
                     MessageBoxButtons.YesNo, promptIcon) != DialogResult.Yes)
             {
-                lblUpdateStatus.Text = "Download cancelled.";
+                SetText(lblUpdateStatus, "Download cancelled.");
                 progUpdate.Visible = false;
                 return;
             }
@@ -1281,20 +1988,20 @@ public partial class Form1 : Form
             {
                 settings.RecordInstalled(config, plan.RemoteVersion);
                 lblUpdateStatus.ForeColor = Color.LightGray;
-                lblUpdateStatus.Text = $"Build {plan.RemoteVersion} installed.";
-                MessageBox.Show(this, $"Build {plan.RemoteVersion} installed!", "Download Build",
+                SetText(lblUpdateStatus, "Build {0} installed.", plan.RemoteVersion);
+                MessageBox.Show(this, Loc.F("Build {0} installed!", plan.RemoteVersion), Loc.T("Download Build"),
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 SilentAutoCheckForUpdates(); // refresh the update indicator
             }
             else
             {
-                lblUpdateStatus.Text = "Download cancelled.";
+                SetText(lblUpdateStatus, "Download cancelled.");
             }
         }
         catch (Exception ex)
         {
-            lblUpdateStatus.Text = "Download failed (see message).";
-            MessageBox.Show(this, "Download failed:\n\n" + ex.Message, "Download error",
+            SetText(lblUpdateStatus, "Download failed (see message).");
+            MessageBox.Show(this, Loc.F("Download failed:\n\n{0}", ex.Message), Loc.T("Download error"),
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -1320,14 +2027,16 @@ public partial class Form1 : Form
         bool applyLauncher = false;
         if (launcherEntry != null && plan.LauncherIsNewer)
         {
-            var lmsg =
-                "Launcher has an update available, are you sure you want to update?\n\n" +
-                $"New launcher version: {plan.LauncherVersion}\n" +
-                $"Current version:      {LauncherSettings.OwnLauncherVersion()}\n" +
-                $"Build:  {plan.RemoteVersion}  ({plan.BuildDate})\n" +
-                $"Source: {plan.RepoLabel}\n\n" +
-                "The launcher is replaced and the new version loads the next time you open it.";
-            applyLauncher = MessageBox.Show(this, lmsg, "Launcher update",
+            var lmsg = Loc.F(
+                "An update for the launcher is available. Update it?\n\n" +
+                "New launcher version: {0}\n" +
+                "Current version: {1}\n" +
+                "Build: {2} ({3})\n" +
+                "Source: {4}\n\n" +
+                "The launcher is replaced and the new version loads the next time you open it.",
+                plan.LauncherVersion, LauncherSettings.OwnLauncherVersion(),
+                plan.RemoteVersion, plan.BuildDate, plan.RepoLabel);
+            applyLauncher = MessageBox.Show(this, lmsg, Loc.T("Launcher update"),
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
@@ -1336,16 +2045,18 @@ public partial class Form1 : Form
         if (applyOthers && showFileConfirm)
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"{others.Count} file(s) to {(plan.Mode == "zip" ? "install (from zip)" : "download")}:");
+            sb.AppendLine(plan.Mode == "zip"
+                ? Loc.F("{0} file(s) to install (from zip):", others.Count)
+                : Loc.F("{0} file(s) to download:", others.Count));
             int i = 0;
             foreach (var f in others)
             {
                 if (i++ < 10) sb.AppendLine($"  • {f.Path}");
-                else { sb.AppendLine($"  • ... and {others.Count - 10} more"); break; }
+                else { sb.AppendLine("  • " + Loc.F("... and {0} more", others.Count - 10)); break; }
             }
             sb.AppendLine();
-            sb.AppendLine("Continue?");
-            applyOthers = MessageBox.Show(this, sb.ToString(), "Update",
+            sb.AppendLine(Loc.T("Continue?"));
+            applyOthers = MessageBox.Show(this, sb.ToString(), Loc.T("Update"),
                 MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes;
         }
 
@@ -1365,25 +2076,32 @@ public partial class Form1 : Form
             BeginInvoke((Action)(() =>
             {
                 if (frac >= 0 && frac <= 1) progUpdate.Value = (int)(frac * 100);
-                lblUpdateStatus.Text = msg ?? "";
+                lblUpdateStatus.Text = Loc.T(msg ?? "");
             }));
         });
 
         if (applyLauncher)
             MessageBox.Show(this,
-                "The launcher itself was updated — the new version loads the next time you open it.",
-                "Launcher updated", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Loc.T("The launcher itself was updated — the new version loads the next time you open it."),
+                Loc.T("Launcher updated"), MessageBoxButtons.OK, MessageBoxIcon.Information);
         return true;
     }
 
     private void btnChangelog_Click(object sender, EventArgs e)
     {
         string changelogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CHANGELOG.md");
+        string realtimePath  = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LauncherSettings.RealtimeChangelogFile);
+        if (LauncherSettings.Load(config).UsesRealtime && File.Exists(realtimePath))
+        {
+            ChangelogViewer.Show(this, Loc.T("Silent Hill PC Port — Realtime builds (installed)"),
+                File.ReadAllText(realtimePath, System.Text.Encoding.UTF8));
+            return;
+        }
         string text = File.Exists(changelogPath)
             ? File.ReadAllText(changelogPath, System.Text.Encoding.UTF8)
-            : "CHANGELOG.md not found next to the launcher.\n\n" +
-              "Run 'Check for Updates' to download the latest build which includes the changelog.";
-        ChangelogViewer.Show(this, "Silent Hill PC Port — Changelog (installed)", text);
+            : Loc.T("CHANGELOG.md not found next to the launcher.\n\n" +
+                    "Run 'Check for Updates' to download the latest build, which includes the changelog.");
+        ChangelogViewer.Show(this, Loc.T("Silent Hill PC Port — Changelog (installed)"), text);
     }
 
     // Update prompt with a "View Changelog" button that previews the INCOMING
@@ -1406,16 +2124,32 @@ public partial class Form1 : Form
         })
         {
             var lbl    = new Label  { Text = message, Left = 14, Top = 14, Width = 404, Height = 112, AutoSize = false };
-            var btnCl  = new Button { Text = "View Changelog", Left = 14,  Top = 150, Width = 120, Height = 28 };
-            var btnYes = new Button { Text = "Update",         Left = 246, Top = 150, Width = 80,  Height = 28 };
-            var btnNo  = new Button { Text = "Not now",        Left = 332, Top = 150, Width = 86,  Height = 28, DialogResult = DialogResult.Cancel };
+            var btnCl  = new Button { Text = Loc.T("View Changelog"), Left = 14,  Top = 150, Width = 120, Height = 28 };
+            var btnYes = new Button { Text = Loc.T("Update"),         Left = 246, Top = 150, Width = 80,  Height = 28 };
+            var btnNo  = new Button { Text = Loc.T("Not now"),        Left = 332, Top = 150, Width = 86,  Height = 28, DialogResult = DialogResult.Cancel };
+
+            // Translations run longer than the English this was laid out for:
+            // grow the label to its text and each button to its caption.
+            int textH = TextRenderer.MeasureText(message, dlg.Font, new Size(lbl.Width, 0),
+                                                 TextFormatFlags.WordBreak).Height;
+            if (textH > lbl.Height)
+            {
+                int grow = textH - lbl.Height + 4;
+                lbl.Height += grow;
+                foreach (var b in new[] { btnCl, btnYes, btnNo }) b.Top += grow;
+                dlg.ClientSize = new Size(dlg.ClientSize.Width, dlg.ClientSize.Height + grow);
+            }
+            foreach (var b in new[] { btnCl, btnYes, btnNo })
+                b.Width = Math.Max(b.Width, TextRenderer.MeasureText(b.Text, dlg.Font).Width + 20);
+            btnNo.Left  = dlg.ClientSize.Width - 14 - btnNo.Width;
+            btnYes.Left = btnNo.Left - 6 - btnYes.Width;
             btnYes.Click += (s, e) => { update = true; dlg.Close(); };
             btnCl.Enabled = !string.IsNullOrWhiteSpace(changelogUrl);
             btnCl.Click += async (s, e) =>
             {
                 btnCl.Enabled = false;
-                try { ChangelogViewer.Show(dlg, "Changelog — incoming build", await UpdateChecker.FetchTextAsync(changelogUrl)); }
-                catch (Exception ex) { MessageBox.Show(dlg, "Couldn't load the changelog:\n\n" + ex.Message, "Changelog", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                try { ChangelogViewer.Show(dlg, Loc.T("Changelog — incoming build"), await UpdateChecker.FetchTextAsync(changelogUrl)); }
+                catch (Exception ex) { MessageBox.Show(dlg, Loc.F("Couldn't load the changelog:\n\n{0}", ex.Message), Loc.T("Changelog"), MessageBoxButtons.OK, MessageBoxIcon.Warning); }
                 finally { btnCl.Enabled = true; }
             };
 
@@ -1471,18 +2205,21 @@ public partial class Form1 : Form
         if (me != null && me.Button != MouseButtons.Left)
             return;
 
-        string about =
-    "This port is based on the decompiled Silent Hill 1 for PSX Source Code:\n\n" +
-    "https://github.com/Vatuu/silent-hill-decomp\n\n" +
+        string about = Loc.F(
+    "This port is based on the decompiled Silent Hill 1 for PSX source code:\n\n" +
+    "{0}\n\n" +
     "This launcher and port were created by Chris Hardin aka KushAstronaut " +
-    "(kushastronaut@icloud.com), with many thanks and a lot of help from " +
-    "Psycross, Claude Code, and the wonderful decompilation community.\n\n" +
+    "({1}), with many thanks and a lot of help from " +
+    "Psycross, Claude Code, and the decomp community.\n\n" +
     "The source code is available here:\n\n" +
-    "https://github.com/SlickAmogus/silent-hill-decomp\n\n" +
+    "{2}\n\n" +
     "You should never pay for this software, and you should always provide " +
     "your own legally obtained game data.\n\n" +
-    "Silent Hill is copyright © KONAMI";
-        MessageBox.Show(about, "About Silent Hill PC Port",
+    "Silent Hill is copyright © KONAMI",
+            "https://github.com/shdecompilations/silent-hill-decomp",
+            "kushastronaut@icloud.com",
+            "https://github.com/SlickAmogus/silent-hill-decomp");
+        MessageBox.Show(about, Loc.T("About Silent Hill PC Port"),
             MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -1493,7 +2230,7 @@ public partial class Form1 : Form
 
     private void btnManager_Click(object sender, EventArgs e)
     {
-        using (var f = new SilentHillPC_Launcher.ModManagerForm(config, AppDomain.CurrentDomain.BaseDirectory))
+        using (var f = new SilentHillPC_Launcher.ModManagerForm(config, AppDomain.CurrentDomain.BaseDirectory, CurrentGameLanguageCode()))
         {
             f.ShowDialog(this);
         }
@@ -1654,8 +2391,8 @@ public partial class Form1 : Form
             /* A corrupt or unreadable file must not stop the launcher opening --
              * fall back to the built-in banner and say why. */
             MessageBox.Show(this,
-                "The custom launcher background could not be loaded, so the default is being used.\n\n" + ex.Message,
-                "Custom background", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Loc.F("The custom launcher background could not be loaded, so the default is being used.\n\n{0}", ex.Message),
+                Loc.T("Custom background"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1668,6 +2405,8 @@ public partial class Form1 : Form
          * handler races the item's Click, which may not have run yet. */
         if (_bannerMenu == null)
         {
+            // Items are created with their English so ApplyMenu can remember it;
+            // a language switch while the menu exists re-translates from there.
             _bannerMenu = new ContextMenuStrip();
             _bannerMenu.Items.Add("Change background", null, (s2, e2) => BannerChange());
             _bannerMenuReset = (ToolStripMenuItem)_bannerMenu.Items.Add("Reset", null, (s2, e2) => BannerReset());
@@ -1676,6 +2415,7 @@ public partial class Form1 : Form
             _bannerMenu.Items.Add("Cancel", null, (s2, e2) => { });
         }
 
+        Loc.ApplyMenu(_bannerMenu.Items);
         _bannerMenuReset.Visible = File.Exists(BannerCustomPath);
         _bannerMenuDark.Checked  = _darkMode;
         DarkModeStyleMenu(_bannerMenu);
@@ -1686,8 +2426,8 @@ public partial class Form1 : Form
     {
         using (var dlg = new OpenFileDialog())
         {
-            dlg.Title  = "Choose a launcher background";
-            dlg.Filter = "Image files|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|All files|*.*";
+            dlg.Title  = Loc.T("Choose a launcher background");
+            dlg.Filter = Loc.T("Image files") + "|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|" + Loc.T("All files") + "|*.*";
 
             if (dlg.ShowDialog(this) != DialogResult.OK)
                 return;
@@ -1709,15 +2449,15 @@ public partial class Form1 : Form
             catch (Exception ex)
             {
                 MessageBox.Show(this,
-                    "That file could not be used as a background.\n\n" + ex.Message,
-                    "Change background", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Loc.F("That file could not be used as a background.\n\n{0}", ex.Message),
+                    Loc.T("Change background"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
     }
 
     private void BannerReset()
     {
-        if (MessageBox.Show(this, "Are you sure?", "Reset background",
+        if (MessageBox.Show(this, Loc.T("Are you sure?"), Loc.T("Reset background"),
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
 
@@ -1737,9 +2477,28 @@ public partial class Form1 : Form
         catch (Exception ex)
         {
             MessageBox.Show(this,
-                "The custom background could not be removed.\n\n" + ex.Message,
-                "Reset background", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Loc.F("The custom background could not be removed.\n\n{0}", ex.Message),
+                Loc.T("Reset background"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    /* Parallel to comboRender's items. Index is the only link between the two,
+     * so re-ordering one without the other silently writes the wrong backend. */
+    private static readonly string[] RendererValues =
+    {
+        "gl", "gles", "d3d11", "vulkan", "warp", "software",
+    };
+
+    /* Parallel to comboShadow's items, same contract as RendererValues. */
+    private static readonly string[] ShadowResValues =
+    {
+        "256", "512", "1024", "2048", "4096", "8192",
+    };
+
+    private static int ParseIntOr(string s, int fallback)
+    {
+        int v;
+        return int.TryParse((s ?? "").Trim(), out v) ? v : fallback;
     }
 
     private void radioPreloadYes_CheckedChanged(object sender, EventArgs e)
@@ -1791,17 +2550,12 @@ public partial class Form1 : Form
 
         string text;
         if (signedIn)
-        {
-            text = "RetroAchievements: signed in as " + user +
-                   (enabled ? "." : " (achievements currently disabled).") +
-                   "\r\nClick to sign out or switch accounts.";
-        }
+            text = enabled
+                ? Loc.F("RetroAchievements: signed in as {0}.\nClick to sign out or switch accounts.", user)
+                : Loc.F("RetroAchievements: signed in as {0} (achievements disabled).\nClick to sign out or switch accounts.", user);
         else
-        {
-            text = "RetroAchievements: not signed in.\r\n" +
-                   "Click to sign in and earn achievements on your real RA account " +
-                   "(softcore, matched to your disc).";
-        }
+            text = Loc.T("RetroAchievements: not signed in.\n" +
+                         "Click to sign in and earn achievements (softcore, matched to your disc).");
         _raTip.SetToolTip(btnRA, text);
     }
 
@@ -1852,21 +2606,22 @@ public partial class Form1 : Form
         const string emailgmail = "kushastronaut@gmail.com";
         const string profileToken   = "@KushAstronaut";
 
-        string text =
-            "If you need help, please reach out to me on Discord " + profileToken + ", " +
-            "or by email at " + emailiCloud + " or " + emailgmail + ". " +
+        string text = Loc.F(
+            "If you need help, please reach out to me on Discord {0}, " +
+            "or by email at {1} or {2}. " +
             "I have created a Discord server for this port that you can join as well, " +
-            "here is the link: " + discordInvite + " - It will have helpful info, " +
-            "update news, and sometimes early releases.\r\n\r\n" +
+            "here is the link: {3} - It will have helpful info, " +
+            "update news, and sometimes early releases.\n\n" +
             "Tip: There are a lot of cheats and debug commands available, and to enable " +
             "them you have to turn on the debug controls setting in the controls menu of " +
             "the launcher. When they're on, you can hold ~ to toggle the console, and " +
             "press ~ again with it open to input a command. Type help or debug to get a " +
-            "list of different controls and commands!";
+            "list of different controls and commands!",
+            profileToken, emailiCloud, emailgmail, discordInvite);
 
         using (var dlg = new Form())
         {
-            dlg.Text = "Help";
+            dlg.Text = Loc.T("Get Help");
             dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
             dlg.StartPosition = FormStartPosition.CenterParent;
             dlg.MaximizeBox = false;
@@ -1904,11 +2659,22 @@ public partial class Form1 : Form
 
             var ok = new Button
             {
-                Text = "OK",
+                Text = Loc.T("OK"),
                 DialogResult = DialogResult.OK,
                 Size = new System.Drawing.Size(75, 23),
                 Location = new System.Drawing.Point(343, 203),
             };
+
+            // Most translations are longer than the English the 198px box was sized for.
+            int textH = TextRenderer.MeasureText(text, link.Font, new System.Drawing.Size(link.Width - 24, 0),
+                                                 TextFormatFlags.WordBreak).Height + 24;
+            if (textH > link.Height)
+            {
+                int grow = textH - link.Height;
+                link.Height += grow;
+                ok.Top += grow;
+                dlg.ClientSize = new System.Drawing.Size(dlg.ClientSize.Width, dlg.ClientSize.Height + grow);
+            }
 
             dlg.Controls.Add(link);
             dlg.Controls.Add(ok);
@@ -1926,8 +2692,8 @@ public partial class Form1 : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, "Couldn't open the browser:\n" + ex.Message,
-                "Report Bug", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, Loc.F("Couldn't open the browser:\n{0}", ex.Message),
+                Loc.T("Report Bug"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1936,8 +2702,8 @@ public partial class Form1 : Form
     private void button1_Click_1(object sender, EventArgs e)
     {
         var result = MessageBox.Show(this,
-            "Are you sure you would like to reset all settings to the default?",
-            "Reset Settings", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            Loc.T("Are you sure you would like to reset all settings to the default?"),
+            Loc.T("Reset Settings"), MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (result != DialogResult.Yes)
             return;
 
@@ -1949,8 +2715,8 @@ public partial class Form1 : Form
             {
                 if (s == null)
                 {
-                    MessageBox.Show(this, "Built-in default config is missing; nothing was changed.",
-                        "Reset Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(this, Loc.T("Built-in default config is missing; nothing was changed."),
+                        Loc.T("Reset Settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
                 using (var f = File.Create(cfgPath))
@@ -1959,8 +2725,8 @@ public partial class Form1 : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, "Couldn't write config.cfg:\n" + ex.Message,
-                "Reset Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, Loc.F("Couldn't write config.cfg:\n{0}", ex.Message),
+                Loc.T("Reset Settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -1984,6 +2750,11 @@ public partial class Form1 : Form
     }
 
     private void chkUncensored_CheckedChanged(object sender, EventArgs e)
+    {
+
+    }
+
+    private void label2_Click(object sender, EventArgs e)
     {
 
     }

@@ -24,8 +24,10 @@ namespace SilentHillPC_Launcher
         private TextBox  _txtRepo;
         private ComboBox _cmbBranch;
         private ComboBox _cmbBuild;
+        private CheckBox _chkRealtime;
         private Label    _lblStatus;
         private bool     _suppressBranchChange;
+        private bool     _suppressRealtimeChange;
 
         private Button _btnDownloadMac;
         private Button _btnDownloadLinux;
@@ -47,28 +49,28 @@ namespace SilentHillPC_Launcher
 
         private void BuildUi()
         {
-            Text            = "Build Settings";
+            Text            = Loc.T("Build Settings");
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
             MaximizeBox     = false;
             MinimizeBox     = false;
             ShowInTaskbar   = false;
-            ClientSize      = new Size(424, 250);
+            ClientSize      = new Size(424, 280);
             BackColor       = Color.FromArgb(32, 32, 32);
             ForeColor       = Color.Gainsboro;
 
             _tips = new ToolTip { AutoPopDelay = 20000, InitialDelay = 350, ReshowDelay = 80, ShowAlways = true };
 
-            var lblRepo = new Label { Text = "Repository:", Left = 12, Top = 16, AutoSize = true };
+            var lblRepo = new Label { Text = Loc.T("Repository:"), Left = 12, Top = 16, AutoSize = true };
             _txtRepo = new TextBox
             {
                 Left = 95, Top = 13, Width = 205, ReadOnly = true, Text = _settings.RepoUrl,
                 BackColor = Color.FromArgb(48, 48, 48), ForeColor = Color.Gainsboro
             };
-            var btnRepo = new Button { Text = "Repo Settings...", Left = 306, Top = 12, Width = 106, Height = 23 };
+            var btnRepo = new Button { Text = Loc.T("Repo Settings..."), Left = 306, Top = 12, Width = 106, Height = 23 };
             btnRepo.Click += BtnRepo_Click;
 
-            var lblBranch = new Label { Text = "Branch:", Left = 12, Top = 54, AutoSize = true };
+            var lblBranch = new Label { Text = Loc.T("Branch:"), Left = 12, Top = 54, AutoSize = true };
             _cmbBranch = new ComboBox { Left = 95, Top = 51, Width = 317, DropDownStyle = ComboBoxStyle.DropDownList };
             _cmbBranch.SelectedIndexChanged += async (s, e) =>
             {
@@ -76,37 +78,66 @@ namespace SilentHillPC_Launcher
                 await LoadBuildsAsync();
             };
 
-            var lblBuild = new Label { Text = "Build:", Left = 12, Top = 91, AutoSize = true };
+            var lblBuild = new Label { Text = Loc.T("Build:"), Left = 12, Top = 91, AutoSize = true };
             _cmbBuild = new ComboBox { Left = 95, Top = 88, Width = 317, DropDownStyle = ComboBoxStyle.DropDownList };
 
-            _lblStatus = new Label { Left = 12, Top = 124, Width = 400, Height = 44, ForeColor = Color.Gray };
+            _chkRealtime = new CheckBox
+            {
+                Text = Loc.T("Realtime updates"),
+                Left = 12, Top = 122, AutoSize = true,
+                Checked = _settings.Realtime && _settings.IsDefaultRepo,
+                Enabled = _settings.IsDefaultRepo,
+            };
+            _chkRealtime.CheckedChanged += async (s, e) => await RealtimeToggledAsync();
+            _tips.SetToolTip(_chkRealtime, Loc.T(
+                "Follow the automatic builds made every time a change is pushed, instead of waiting " +
+                "for a release. They are not tested first. The Build list then shows the recent " +
+                "automatic builds, so you can roll back to an earlier one. Untick to return to the " +
+                "normal releases."));
 
-            var lblArchives = new Label { Text = "Download archives for:", Left = 12, Top = 176, AutoSize = true };
-            _btnDownloadMac = new Button { Text = "macOS", Left = 160, Top = 170, Width = 84, Height = 24 };
-            _btnDownloadLinux = new Button { Text = "Linux", Left = 250, Top = 170, Width = 84, Height = 24 };
+            _lblStatus = new Label { Left = 12, Top = 152, Width = 400, Height = 44, ForeColor = Color.Gray };
+
+            var lblArchives = new Label { Text = Loc.T("Download archives for:"), Left = 12, Top = 206, AutoSize = true };
+            _btnDownloadMac = new Button { Text = "macOS", Left = 160, Top = 200, Width = 84, Height = 24 };
+            _btnDownloadLinux = new Button { Text = "Linux", Left = 250, Top = 200, Width = 84, Height = 24 };
             _btnDownloadMac.Click += async (s, e) =>
                 await DownloadArchiveAsync(_btnDownloadMac, "macOS", UpdateChecker.MacArchiveName);
             _btnDownloadLinux.Click += async (s, e) =>
                 await DownloadArchiveAsync(_btnDownloadLinux, "Linux", UpdateChecker.LinuxArchiveName);
-            const string archiveTip =
-                "Downloads the Linux/macOS build of the SELECTED branch/build (above) into this launcher's folder, " +
-                "next to the .exe -- overwriting any archive already downloaded for that platform (you'll be asked " +
-                "to confirm first). These are separate standalone builds for other platforms; Windows still plays " +
-                "from the normal SilentHillPC.exe. Only available once that platform's CI build has been attached " +
-                "to the selected release.";
+            string archiveTip = Loc.T(
+                "Download the Linux or macOS build of the selected branch/build into the launcher folder " +
+                "(you'll be asked before an existing archive is overwritten). Windows keeps playing from " +
+                "SilentHillPC.exe. Only available once that platform's build is attached to the release.");
             _tips.SetToolTip(lblArchives, archiveTip);
             _tips.SetToolTip(_btnDownloadMac, archiveTip);
             _tips.SetToolTip(_btnDownloadLinux, archiveTip);
 
-            var btnApply = new Button { Text = "Apply", Left = 232, Top = 213, Width = 80, Height = 26 };
+            var btnApply = new Button { Text = Loc.T("Apply"), Left = 232, Top = 243, Width = 80, Height = 26 };
             btnApply.Click += BtnApply_Click;
-            var btnClose = new Button { Text = "Close", Left = 322, Top = 213, Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
-            var btnChangelog = new Button { Text = "View Changelog", Left = 12, Top = 213, Width = 120, Height = 26 };
+            var btnClose = new Button { Text = Loc.T("Close"), Left = 322, Top = 243, Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
+            var btnChangelog = new Button { Text = Loc.T("View Changelog"), Left = 12, Top = 243, Width = 120, Height = 26 };
             btnChangelog.Click += BtnChangelog_Click;
+
+            // Laid out for English; translated labels and captions are measured
+            // and the columns shifted so nothing is clipped or overlapped.
+            int labelW = new[] { lblRepo, lblBranch, lblBuild }.Max(l => l.PreferredWidth);
+            int fieldLeft = Math.Max(95, 12 + labelW + 8);
+            const int right = 412;
+            foreach (var b in new[] { btnRepo, btnChangelog, btnApply, btnClose, _btnDownloadMac, _btnDownloadLinux })
+                b.Width = Math.Max(b.Width, TextRenderer.MeasureText(b.Text, Font).Width + 16);
+            btnRepo.Left = right - btnRepo.Width;
+            _txtRepo.Left = fieldLeft;
+            _txtRepo.Width = btnRepo.Left - 6 - fieldLeft;
+            foreach (var c in new Control[] { _cmbBranch, _cmbBuild }) { c.Left = fieldLeft; c.Width = right - fieldLeft; }
+            _btnDownloadMac.Left = Math.Max(_btnDownloadMac.Left, 12 + lblArchives.PreferredWidth + 10);
+            _btnDownloadLinux.Left = _btnDownloadMac.Right + 6;
+            btnClose.Left = right - 10 - btnClose.Width;
+            btnApply.Left = btnClose.Left - 10 - btnApply.Width;
 
             Controls.Add(lblRepo);  Controls.Add(_txtRepo);  Controls.Add(btnRepo);
             Controls.Add(lblBranch); Controls.Add(_cmbBranch);
             Controls.Add(lblBuild);  Controls.Add(_cmbBuild);
+            Controls.Add(_chkRealtime);
             Controls.Add(_lblStatus);
             Controls.Add(lblArchives); Controls.Add(_btnDownloadMac); Controls.Add(_btnDownloadLinux);
             Controls.Add(btnChangelog); Controls.Add(btnApply); Controls.Add(btnClose);
@@ -123,9 +154,9 @@ namespace SilentHillPC_Launcher
             if (overwriting)
             {
                 var confirm = MessageBox.Show(this,
-                    "A " + platformLabel + " archive (" + assetName + ") is already downloaded in this folder.\n\n" +
-                    "Download the version from the selected branch/build and overwrite it?",
-                    "Overwrite " + platformLabel + " archive?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    Loc.F("A {0} archive ({1}) is already downloaded in this folder.\n\n" +
+                          "Download the version from the selected branch/build and overwrite it?", platformLabel, assetName),
+                    Loc.F("Overwrite {0} archive?", platformLabel), MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (confirm != DialogResult.Yes) return;
             }
 
@@ -134,28 +165,30 @@ namespace SilentHillPC_Launcher
             string build  = string.IsNullOrEmpty(SelectedValue(_cmbBuild)) ? "latest" : SelectedValue(_cmbBuild);
             try
             {
-                _lblStatus.Text = "Locating " + platformLabel + " build...";
-                string url = await UpdateChecker.GetCrossPlatformAssetUrlAsync(_settings, branch, build, assetName, _cts.Token);
+                _lblStatus.Text = Loc.F("Locating {0} build...", platformLabel);
+                string url = await UpdateChecker.GetCrossPlatformAssetUrlAsync(SelectedSettings(), branch, build, assetName, _cts.Token);
                 if (string.IsNullOrEmpty(url))
                 {
                     _lblStatus.Text = "";
                     MessageBox.Show(this,
-                        "No " + platformLabel + " build is available for the selected branch/build.",
-                        platformLabel + " build unavailable", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        Loc.F("No {0} build is available for the selected branch/build.", platformLabel),
+                        Loc.F("{0} build unavailable", platformLabel), MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
                 await UpdateChecker.DownloadFileAsync(url, destPath, (frac, msg) =>
                 {
                     if (IsDisposed) return;
-                    BeginInvoke((Action)(() => _lblStatus.Text = "Downloading " + platformLabel + "... " + msg));
+                    BeginInvoke((Action)(() => _lblStatus.Text = Loc.F("Downloading {0}...", platformLabel) + " " + Loc.T(msg ?? "")));
                 }, _cts.Token);
 
-                _lblStatus.Text = platformLabel + (overwriting ? " archive updated: " : " archive downloaded: ") + assetName;
+                _lblStatus.Text = overwriting
+                    ? Loc.F("{0} archive updated: {1}", platformLabel, assetName)
+                    : Loc.F("{0} archive downloaded: {1}", platformLabel, assetName);
             }
             catch (Exception ex)
             {
-                _lblStatus.Text = "Couldn't download " + platformLabel + " build: " + ShortMsg(ex);
+                _lblStatus.Text = Loc.F("Couldn't download {0} build: {1}", platformLabel, ShortMsg(ex));
             }
             finally
             {
@@ -168,7 +201,7 @@ namespace SilentHillPC_Launcher
             _suppressBranchChange = true;
             _cmbBranch.Items.Clear();
             _cmbBuild.Items.Clear();
-            _lblStatus.Text = "Loading branches...";
+            _lblStatus.Text = Loc.T("Loading branches...");
             try
             {
                 var branches = await UpdateChecker.ListBranchesAsync(_settings, _cts.Token);
@@ -182,13 +215,52 @@ namespace SilentHillPC_Launcher
             }
             catch (Exception ex)
             {
-                _lblStatus.Text = "Could not load branches: " + ShortMsg(ex);
+                _lblStatus.Text = Loc.F("Could not load branches: {0}", ShortMsg(ex));
             }
             if (_cmbBranch.Items.Count == 0)
-                _cmbBranch.Items.Add(new Item { Display = "default", Value = "" });
+                _cmbBranch.Items.Add(new Item { Display = Loc.T("default"), Value = "" });
             SelectComboValue(_cmbBranch, _settings.Branch ?? "");
             _suppressBranchChange = false;
+            _cmbBranch.Enabled = !_chkRealtime.Checked;
             await LoadBuildsAsync();
+        }
+
+        private async Task RealtimeToggledAsync()
+        {
+            if (_suppressRealtimeChange) return;
+            if (_chkRealtime.Checked && !_settings.Realtime)
+            {
+                var ok = MessageBox.Show(this,
+                    Loc.T("Realtime builds are made automatically from every change pushed to the project, " +
+                          "before anyone has tested them. They can have new bugs, and a bad one could even " +
+                          "break your save data.\n\n" +
+                          "Back up your gamedata\\save folder first. You can roll back to an earlier build " +
+                          "from the Build list, or untick this to return to the normal releases.\n\n" +
+                          "Turn on realtime updates?"),
+                    Loc.T("Realtime updates"), MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (ok != DialogResult.Yes)
+                {
+                    _suppressRealtimeChange = true;
+                    _chkRealtime.Checked = false;
+                    _suppressRealtimeChange = false;
+                    return;
+                }
+            }
+            _cmbBranch.Enabled = !_chkRealtime.Checked;
+            await LoadBuildsAsync();
+        }
+
+        // The dropdowns and checkbox as they stand, not what is saved.
+        private LauncherSettings SelectedSettings()
+        {
+            return new LauncherSettings
+            {
+                RepoUrl        = _settings.RepoUrl,
+                Branch         = SelectedValue(_cmbBranch),
+                Build          = string.IsNullOrEmpty(SelectedValue(_cmbBuild)) ? "latest" : SelectedValue(_cmbBuild),
+                Realtime       = _chkRealtime.Checked,
+                OldBuildWarned = _settings.OldBuildWarned,
+            };
         }
 
         // Beta first (the actively-maintained/latest stream), then main, then
@@ -211,30 +283,60 @@ namespace SilentHillPC_Launcher
         // shown as its raw branch name.
         private static string DisplayNameForBranch(string branch)
         {
-            if (string.Equals(branch, "beta", StringComparison.OrdinalIgnoreCase)) return "Beta (Latest)";
-            if (string.Equals(branch, "main", StringComparison.OrdinalIgnoreCase)) return "Main (Alpha)";
+            if (string.Equals(branch, "beta", StringComparison.OrdinalIgnoreCase)) return Loc.T("Beta (Latest)");
+            if (string.Equals(branch, "main", StringComparison.OrdinalIgnoreCase)) return Loc.T("Main (Alpha)");
+            if (string.Equals(branch, UpdateChecker.CustomBranch, StringComparison.OrdinalIgnoreCase)) return Loc.T("Custom builds (mods, experiments)");
             return branch;
         }
 
         private async Task LoadBuildsAsync()
         {
             _cmbBuild.Items.Clear();
-            _cmbBuild.Items.Add(new Item { Display = "latest", Value = "latest" });
+            if (_chkRealtime.Checked)
+            {
+                await LoadRealtimeBuildsAsync();
+                return;
+            }
             string branch = SelectedValue(_cmbBranch);
-            _lblStatus.Text = "Loading builds...";
+            // No plain "latest" on the custom branch: each named build has its own
+            // "latest", so a generic one would drift between unrelated mods.
+            bool isCustom = string.Equals(branch, UpdateChecker.CustomBranch, StringComparison.OrdinalIgnoreCase);
+            if (!isCustom) _cmbBuild.Items.Add(new Item { Display = Loc.T("latest"), Value = "latest" });
+            _lblStatus.Text = Loc.T("Loading builds...");
             try
             {
                 var builds = await UpdateChecker.ListBuildsAsync(_settings, branch, _cts.Token);
                 foreach (var b in builds)
                     _cmbBuild.Items.Add(new Item { Display = b.Label, Value = b.Tag });
-                _lblStatus.Text = builds.Count + " build(s) on this branch. \"latest\" tracks the newest automatically.";
+                _lblStatus.Text = isCustom
+                    ? Loc.F("{0} opt-in build(s). Pick a \"latest (auto-updates)\" entry to keep getting that build's updates.", builds.Count)
+                    : Loc.F("{0} build(s) on this branch. \"latest\" tracks the newest automatically.", builds.Count);
             }
             catch (Exception ex)
             {
-                _lblStatus.Text = "Could not load builds: " + ShortMsg(ex);
+                _lblStatus.Text = Loc.F("Could not load builds: {0}", ShortMsg(ex));
             }
-            if (!SelectComboValue(_cmbBuild, _settings.Build) && _cmbBuild.Items.Count > 0)
+            if (!SelectComboValue(_cmbBuild, _settings.Realtime ? "latest" : _settings.Build) && _cmbBuild.Items.Count > 0)
                 _cmbBuild.SelectedIndex = 0; // latest
+        }
+
+        private async Task LoadRealtimeBuildsAsync()
+        {
+            _cmbBuild.Items.Add(new Item { Display = Loc.T("latest"), Value = "latest" });
+            _lblStatus.Text = Loc.T("Loading builds...");
+            try
+            {
+                var builds = await UpdateChecker.ListRealtimeBuildsAsync(_cts.Token);
+                foreach (var b in builds)
+                    _cmbBuild.Items.Add(new Item { Display = b.Label, Value = b.Tag });
+                _lblStatus.Text = Loc.F("{0} recent automatic build(s). \"latest\" installs each new one; pick an older one to roll back.", builds.Count);
+            }
+            catch (Exception ex)
+            {
+                _lblStatus.Text = Loc.F("Could not load builds: {0}", ShortMsg(ex));
+            }
+            if (!SelectComboValue(_cmbBuild, _settings.Realtime ? _settings.Build : "latest") && _cmbBuild.Items.Count > 0)
+                _cmbBuild.SelectedIndex = 0;
         }
 
         private async void BtnRepo_Click(object sender, EventArgs e)
@@ -246,6 +348,10 @@ namespace SilentHillPC_Launcher
                     _settings.RepoUrl = dlg.RepoUrl;
                     _txtRepo.Text = _settings.RepoUrl;
                     _settings.Save(_config);      // persist the repo immediately
+                    _suppressRealtimeChange = true;
+                    _chkRealtime.Enabled = _settings.IsDefaultRepo;
+                    if (!_settings.IsDefaultRepo) _chkRealtime.Checked = false;
+                    _suppressRealtimeChange = false;
                     await LoadBranchesAsync();    // refresh against the new repo
                 }
             }
@@ -255,25 +361,21 @@ namespace SilentHillPC_Launcher
         {
             // Preview the changelog of the currently SELECTED build (the dropdowns,
             // not what's saved), fetched from its release — no full download.
-            var sel = new LauncherSettings
-            {
-                RepoUrl        = _settings.RepoUrl,
-                Branch         = SelectedValue(_cmbBranch),
-                Build          = string.IsNullOrEmpty(SelectedValue(_cmbBuild)) ? "latest" : SelectedValue(_cmbBuild),
-                OldBuildWarned = _settings.OldBuildWarned,
-            };
+            var sel = SelectedSettings();
             var btn = sender as Button;
             if (btn != null) btn.Enabled = false;
-            _lblStatus.Text = "Loading changelog...";
+            _lblStatus.Text = Loc.T("Loading changelog...");
             try
             {
                 string text = await UpdateChecker.GetChangelogTextAsync(sel, _cts.Token);
-                ChangelogViewer.Show(this, "Changelog — " + (sel.IsLatestBuild ? "latest" : sel.Build), text);
+                ChangelogViewer.Show(this, sel.UsesRealtime
+                    ? Loc.T("Changelog — realtime builds")
+                    : Loc.F("Changelog — {0}", sel.IsLatestBuild ? Loc.T("latest") : sel.Build), text);
                 _lblStatus.Text = "";
             }
             catch (Exception ex)
             {
-                _lblStatus.Text = "Couldn't load changelog: " + ShortMsg(ex);
+                _lblStatus.Text = Loc.F("Couldn't load changelog: {0}", ShortMsg(ex));
             }
             finally
             {
@@ -285,25 +387,51 @@ namespace SilentHillPC_Launcher
         {
             string newBranch = SelectedValue(_cmbBranch);
             string newBuild  = string.IsNullOrEmpty(SelectedValue(_cmbBuild)) ? "latest" : SelectedValue(_cmbBuild);
+            bool   realtime  = _chkRealtime.Checked && _settings.IsDefaultRepo;
 
-            // First time the user pins a specific (older) build, warn once about
-            // bugs / save corruption and tell them to back up their saves.
+            if (realtime || _settings.Realtime)
+            {
+                bool switched = realtime != _settings.Realtime;
+                // The branch is kept while realtime is on, so unticking returns to it.
+                if (!realtime) _settings.Branch = newBranch;
+                _settings.Realtime = realtime;
+                _settings.Build    = newBuild;
+                _settings.Save(_config);
+                // A new stream's versions are not comparable with the old one's, so the
+                // first check after switching offers its build outright, including
+                // stepping back from a realtime build to the latest release.
+                if (switched) _settings.ClearSeen(_config);
+                DialogResult = DialogResult.OK;
+                Close();
+                return;
+            }
+
+            // First time the user leaves "latest", warn once about bugs / save
+            // corruption and tell them to back up their saves. A custom build gets
+            // its own wording: it is experimental, not merely old.
             bool pinningSpecific = !newBuild.Equals("latest", StringComparison.OrdinalIgnoreCase);
+            bool pickingCustom   = UpdateChecker.CustomFamilyPrefix(newBuild) != null;
             if (pinningSpecific && !_settings.OldBuildWarned)
             {
                 MessageBox.Show(this,
-                    "Heads up — switching to an older build can cause unexpected bugs and may even " +
-                    "break your save data if you aren't careful.\n\n" +
-                    "Back up your gamedata\\save folder first, just in case.\n\n" +
-                    "This message will not be shown again.",
-                    "Old build", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    pickingCustom
+                        ? Loc.T("Heads up — this is an experimental build, separate from the normal releases. " +
+                                "It can have bugs the main builds do not, and may even break your save data.\n\n" +
+                                "Back up your gamedata\\save folder first, just in case. Switch back any time by " +
+                                "choosing another branch here.\n\n" +
+                                "This message will not be shown again.")
+                        : Loc.T("Heads up — switching to an older build can cause unexpected bugs and may even " +
+                                "break your save data if you aren't careful.\n\n" +
+                                "Back up your gamedata\\save folder first, just in case.\n\n" +
+                                "This message will not be shown again."),
+                    Loc.T(pickingCustom ? "Experimental build" : "Old build"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 _settings.OldBuildWarned = true;
             }
 
             _settings.Branch = newBranch;
             _settings.Build  = newBuild;
             _settings.Save(_config);
-            _lblStatus.Text = "Saved. The launcher will check this branch/build for updates.";
+            _lblStatus.Text = Loc.T("Saved. The launcher will check this branch/build for updates.");
             DialogResult = DialogResult.OK;
             Close();
         }

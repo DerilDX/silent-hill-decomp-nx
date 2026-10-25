@@ -56,6 +56,22 @@ static s_800C15F0 D_800C15F0[4];
 /** @brief `e_SfxId` | Stores the index of the currently playing SFX. */
 static u16 g_AudioPlayingIdxList[24];
 
+#ifdef SH_PC_PORT
+/* The positional-loop sustain in 3d_audio.c needs to know whether a sfx still
+ * owns a voice. The list stays private to this file. */
+bool Pc_Sd_SfxHasVoice(u16 sfxId)
+{
+    s32 i;
+
+    for (i = 0; i < (s32)ARRAY_SIZE(g_AudioPlayingIdxList); i++)
+    {
+        if (g_AudioPlayingIdxList[i] == sfxId)
+            return true;
+    }
+    return false;
+}
+#endif
+
 /** @brief Stores the pitch of currently playing SFX.
 * Shares the same index of where the SFX is stored in `g_AudioPlayingIdxList`.
 */
@@ -1919,6 +1935,41 @@ void func_800485C0(s32 idx) // 0x800485C0
 
 #define CD_ERROR_LIMIT 600 // Matches value used in beatmania `FSCD.C`.
 
+#ifdef SH_PC_PORT
+/* The XA volume Sd_XaAudioPlay's Initialize state picks for a line; the PC
+ * skips that state machine, and the seek model needs it to size the next
+ * stop task's fade-out. */
+static int Pc_XaLineVolume(u16 xaIdx)
+{
+    switch (xaIdx)
+    {
+        case 53:
+        case 56:
+        case 596:
+        case 597:
+        case 598:
+        case 600:
+        case 602:
+        case 612:
+        case 614:
+        case 620:
+        case 657:
+        case 606:
+            return Sd_GetVolSe(84);
+
+        case 723:
+        case 725:
+            return 50;
+
+        case 724:
+            return 40;
+
+        default:
+            return 84;
+    }
+}
+#endif
+
 void Sd_TaskPoolExecute(void) // 0x800485D8
 {
     g_Sd_CurrentTask = g_Sd_TaskPool[0];
@@ -1944,6 +1995,7 @@ void Sd_TaskPoolExecute(void) // 0x800485D8
              * and XaLoadState_EnableAudio re-setting xaAudioIdx_4. Lets the
              * Stop-then-Play sequence in Sd_XaAudioPlayTaskAdd work correctly
              * even when Stop fully clears the streaming-state flags. */
+            Pc_XaSeek_OnPlayTask(g_Sd_AudioWork.xaAudioIdxCheck_2, Pc_XaLineVolume(g_Sd_AudioWork.xaAudioIdxCheck_2));
             XaPlayer_Play(g_Sd_AudioWork.xaAudioIdxCheck_2);
             if (PcAudioConfig_UsesSoftwareSpu())
                 SdSetSerialAttr(0, 0, 1);
@@ -1961,6 +2013,7 @@ void Sd_TaskPoolExecute(void) // 0x800485D8
              * Sd_XaAudioPlayTaskAdd's queue uses xaAudioIdxCheck_2 (still set). */
             if (PcAudioConfig_UsesSoftwareSpu())
                 SdSetSerialAttr(0, 0, 0);
+            Pc_XaSeek_OnStopTask();
             XaPlayer_Stop();
             Sd_TaskPoolUpdate();
 #else

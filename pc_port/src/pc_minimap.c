@@ -29,11 +29,13 @@
 #include "bodyprog/screen/screen_data.h"
 #include "bodyprog/events/bodyprog_data_800A99B4.h" /* g_PaperMapFileIdxs */
 #include "pc_config.h"
+#include "pc_quick_options.h"
 #include "hires_override.h"
 #include "pc_loose_files.h"
 #include "tex_pack.h"
 #include "sh_log.h"
 #include <stdlib.h>
+#include <math.h>
 
 /* The paper map's MARKINGS (blocked roads, locked/jammed doors, "no way through"
  * scribbles) come straight from the game's own tables in
@@ -123,6 +125,76 @@ static int s_pendKind    = 0;   /* in-flight read: 0 none, 1 map image, 2 markin
 static int s_pendFileIdx = -1;  /* file the in-flight read is for (override lookup) */
 static int s_idleFrames  = 0;
 static int s_mapReady    = 0;   /* pool slot holds this area's map */
+
+/* The paper-map index the minimap should use. Normally the savegame's own --
+ * but the INTRO street (map0_s00 and friends) carries PaperMapIdx_OtherPlaces
+ * because no paper map is ever obtainable there, even though its layout IS the
+ * town's. When the minimap is set to always draw (minimap_require_map = 0),
+ * probe the town paper maps and adopt whichever one's placement tables actually
+ * resolve Harry's position: func_80067914 in query mode returns 0 for an index
+ * that does not recognise the coordinates, so the right town map self-selects
+ * with no per-area table. Cached until the probe stops resolving (area left).
+ * With minimap_require_map = 1 nothing changes: OtherPlaces stays unmapped. */
+
+static int s_otherPlacesIdx = -1;
+
+/* Query wrapper: func_80067914's FIRST gate is
+ *     if (g_SavegamePtr->paperMapIdx != paperMapIdx) return 0;
+ * so probing a candidate index -- or querying a substituted one at draw time --
+ * is rejected outright unless the savegame momentarily agrees. Override for
+ * the duration of the one call and restore; same frame, same thread, nothing
+ * else reads the field in between. */
+static s32 mm_query_at(int idx)
+{
+    u8  prev = (u8)g_SavegamePtr->paperMapIdx;
+    s32 packed;
+
+    g_SavegamePtr->paperMapIdx = (u8)idx;
+    packed = func_80067914((s32)idx, 0, 0, (u16)Q12(1.0f));
+    g_SavegamePtr->paperMapIdx = prev;
+    return packed;
+}
+
+static int mm_effective_map_idx(void)
+{
+    int idx = (int)g_SavegamePtr->paperMapIdx;
+
+    if (idx != 0 /* PaperMapIdx_OtherPlaces */ || g_PcConfig.minimapRequireMap)
+    {
+        s_otherPlacesIdx = -1;
+        return idx;
+    }
+
+    /* Save/restore rather than set/clear: this helper runs inside the draw
+     * path's own query-only bracket (argument evaluation at the 607 call), and
+     * clearing the flag there would flip the REAL query into draw mode. */
+    {
+    s32 prevQueryOnly = g_PcMapQueryOnly;
+
+    g_PcMapQueryOnly = 1;
+
+    if (s_otherPlacesIdx < 0 || mm_query_at(s_otherPlacesIdx) == 0)
+    {
+        int c;
+
+        s_otherPlacesIdx = -1;
+        /* 1..4 are the four town maps (OldTown, FogCentralTown,
+         * AltCentralTown, ResortTown). */
+        for (c = 1; c <= 4; c++)
+        {
+            if (mm_query_at(c) != 0)
+            {
+                s_otherPlacesIdx = c;
+                break;
+            }
+        }
+    }
+
+    g_PcMapQueryOnly = prevQueryOnly;
+    }
+
+    return (s_otherPlacesIdx >= 0) ? s_otherPlacesIdx : idx;
+}
 static int s_markFileLoaded = NO_VALUE; /* marking TIM idx read into MM_MARK_SLOT */
 static int s_markReady      = 0;
 
@@ -381,7 +453,7 @@ static POLY_FT4 s_markPrim[2][MM_MARK_MAX];
 static int mm_markers_build(int buf, const s_MmView* vw)
 {
     const s_800AEDBC* tbl;
-    int idx = (int)g_SavegamePtr->paperMapIdx;
+    int idx = mm_effective_map_idx();
     int uw  = vw->u1 - vw->u0;
     int vh  = vw->v1 - vw->v0;
     int n, i, j, count = 0;
@@ -508,11 +580,14 @@ void Pc_MinimapUpdate(void)
     s32       packed, px, py;
     int       haveMap, round, semi, op, lum;
     int       x0, y0, x1, y1, cx, cy, R;
-    int       halfW = SCREEN_WIDTH / 2, mmSize = MM_SIZE;
+    int       hudL = -(SCREEN_WIDTH / 2), hudR = SCREEN_WIDTH / 2;
+    int       hudT = -(SCREEN_HEIGHT / 2), hudB = SCREEN_HEIGHT / 2;
+    int       mmSize = MM_SIZE;
     s32       mkScale = 4096;
     int       u0 = 0, v0 = 0, u1 = MM_UV_MAX, v1 = MM_UV_MAX;
     int       markCount = 0;
     GsOT_TAG* ot;
+
 
     if (!g_PcConfig.minimap) return;
     if (g_GameWork.gameState != GameState_InGame ||
@@ -528,45 +603,29 @@ void Pc_MinimapUpdate(void)
     lum  = (128 * op) / 100;
     if (lum < 1) lum = 1;
 
-    mm_map_load_tick((int)g_SavegamePtr->paperMapIdx);
+    mm_map_load_tick(mm_effective_map_idx());
 
     buf   = g_ActiveBufferIdx;
     ot    = &g_OtTags0[buf][4];
     round = (g_PcConfig.minimap == 2); /* 1 = square, 2 = circle */
 
     /* --- corner placement ---
-     * Vertical is always 4:3 (y -120..+120). Horizontally the port renders 2D at
-     * a Hor+ widescreen ortho, so on a wide window the true left/right screen
-     * edge sits past ±160 — widen `halfW` to reach it (same as dbg_overlay's
-     * collvis: halfW = 160 * winAspect/psxAspect). On 4:3 keep 160 and shrink
-     * the panel a touch. */
+     * Sit inside the overlay pass's real visible rectangle (g_PcHudRect, prim
+     * coordinates, published by the renderer every gameplay frame). These prims
+     * go on OT2, which is drawn under the UI ortho: no hfov, no vfov, so the
+     * rectangle is exact at any aspect, window or render size, FOV, or display
+     * height. It must NOT be re-derived from a window size (borderless presents
+     * a 640x480 render on a 1920x1080 desktop) nor from the WORLD ortho, whose
+     * width is divided by hfov: that placed the panel past the right edge at any
+     * hfov other than 1. Shrink the panel a touch only when the frame is 4:3,
+     * matching the old 4:3 look. */
     {
-        extern void PsyX_GetScreenSize(int* w, int* h);
-        extern int  g_PcHorPlusEnabled;
-        extern int  g_PcMenuPillarbox;
-        extern int  g_PcWidescreenMode;
-
-        float psxA = (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT;
-        float winA;
-        int   sw = 0, sh = 0;
-        /* The 2D layer only reaches past +-160 when it is genuinely widened. A
-         * PILLARBOXED wide window still draws 4:3, so widening here put the
-         * panel inside (or past) the black bar. Same predicate the inventory
-         * mouse hit-test uses for the same question. */
-        int   stretched = (g_PcHorPlusEnabled && g_PcWidescreenMode == 2) ||
-                          (!g_PcHorPlusEnabled && !g_PcMenuPillarbox);
-
-        /* Ask for the REAL backbuffer: the config width/height this used to read
-         * describe the windowed size and say nothing about the current
-         * fullscreen or borderless resolution. */
-        PsyX_GetScreenSize(&sw, &sh);
-        winA = (sw > 0 && sh > 0) ? (float)sw / (float)sh : psxA;
-
-        if (stretched && winA > psxA + 0.01f)
-        {
-            halfW = (int)(160.0f * (winA / psxA) + 0.5f);
-        }
-        else
+        extern float g_PcHudRect[4];
+        hudL = (int)floorf(g_PcHudRect[0] + 0.5f);
+        hudR = (int)floorf(g_PcHudRect[1] + 0.5f);
+        hudT = (int)floorf(g_PcHudRect[2] + 0.5f);
+        hudB = (int)floorf(g_PcHudRect[3] + 0.5f);
+        if (hudR - hudL <= SCREEN_WIDTH)
         {
             mmSize = MM_SIZE - 8;
         }
@@ -587,14 +646,14 @@ void Pc_MinimapUpdate(void)
     }
     switch (g_PcConfig.minimapCorner)
     {
-        case 1:  x0 =  halfW - MM_MARGIN - mmSize;
-                 y0 = -(SCREEN_HEIGHT / 2) + MM_MARGIN; break;
-        case 2:  x0 = -halfW + MM_MARGIN;
-                 y0 =  (SCREEN_HEIGHT / 2) - MM_MARGIN - mmSize; break;
-        case 3:  x0 =  halfW - MM_MARGIN - mmSize;
-                 y0 =  (SCREEN_HEIGHT / 2) - MM_MARGIN - mmSize; break;
-        default: x0 = -halfW + MM_MARGIN;
-                 y0 = -(SCREEN_HEIGHT / 2) + MM_MARGIN; break;
+        case 1:  x0 = hudR - MM_MARGIN - mmSize;
+                 y0 = hudT + MM_MARGIN; break;
+        case 2:  x0 = hudL + MM_MARGIN;
+                 y0 = hudB - MM_MARGIN - mmSize; break;
+        case 3:  x0 = hudR - MM_MARGIN - mmSize;
+                 y0 = hudB - MM_MARGIN - mmSize; break;
+        default: x0 = hudL + MM_MARGIN;
+                 y0 = hudT + MM_MARGIN; break;
     }
     x1 = x0 + mmSize; y1 = y0 + mmSize;
     cx = x0 + mmSize / 2; cy = y0 + mmSize / 2; R = mmSize / 2;
@@ -604,17 +663,34 @@ void Pc_MinimapUpdate(void)
      * bails before exporting one) still get a sane arrow. */
     g_PcMapQueryAngle = g_SysWork.playerWork.player.rotation.vy;
     g_PcMapQueryOnly  = 1;
-    packed = func_80067914((s32)g_SavegamePtr->paperMapIdx, 0, 0, (u16)Q12(1.0f));
+    packed = mm_query_at(mm_effective_map_idx());
     g_PcMapQueryOnly  = 0;
 
     /* The paper map is only drawn once Harry has actually found it -- HAS_MAP is
      * the same savegame bit the map screen gates on. minimap_require_map=0
      * restores the old always-visible behaviour. */
     haveMap = (s_mapReady && packed != 0);
+
     if (haveMap && g_PcConfig.minimapRequireMap)
     {
-        int mi = (int)g_SavegamePtr->paperMapIdx;
+        int mi = mm_effective_map_idx();
         if (mi < 0 || mi >= MM_PAPER_MAP_COUNT || !HAS_MAP(mi)) haveMap = 0;
+    }
+
+    /* No map yet means no minimap at all, not an empty panel: nothing on it
+     * would tell the player anything the map screen does not already say.
+     * Only HAS_MAP decides, so a map that is found but still loading keeps
+     * the panel up. Shown anyway while the quick menu is on the minimap
+     * settings, so they can be adjusted; minimap_show_without_map = 1 keeps
+     * the old empty panel. */
+    if (g_PcConfig.minimapRequireMap && !g_PcConfig.minimapShowWithoutMap &&
+        !Pc_QuickOptions_ShowsMinimapRows())
+    {
+        int mi = mm_effective_map_idx();
+        if (packed == 0 || mi < 0 || mi >= MM_PAPER_MAP_COUNT || !HAS_MAP(mi))
+        {
+            return;
+        }
     }
 
     if (packed != 0)

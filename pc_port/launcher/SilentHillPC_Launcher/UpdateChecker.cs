@@ -9,6 +9,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -43,6 +44,10 @@ namespace SilentHillPC_Launcher
         // users are auto-migrated to it once a newer beta release appears, so the
         // move to beta zip builds needs no manual Build Settings change.
         public const string BetaBranch = "beta";
+        /// <summary>Named opt-in builds (release-nightly.ps1 -Name): prereleases on
+        /// this branch with custom-&lt;slug&gt;-version tags. Listed only under their own
+        /// branch and never counted as "latest" (their tags parse to version 0).</summary>
+        public const string CustomBranch = "custom";
 
         // -- DTOs (manifest) --------------------------------------------------
 
@@ -57,6 +62,8 @@ namespace SilentHillPC_Launcher
             [DataMember(Name = "launcher_version")] public string LauncherVersion;
             [DataMember(Name = "zip_url")]          public string ZipUrl;
             [DataMember(Name = "zip_name")]         public string ZipName;
+            [DataMember(Name = "name")]             public string Name;        // custom builds: the display name
+            [DataMember(Name = "stream")]           public string Stream;      // "beta" | "custom" (absent on older builds)
             [DataMember(Name = "files")]            public List<FileEntry> Files;
         }
 
@@ -66,6 +73,29 @@ namespace SilentHillPC_Launcher
             [DataMember(Name = "path")]   public string Path;
             [DataMember(Name = "sha256")] public string Sha256;
             [DataMember(Name = "url")]    public string Url;
+        }
+
+        // Realtime index (realtime.json on the source repo's rolling `realtime`
+        // release, written by tools/realtime_publish.py). Newest build first; each
+        // build is a zip-mode manifest: one SHPC_rt-<version>.zip plus per-file hashes.
+        [DataContract]
+        public class RealtimeIndex
+        {
+            [DataMember(Name = "builds")] public List<RealtimeBuild> Builds;
+        }
+
+        [DataContract]
+        public class RealtimeBuild
+        {
+            [DataMember(Name = "id")]      public string Id;
+            [DataMember(Name = "version")] public string Version;
+            [DataMember(Name = "commit")]  public string Commit;
+            [DataMember(Name = "date")]    public string Date;
+            [DataMember(Name = "summary")] public List<string> Summary;
+            [DataMember(Name = "mode")]     public string Mode;
+            [DataMember(Name = "zip_name")] public string ZipName;
+            [DataMember(Name = "zip_url")]  public string ZipUrl;
+            [DataMember(Name = "files")]   public List<FileEntry> Files;
         }
 
         public class UpdatePlan
@@ -80,6 +110,9 @@ namespace SilentHillPC_Launcher
             public bool   LauncherIsNewer;  // incoming launcher strictly newer than ours
             public string MigrateToBranch;  // non-null => switch the user's branch to this on apply (alpha->beta)
             public bool   IsBeta;          // newest build is a beta-branch release (surfaced in the update dialog)
+            public bool   IsCustom;        // an opt-in named build (custom branch), never the main stream
+            public string BuildName;       // custom builds: the display name from the manifest
+            public bool   IsRealtime;      // an automatic per-push build (realtime stream)
             public List<FileEntry> Changed = new List<FileEntry>();
             public bool HasUpdate => Changed.Count > 0;
 
@@ -142,10 +175,36 @@ namespace SilentHillPC_Launcher
         {
             string owner, repo;
             if (!settings.TryGetOwnerRepo(out owner, out repo))
-                throw new Exception("Invalid repo URL in launcher settings: " + settings.RepoUrl);
+                throw new Exception(Loc.F("Invalid repo URL in launcher settings: {0}", settings.RepoUrl));
 
-            var src      = await ResolveManifestSourceAsync(owner, repo, settings, ct).ConfigureAwait(false);
-            var manifest = await FetchManifestAsync(src.Url, ct).ConfigureAwait(false);
+            ManifestSource src;
+            Manifest       manifest;
+            if (settings.UsesRealtime)
+            {
+                var rt = await ResolveRealtimeBuildAsync(settings, ct).ConfigureAwait(false);
+                src = new ManifestSource
+                {
+                    Url   = LauncherSettings.RealtimeIndexUrl,
+                    Label = Loc.F("realtime build {0} ({1})", rt.Version, ShortCommit(rt.Commit)),
+                    Tag   = rt.Id,
+                };
+                manifest = new Manifest
+                {
+                    Version   = rt.Version,
+                    Tag       = rt.Id,
+                    Mode      = string.IsNullOrWhiteSpace(rt.Mode) ? "loose" : rt.Mode,
+                    ZipUrl    = rt.ZipUrl,
+                    ZipName   = rt.ZipName,
+                    BuildDate = rt.Date,
+                    Stream    = "realtime",
+                    Files     = rt.Files ?? new List<FileEntry>(),
+                };
+            }
+            else
+            {
+                src      = await ResolveManifestSourceAsync(owner, repo, settings, ct).ConfigureAwait(false);
+                manifest = await FetchManifestAsync(src.Url, ct).ConfigureAwait(false);
+            }
 
             string mode = string.IsNullOrWhiteSpace(manifest.Mode) ? "loose" : manifest.Mode.Trim().ToLowerInvariant();
 
@@ -156,10 +215,14 @@ namespace SilentHillPC_Launcher
                 Mode            = mode,
                 ZipUrl          = manifest.ZipUrl,
                 RepoLabel       = src.Label,
-                ChangelogUrl    = DeriveChangelogUrl(src.Url),
+                ChangelogUrl    = settings.UsesRealtime ? LauncherSettings.RealtimeChangelogUrl : DeriveChangelogUrl(src.Url),
                 LauncherVersion = manifest.LauncherVersion,
                 MigrateToBranch = src.MigrateBranch,
                 IsBeta          = src.IsBeta,
+                IsCustom        = string.Equals(manifest.Stream, "custom", StringComparison.OrdinalIgnoreCase) ||
+                                  CustomFamilyPrefix(src.Tag) != null,
+                BuildName       = manifest.Name,
+                IsRealtime      = settings.UsesRealtime,
             };
 
             if (manifest.Files != null)
@@ -180,7 +243,13 @@ namespace SilentHillPC_Launcher
 
             // Launcher self-update gate.
             var launcherEntry = plan.LauncherEntry;
-            if (launcherEntry != null)
+            if (launcherEntry != null && plan.IsRealtime)
+            {
+                // The launcher is the updater: it only ever comes from a scripted
+                // release, so an automatic build can never strand anyone.
+                plan.Changed.Remove(launcherEntry);
+            }
+            else if (launcherEntry != null)
             {
                 // NEVER self-update the launcher from a non-default (untrusted)
                 // repo. A third-party repo may update game data, but replacing the
@@ -217,7 +286,7 @@ namespace SilentHillPC_Launcher
         {
             string owner, repo;
             if (!settings.TryGetOwnerRepo(out owner, out repo))
-                throw new Exception("Invalid repo URL: " + settings.RepoUrl);
+                throw new Exception(Loc.F("Invalid repo URL: {0}", settings.RepoUrl));
 
             var url = $"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100";
             var branches = await GetApiJsonAsync<List<GhBranch>>(url, ct).ConfigureAwait(false);
@@ -231,20 +300,96 @@ namespace SilentHillPC_Launcher
         {
             string owner, repo;
             if (!settings.TryGetOwnerRepo(out owner, out repo))
-                throw new Exception("Invalid repo URL: " + settings.RepoUrl);
+                throw new Exception(Loc.F("Invalid repo URL: {0}", settings.RepoUrl));
 
             var rels = await ListReleasesAsync(owner, repo, ct).ConfigureAwait(false);
             IEnumerable<GhRelease> cand;
             if (string.IsNullOrWhiteSpace(branch))
-                cand = rels.Where(r => !IsBetaRelease(r)); // alpha = the v* (non-beta) stream
+                cand = rels.Where(r => !IsBetaRelease(r) && !IsCustomRelease(r)); // alpha = the v* (non-beta) stream
             else
                 cand = rels.Where(r => string.Equals(r.TargetCommitish, branch, StringComparison.OrdinalIgnoreCase));
 
-            return cand.Select(r => new BuildInfo
+            var list = cand.Select(r => new BuildInfo
             {
                 Tag   = r.TagName,
-                Label = $"{r.TagName}  ({ParseDate(r.CreatedAt):yyyy-MM-dd}){(IsBetaRelease(r) ? "  [beta]" : "")}"
+                Label = IsCustomRelease(r)
+                    ? $"{(string.IsNullOrWhiteSpace(r.Name) ? r.TagName : r.Name)}  ({ParseDate(r.CreatedAt):yyyy-MM-dd})  [custom]"
+                    : $"{r.TagName}  ({ParseDate(r.CreatedAt):yyyy-MM-dd}){(IsBetaRelease(r) ? "  [beta]" : "")}"
             }).ToList();
+
+            // Custom branch: one "follow this build" entry per named build, above its
+            // dated releases, so picking it keeps getting that build's updates.
+            if (!string.IsNullOrWhiteSpace(branch) &&
+                string.Equals(branch, CustomBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                var families = new List<BuildInfo>();
+                var seen     = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in cand)
+                {
+                    string prefix = CustomFamilyPrefix(r.TagName);
+                    if (prefix == null || !seen.Add(prefix)) continue;
+                    families.Add(new BuildInfo
+                    {
+                        Tag   = prefix + "latest",
+                        Label = Loc.F("{0}  — latest (auto-updates)", CustomDisplayName(r))
+                    });
+                }
+                list.InsertRange(0, families);
+            }
+            return list;
+        }
+
+        /// <summary>The realtime builds still available (newest first), for the Build
+        /// Settings dropdown. Each label carries the date and the build's first commit
+        /// subject so a rollback target can be picked by what it changed.</summary>
+        public static async Task<List<BuildInfo>> ListRealtimeBuildsAsync(CancellationToken ct = default(CancellationToken))
+        {
+            var idx = await FetchRealtimeIndexAsync(ct).ConfigureAwait(false);
+            var list = new List<BuildInfo>();
+            foreach (var b in idx.Builds ?? new List<RealtimeBuild>())
+            {
+                if (b == null || string.IsNullOrEmpty(b.Id)) continue;
+                var summary = b.Summary ?? new List<string>();
+                string first = summary.Count > 0 ? summary[0] : "";
+                if (first.Length > 60) first = first.Substring(0, 57) + "...";
+                string more = summary.Count > 1 ? " " + Loc.F("(+{0} more)", summary.Count - 1) : "";
+                list.Add(new BuildInfo
+                {
+                    Tag   = b.Id,
+                    Label = $"{b.Version}  ({ParseDate(b.Date):yyyy-MM-dd HH:mm})  {first}{more}"
+                });
+            }
+            return list;
+        }
+
+        private static async Task<RealtimeIndex> FetchRealtimeIndexAsync(CancellationToken ct)
+        {
+            using (var resp = await _http.GetAsync(LauncherSettings.RealtimeIndexUrl, ct).ConfigureAwait(false))
+            {
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    throw new Exception(Loc.T("No realtime builds have been published yet."));
+                resp.EnsureSuccessStatusCode();
+                var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                return DeserializeJson<RealtimeIndex>(bytes) ?? new RealtimeIndex();
+            }
+        }
+
+        private static async Task<RealtimeBuild> ResolveRealtimeBuildAsync(LauncherSettings s, CancellationToken ct)
+        {
+            var idx    = await FetchRealtimeIndexAsync(ct).ConfigureAwait(false);
+            var builds = (idx.Builds ?? new List<RealtimeBuild>()).Where(b => b != null && b.Files != null).ToList();
+            if (builds.Count == 0)
+                throw new Exception(Loc.T("No realtime builds have been published yet."));
+            if (s.IsLatestBuild) return builds[0];
+            var pinned = builds.FirstOrDefault(b => string.Equals(b.Id, s.Build, StringComparison.OrdinalIgnoreCase));
+            if (pinned == null)
+                throw new Exception(Loc.F("Realtime build '{0}' is no longer available. Only the newest builds are kept; pick another in Build Settings.", s.Build));
+            return pinned;
+        }
+
+        private static string ShortCommit(string sha)
+        {
+            return string.IsNullOrEmpty(sha) ? "?" : sha.Substring(0, Math.Min(9, sha.Length));
         }
 
         // -- Public: cross-platform archives (Build Settings) -----------------
@@ -256,9 +401,13 @@ namespace SilentHillPC_Launcher
         public static async Task<string> GetCrossPlatformAssetUrlAsync(LauncherSettings settings, string branch,
             string build, string assetName, CancellationToken ct = default(CancellationToken))
         {
+            // The realtime release only keeps the newest Linux/macOS archives.
+            if (settings.UsesRealtime)
+                return LauncherSettings.RealtimeReleaseBase + assetName;
+
             string owner, repo;
             if (!settings.TryGetOwnerRepo(out owner, out repo))
-                throw new Exception("Invalid repo URL: " + settings.RepoUrl);
+                throw new Exception(Loc.F("Invalid repo URL: {0}", settings.RepoUrl));
 
             var releases = await ListReleasesAsync(owner, repo, ct).ConfigureAwait(false);
 
@@ -271,7 +420,7 @@ namespace SilentHillPC_Launcher
             {
                 IEnumerable<GhRelease> cand = releases;
                 cand = string.IsNullOrWhiteSpace(branch)
-                    ? cand.Where(r => !IsBetaRelease(r))
+                    ? cand.Where(r => !IsBetaRelease(r) && !IsCustomRelease(r))
                     : cand.Where(r => string.Equals(r.TargetCommitish, branch, StringComparison.OrdinalIgnoreCase));
                 target = cand.FirstOrDefault();
             }
@@ -343,7 +492,9 @@ namespace SilentHillPC_Launcher
             {
                 if (s.IsDefaultRepo)
                 {
-                    var all    = await ListReleasesAsync(owner, repo, ct).ConfigureAwait(false);
+                    var all    = (await ListReleasesAsync(owner, repo, ct).ConfigureAwait(false))
+                                 .Where(r => !IsCustomRelease(r))   // opt-in builds are never "latest"
+                                 .ToList();
                     // Newest by version; on a tie (a same-day alpha + beta share a
                     // version) prefer the beta — it's the leading-edge stream, and
                     // this is the case where an alpha launcher-delivery release ties
@@ -379,20 +530,32 @@ namespace SilentHillPC_Launcher
             string branch = s.IsDefaultBranch ? null : s.Branch;
 
             GhRelease target;
-            if (!s.IsLatestBuild)
+            string family = CustomFamilyPrefix(s.Build);
+            if (family != null && s.Build.EndsWith("-latest", StringComparison.OrdinalIgnoreCase))
+            {
+                // "Newest release of THIS named build" — never another custom build's,
+                // and never the beta/alpha streams.
+                target = releases.FirstOrDefault(r => r.TagName != null &&
+                             r.TagName.StartsWith(family, StringComparison.OrdinalIgnoreCase));
+                if (target == null)
+                    throw new Exception(Loc.F("No builds found for '{0}' in {1}.", s.Build, owner + "/" + repo));
+            }
+            else if (!s.IsLatestBuild)
             {
                 target = releases.FirstOrDefault(r => string.Equals(r.TagName, s.Build, StringComparison.OrdinalIgnoreCase));
                 if (target == null)
-                    throw new Exception($"Build '{s.Build}' not found in {owner}/{repo}.");
+                    throw new Exception(Loc.F("Build '{0}' not found in {1}.", s.Build, owner + "/" + repo));
             }
             else
             {
                 IEnumerable<GhRelease> cand = releases;
                 if (branch != null)
                     cand = cand.Where(r => string.Equals(r.TargetCommitish, branch, StringComparison.OrdinalIgnoreCase));
+                else
+                    cand = cand.Where(r => !IsCustomRelease(r));
                 target = cand.FirstOrDefault();
                 if (target == null)
-                    throw new Exception($"No releases found for branch '{(branch ?? "default")}' in {owner}/{repo}.");
+                    throw new Exception(Loc.F("No releases found for branch '{0}' in {1}.", branch ?? "default", owner + "/" + repo));
             }
 
             string url = AssetUrl(target, "version.json")
@@ -450,6 +613,49 @@ namespace SilentHillPC_Launcher
                    (r.TagName != null && r.TagName.StartsWith("beta-", StringComparison.OrdinalIgnoreCase));
         }
 
+        private static bool IsCustomRelease(GhRelease r)
+        {
+            return string.Equals(r.TargetCommitish, CustomBranch, StringComparison.OrdinalIgnoreCase) ||
+                   (r.TagName != null && r.TagName.StartsWith("custom-", StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>The family prefix shared by every release of one named custom build
+        /// ("custom-open-world-test-"), from either a release tag
+        /// ("custom-open-world-test-2026.09.08.1") or the saved build value
+        /// ("custom-open-world-test-latest"). null for anything that is not a custom
+        /// build, so it doubles as the "is this a custom build?" test.</summary>
+        public static string CustomFamilyPrefix(string tagOrBuild)
+        {
+            string t = (tagOrBuild ?? "").Trim();
+            if (!t.StartsWith("custom-", StringComparison.OrdinalIgnoreCase)) return null;
+            int cut = t.LastIndexOf('-');
+            if (cut <= "custom".Length) return null;   // no version/latest segment
+            return t.Substring(0, cut + 1);
+        }
+
+        /// <summary>The build value meaning "the newest release of this named custom
+        /// build", or null when the input is not a custom build.</summary>
+        public static string CustomFamilyLatestToken(string tagOrBuild)
+        {
+            string prefix = CustomFamilyPrefix(tagOrBuild);
+            return prefix == null ? null : prefix + "latest";
+        }
+
+        /// <summary>A custom release's display name, from its release title with the
+        /// trailing version stripped ("Open World Test 2026.09.08.1" -> "Open World
+        /// Test"); falls back to the tag's family slug.</summary>
+        private static string CustomDisplayName(GhRelease r)
+        {
+            string title = (r?.Name ?? "").Trim();
+            if (title.Length > 0)
+            {
+                var m = Regex.Match(title, @"^(.*?)\s+\d{4}\.\d{2}\.\d{2}\.\d+$");
+                return m.Success ? m.Groups[1].Value.Trim() : title;
+            }
+            string prefix = CustomFamilyPrefix(r?.TagName);
+            return prefix == null ? (r?.TagName ?? "") : prefix.Substring("custom-".Length).TrimEnd('-');
+        }
+
         private static async Task<List<GhRelease>> ListReleasesAsync(string owner, string repo, CancellationToken ct)
         {
             // GitHub caps the releases API at 100 per page, so paginate to pull
@@ -479,7 +685,7 @@ namespace SilentHillPC_Launcher
                 int idx = 0;
                 foreach (var entry in plan.Changed)
                 {
-                    progress?.Invoke((double)idx / plan.Changed.Count, $"Downloading {entry.Path}...");
+                    progress?.Invoke((double)idx / plan.Changed.Count, Loc.F("Downloading {0}...", entry.Path));
 
                     string tmpFile = Path.Combine(tmpRoot, entry.Path.Replace('/', '_'));
                     using (var resp = await _http.GetAsync(entry.Url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
@@ -492,9 +698,10 @@ namespace SilentHillPC_Launcher
 
                     string actualHash = Sha256Of(tmpFile);
                     if (actualHash != (entry.Sha256 ?? "").ToLowerInvariant())
-                        throw new Exception(
-                            $"Hash mismatch for {entry.Path}: expected {entry.Sha256}, got {actualHash}. " +
-                            "Download corrupted or manifest stale. Aborting (no files replaced).");
+                        throw new Exception(Loc.F(
+                            "Hash mismatch for {0}: expected {1}, got {2}. " +
+                            "Download corrupted or manifest stale. Aborting (no files replaced).",
+                            entry.Path, entry.Sha256, actualHash));
                     idx++;
                 }
 
@@ -504,7 +711,7 @@ namespace SilentHillPC_Launcher
                     string tmpFile = Path.Combine(tmpRoot, entry.Path.Replace('/', '_'));
                     string dst;
                     if (!TryResolveInstallPath(installDir, entry.Path, out dst))
-                        throw new Exception($"Refusing to write '{entry.Path}' — it escapes the install directory. Aborting.");
+                        throw new Exception(Loc.F("Refusing to write '{0}' — it escapes the install directory. Aborting.", entry.Path));
 
                     if (IsUserDataPath(entry.Path) && File.Exists(dst)) continue;
 
@@ -514,7 +721,7 @@ namespace SilentHillPC_Launcher
                     ReplaceFile(tmpFile, dst);
                 }
 
-                progress?.Invoke(1.0, $"Updated to {plan.RemoteVersion}");
+                progress?.Invoke(1.0, Loc.F("Updated to {0}", plan.RemoteVersion));
             }
             finally
             {
@@ -525,7 +732,7 @@ namespace SilentHillPC_Launcher
         private static async Task ApplyZipAsync(string installDir, UpdatePlan plan, Action<double, string> progress, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(plan.ZipUrl))
-                throw new Exception("This zip release has no zip_url in its manifest.");
+                throw new Exception(Loc.T("This zip release has no zip_url in its manifest."));
 
             string tmpRoot    = Path.Combine(Path.GetTempPath(), "sh-zip-" + Guid.NewGuid().ToString("N").Substring(0, 8));
             string zipPath    = Path.Combine(tmpRoot, "update.zip");
@@ -549,7 +756,7 @@ namespace SilentHillPC_Launcher
                             read += n;
                             if (total.HasValue && total.Value > 0)
                                 progress?.Invoke(0.03 + 0.62 * ((double)read / total.Value),
-                                                 $"Downloading update... {read / (1024 * 1024)}/{total.Value / (1024 * 1024)} MB");
+                                                 Loc.F("Downloading update... {0}/{1} MB", read / (1024 * 1024), total.Value / (1024 * 1024)));
                         }
                     }
                 }
@@ -567,18 +774,18 @@ namespace SilentHillPC_Launcher
                     {
                         var ze = FindZipEntry(archive, entry.Path);
                         if (ze == null)
-                            throw new Exception($"{entry.Path} is missing from the update zip. Aborting.");
+                            throw new Exception(Loc.F("{0} is missing from the update zip. Aborting.", entry.Path));
 
                         string tmpFile;
                         if (!TryResolveInstallPath(extractDir, entry.Path, out tmpFile))
-                            throw new Exception($"Update zip entry '{entry.Path}' escapes the staging directory. Aborting.");
+                            throw new Exception(Loc.F("Update zip entry '{0}' escapes the staging directory. Aborting.", entry.Path));
 
                         var tmpDir = Path.GetDirectoryName(tmpFile);
                         if (!string.IsNullOrEmpty(tmpDir) && !Directory.Exists(tmpDir)) Directory.CreateDirectory(tmpDir);
                         ze.ExtractToFile(tmpFile, true);
 
                         if (!string.IsNullOrEmpty(entry.Sha256) && Sha256Of(tmpFile) != entry.Sha256.ToLowerInvariant())
-                            throw new Exception($"Hash mismatch for {entry.Path} in the zip. Aborting (no files replaced).");
+                            throw new Exception(Loc.F("Hash mismatch for {0} in the zip. Aborting (no files replaced).", entry.Path));
 
                         staged[entry.Path] = tmpFile;
                     }
@@ -589,7 +796,7 @@ namespace SilentHillPC_Launcher
                 {
                     string dst;
                     if (!TryResolveInstallPath(installDir, entry.Path, out dst))
-                        throw new Exception($"Refusing to write '{entry.Path}' — it escapes the install directory. Aborting.");
+                        throw new Exception(Loc.F("Refusing to write '{0}' — it escapes the install directory. Aborting.", entry.Path));
 
                     if (IsUserDataPath(entry.Path) && File.Exists(dst)) continue;
 
@@ -599,7 +806,7 @@ namespace SilentHillPC_Launcher
                     ReplaceFile(staged[entry.Path], dst);
                 }
 
-                progress?.Invoke(1.0, $"Updated to {plan.RemoteVersion}");
+                progress?.Invoke(1.0, Loc.F("Updated to {0}", plan.RemoteVersion));
             }
             finally
             {
@@ -696,9 +903,11 @@ namespace SilentHillPC_Launcher
         /// repo/branch/build, to preview a build before installing it.</summary>
         public static async Task<string> GetChangelogTextAsync(LauncherSettings settings, CancellationToken ct = default(CancellationToken))
         {
+            if (settings.UsesRealtime)
+                return await FetchTextAsync(LauncherSettings.RealtimeChangelogUrl, ct).ConfigureAwait(false);
             string owner, repo;
             if (!settings.TryGetOwnerRepo(out owner, out repo))
-                throw new Exception("Invalid repo URL: " + settings.RepoUrl);
+                throw new Exception(Loc.F("Invalid repo URL: {0}", settings.RepoUrl));
             var src = await ResolveManifestSourceAsync(owner, repo, settings, ct).ConfigureAwait(false);
             return await FetchTextAsync(DeriveChangelogUrl(src.Url), ct).ConfigureAwait(false);
         }
@@ -763,6 +972,14 @@ namespace SilentHillPC_Launcher
         {
             string t = (tag ?? "").Trim();
             if (t.StartsWith("beta-", StringComparison.OrdinalIgnoreCase)) t = t.Substring(5);
+            else if (t.StartsWith("custom-", StringComparison.OrdinalIgnoreCase))
+            {
+                // Strip the family prefix so releases of ONE custom build order among
+                // themselves. Custom builds are filtered out of every cross-stream
+                // "newest" comparison, so a real version here can never win "latest".
+                string prefix = CustomFamilyPrefix(t);
+                t = prefix == null ? "" : t.Substring(prefix.Length);
+            }
             else if (t.StartsWith("v", StringComparison.OrdinalIgnoreCase)) t = t.Substring(1);
             Version v;
             return Version.TryParse(t, out v) ? v : new Version(0, 0, 0, 0);

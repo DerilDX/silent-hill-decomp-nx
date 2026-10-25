@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include <PsyX/PsyX_public.h> /* PsyX_LookupGameControllerMapping / RawControllerBindHeld */
 #include "game.h"
+#include "pc_pick.h"
 #include "bodyprog/bodyprog.h"
 #include "bodyprog/screen/screen_data.h"
 #include "bodyprog/player.h"
@@ -11,9 +12,11 @@
 #include "pc_combat.h"
 #include "pc_config.h"
 #include "bodyprog/item_screens.h"
+#include "sh_log.h"      /* SH_DBG */
 #include "dbg_overlay.h" /* DbgOverlay_ToastLine — quick-heal result line */
 #include <stdio.h>
 #include "bodyprog/sound/sound_system.h"
+extern int Pc_ConsoleIsOpen(void);
 
 extern const unsigned char* g_sdlKeyboardState;
 extern int PsyX_RawControllerButtonHeld(int sdlGameControllerButton);
@@ -37,6 +40,9 @@ q19_12 g_PcBulletRadMul    = Q12(1.0f); /* horizontal radius added = 1x collisio
  * Set by Pc_ExtraActionsUpdate on the bind edge; consumed + cleared by
  * Player_LogicUpdate (native state machine or the movement shim). */
 int g_PcQuickTurnRequest = 0;
+
+/* Optional native quick weapon hotkeys and bidirectional wheel (off by default). */
+int g_PcQuickWeaponsEnabled = 0;
 
 /* PC-only: 1 while the Rear Look bind is HELD in a TPS/OTS camera. Set every
  * frame by Pc_RearLookUpdate; consumed by Pc_TpsCamera_Apply (orbit +180) and
@@ -152,9 +158,11 @@ static int          s_padReload[2] = { -2, -2 }; /* [scheme]; -2 = unresolved */
 
 static void Pc_ReloadBindsResolve(void)
 {
+    static int s_gen = -1;
     const ControlScheme* sc[2];
     int i;
-    if (s_padReload[0] != -2) return;
+    if (s_padReload[0] != -2 && s_gen == g_PcBindsGen) return;
+    s_gen = g_PcBindsGen;
     sc[0] = &g_PcConfig.classic;
     sc[1] = &g_PcConfig.altcam;
     for (i = 0; i < 2; i++) {
@@ -231,10 +239,16 @@ static void Pc_ManualReloadSample(int sch)
 
 extern void GameFs_WeaponInfoUpdate(void); /* player.h — loads the equipped weapon model/anim */
 
+/* Only the LIVE slots count. The game itself (Player_ItemRemove, the inventory
+ * screen) never looks past inventorySlotCount; slots beyond it keep whatever
+ * a previous save or session left there. Scanning all INV_ITEM_COUNT_MAX
+ * found those ghosts: quick heal "used" a drink that was not in the
+ * inventory (heal + green flash + toast, nothing removed) and weapon cycling
+ * could pick a weapon that was no longer owned. */
 static s32 Pc_FindItemSlot(u8 id)
 {
     s32 i;
-    for (i = 0; i < INV_ITEM_COUNT_MAX; i++)
+    for (i = 0; i < g_SavegamePtr->inventorySlotCount && i < INV_ITEM_COUNT_MAX; i++)
         if (g_SavegamePtr->items[i].id_0 == id) return i;
     return NO_VALUE;
 }
@@ -255,6 +269,19 @@ static int Pc_ActionSafe(void)
 static void Pc_EquipWeapon(u8 invItemId, s32 slot)
 {
     s32 groupId = INV_ITEM_GROUP(invItemId);
+
+    /* Silence the outgoing weapon, the way opening the inventory does.
+     *
+     * A quick switch is the whole of "open inventory, pick a weapon, close", and
+     * the OPEN half is what stops weapon audio: item_screens_3.c calls
+     * func_8004C564(0, NO_VALUE), whose NO_VALUE case runs func_8008B398 to take
+     * all four weapon sound channels to zero. Cycling with the bound key skipped
+     * it, so the chainsaw kept running audibly until the player opened the
+     * inventory by hand -- and the same would hold for anything else holding a
+     * weapon channel. Calling the game's own entry point rather than stopping
+     * SFX ids by hand keeps the fade state machine (D_800C3960..63) consistent
+     * with what the rest of the weapon-sound code expects to find. */
+    func_8004C564(0, NO_VALUE);
     g_Inventory_EquippedItem                  = invItemId;
     g_SavegamePtr->equippedWeapon             = invItemId;
     g_SysWork.playerCombat.weaponAttack       = invItemId + InvItemId_KitchenKnife; /* +0x80; s8 truncates to EquippedWeaponId */
@@ -278,6 +305,36 @@ static void Pc_EquipWeapon(u8 invItemId, s32 slot)
     Gfx_PlayerHeldItemAttach(g_SysWork.playerCombat.weaponAttack);
     WorldGfx_PlayerPrevHeldItem(&g_SysWork.playerCombat);
     func_8003D01C();
+
+    /* Shut the gas weapons down when switching off one.
+     *
+     * The chainsaw and the rock drill keep running state while equipped --
+     * gasWeaponPowerTimer, which player_control counts down every frame, and
+     * field_44.field_0 -- and that is what feeds the drill's smoke. The
+     * inventory clears both on its way out (Inventory_ExitAnimEquippedItemUpdate,
+     * item_screens_1.c:53), so switching there stops the effect; cycling with the
+     * bound key never ran that path, and the smoke carried on until the player
+     * opened the inventory and switched by hand.
+     *
+     * Same two conditions as the original, mirroring the inventory's EXIT half.
+     * gasWeaponPowerTimer is already zeroed by the silence above (its open half
+     * does it unconditionally, exactly as the inventory would); what this uniquely
+     * clears is field_44.field_0, which only the exit path touches. Reads
+     * g_Player_WeaponAttack for the OUTGOING weapon exactly as the inventory
+     * does -- it lags the combat struct, which is why it still holds the old one
+     * here. */
+    {
+        u8 prevId = WEAPON_ATTACK_ID_GET(g_Player_WeaponAttack);
+
+        if ((prevId == EquippedWeaponId_Chainsaw &&
+             g_SysWork.playerCombat.weaponAttack != prevId) ||
+            (prevId == EquippedWeaponId_RockDrill &&
+             g_SysWork.playerCombat.weaponAttack != WEAPON_ATTACK(prevId, AttackInputType_Tap)))
+        {
+            g_SysWork.playerWork.player.field_44.field_0 = 0;
+            g_SysWork.playerWork.player.properties.player.gasWeaponPowerTimer = Q12(0.0f);
+        }
+    }
 }
 
 /* Cycle to the next OWNED weapon in acquisition/enum order (wraps). */
@@ -300,6 +357,81 @@ void Pc_CycleWeapons(void)
     }
 }
 
+/* Direct-number and scroll controls share the port's native equip routine. */
+static const u8 s_quickWeaponOrder[] = {
+    InvItemId_KitchenKnife, InvItemId_SteelPipe, InvItemId_Handgun,
+    InvItemId_Shotgun, InvItemId_HuntingRifle, InvItemId_Hammer,
+    InvItemId_Axe, InvItemId_Chainsaw, InvItemId_Katana,
+    InvItemId_RockDrill, InvItemId_HyperBlaster
+};
+
+extern int g_PcQuickOptionsActive;
+/* SDL event watch retains wheel events even when the window grabs the mouse. */
+static SDL_atomic_t s_quickWheel = {0};
+static int SDLCALL Pc_QuickWeaponWheelWatch(void* userdata, SDL_Event* event)
+{
+    int delta;
+    (void)userdata;
+    if (event->type != SDL_MOUSEWHEEL) return 1;
+    delta = event->wheel.y;
+    if (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) delta = -delta;
+    if (delta) SDL_AtomicAdd(&s_quickWheel, delta);
+    return 1;
+}
+
+static void Pc_QuickWeaponInputUpdate(void)
+{
+    static const SDL_Scancode keys[] = {
+        SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
+        SDL_SCANCODE_4, SDL_SCANCODE_5, SDL_SCANCODE_6,
+        SDL_SCANCODE_7, SDL_SCANCODE_8, SDL_SCANCODE_9,
+        SDL_SCANCODE_0, SDL_SCANCODE_MINUS
+    };
+    static unsigned char prev[11];
+    static int watchRegistered;
+    const unsigned char *keyboard = SDL_GetKeyboardState(NULL);
+    int target = -1, delta, i, j;
+    if (!watchRegistered) {
+        SDL_AddEventWatch(Pc_QuickWeaponWheelWatch, NULL);
+        watchRegistered = 1;
+    }
+    /* Consume changes even if a menu is open to prevent deferred switching. */
+    delta = SDL_AtomicSet(&s_quickWheel, 0);
+    for (i = 0; i < 11; ++i) {
+        int down = keyboard && keyboard[keys[i]];
+        if (down && !prev[i]) target = i;
+        prev[i] = (unsigned char)(down != 0);
+    }
+    if (!g_PcQuickWeaponsEnabled || !g_SavegamePtr || !Pc_ActionSafe() ||
+        Pc_ConsoleIsOpen() || g_PcQuickOptionsActive) return;
+    if (target >= 0) {
+        s32 slot = Pc_FindItemSlot(s_quickWeaponOrder[target]);
+        if (slot != NO_VALUE && g_SavegamePtr->equippedWeapon != s_quickWeaponOrder[target])
+            Pc_EquipWeapon(s_quickWeaponOrder[target], slot);
+    } else if (delta != 0) {
+        int steps = delta > 0 ? delta : -delta;
+        int direction = delta > 0 ? -1 : 1;
+        u8 current = g_SavegamePtr->equippedWeapon;
+        if (steps > 11) steps = 11;
+        for (j = 0; j < steps; ++j) {
+            int index = -1, k;
+            for (i = 0; i < 11; ++i)
+                if (s_quickWeaponOrder[i] == current) { index = i; break; }
+            if (index < 0) index = direction > 0 ? -1 : 0;
+            for (k = 1; k <= 11; ++k) {
+                int next = (index + direction * k + 22) % 11;
+                if (Pc_FindItemSlot(s_quickWeaponOrder[next]) != NO_VALUE) {
+                    current = s_quickWeaponOrder[next]; break;
+                }
+            }
+        }
+        if (current != g_SavegamePtr->equippedWeapon) {
+            s32 slot = Pc_FindItemSlot(current);
+            if (slot != NO_VALUE) Pc_EquipWeapon(current, slot);
+        }
+    }
+}
+
 /* Quantity in the first slot holding this id, 0 if absent.
  *
  * Pc_FindItemSlot matches on id_0 alone, which is right for weapons (a knife
@@ -309,7 +441,7 @@ void Pc_CycleWeapons(void)
 static s32 Pc_HealItemCount(u8 id)
 {
     s32 i;
-    for (i = 0; i < INV_ITEM_COUNT_MAX; i++)
+    for (i = 0; i < g_SavegamePtr->inventorySlotCount && i < INV_ITEM_COUNT_MAX; i++)
         if (g_SavegamePtr->items[i].id_0 == id)
             return g_SavegamePtr->items[i].count_1;
     return 0;
@@ -346,7 +478,38 @@ void Pc_QuickHeal(void)
         else if (drink != NO_VALUE) chosen = InvItemId_HealthDrink;
         else if (amp   != NO_VALUE) chosen = InvItemId_Ampoule;
     }
-    if (chosen == InvItemId_Empty) return; /* nothing owned */
+    /* Nothing owned. This compared a u8 against the enum constant: chosen holds
+     * (u8)InvItemId_Empty = 255 while InvItemId_Empty itself is NO_VALUE (-1),
+     * so the test never matched. Player_ItemRemove(255) then found the first
+     * EMPTY slot (id 255), "removed" one from its count (0 wrapping to 255 and
+     * counting down), reported success, and Harry healed off nothing -- as
+     * often as the key was pressed, with the toast falling through to
+     * "Ampoule". Only the three healing items may ever be spent here. */
+    if (chosen != InvItemId_HealthDrink && chosen != InvItemId_FirstAidKit && chosen != InvItemId_Ampoule)
+        return;
+
+    /* [QUICKHEAL] One line per use: which slot paid for it and the whole live
+     * inventory. A heal "with no healing items" (2026-09-17, a New Game warped
+     * straight to map1_s05) could not be traced from the code: this path only
+     * spends an item the game's own Player_ItemRemove finds in a live slot. */
+    {
+        char inv[256];
+        int  n = 0, i;
+        for (i = 0; i < g_SavegamePtr->inventorySlotCount && i < INV_ITEM_COUNT_MAX && n < (int)sizeof(inv) - 12; i++)
+            n += snprintf(inv + n, sizeof(inv) - (size_t)n, " %d:%d", (int)g_SavegamePtr->items[i].id_0,
+                          (int)g_SavegamePtr->items[i].count_1);
+        inv[n] = '\0';
+        SH_DBG("[QUICKHEAL] hp=%d chose item %d (slot %d) | slots=%d:%s", (int)hp, (int)chosen,
+               (int)Pc_FindItemSlot(chosen), (int)g_SavegamePtr->inventorySlotCount, inv);
+    }
+
+    /* Spend the item FIRST, through the game's own removal, and heal only if it
+     * really came out of the inventory. Healing before removing is how a ghost
+     * slot produced a full heal with feedback and no inventory change. */
+    if (!Player_ItemRemove(chosen, 1)) {
+        SH_DBG("[QUICKHEAL] item %d looked owned but Player_ItemRemove found none -- no heal", (int)chosen);
+        return;
+    }
 
     switch (chosen) {
         case InvItemId_FirstAidKit: health += Q12(80.0f);  break;
@@ -355,7 +518,6 @@ void Pc_QuickHeal(void)
     }
     g_SysWork.playerWork.player.health = CLAMP(health, Q12(0.0f), Q12(100.0f));
     Sd_PlaySfx(Sfx_Unk1325, -0x40, 0x40); /* same feedback SFX as the inventory heal */
-    Player_ItemRemove(chosen, 1);
     g_PcHealFlashTimer = Q12(0.35f); /* brief green heal pulse (drawn by Pc_HealFlashUpdate) */
 
     /* Report what was spent and what is left, since quick heal picks the item for
@@ -408,6 +570,110 @@ void Pc_HealFlashUpdate(void)
     AddPrim(&g_OtTags0[buf][4], &s_tp[buf]);
 }
 
+/* Low-health glow: a slow red pulse breathing in from the screen edges while
+ * health is under 20 (the SH2 remake's cue). Four additive Gouraud bands,
+ * red at the border fading to black inward, so it reads as a vignette rather
+ * than a damage flash; the same OT2 bucket + additive tpage as the heal pulse.
+ * Strength scales with the deficit (faint at 19 hp, full at the brink) and
+ * breathes on a ~1.6 s cycle driven by the game clock, so it holds still with
+ * the game. Optional: config low_health_glow (PC Options > HUD / quick options). */
+void Pc_LowHealthGlowUpdate(void)
+{
+    #define GLOW_HP_MAX   20
+    #define GLOW_PERIOD   Q12(1.6f)
+    #define GLOW_R_MIN    36
+    #define GLOW_R_MAX    112
+    static POLY_G4  s_band[2][4];
+    static DR_TPAGE s_tp[2];
+    static s32      s_phase;
+    extern int      g_PsxCutsceneActive;
+    extern int      g_PsxPresentLastFrame;
+    extern int      g_PcHorPlusEnabled;
+    s32 hp, pulse, strength, r, halfW, halfH, dx, dy, buf, i;
+
+    if (!g_PcConfig.lowHealthGlow)
+        return;
+    if (g_GameWork.gameState != GameState_InGame || g_SysWork.sysState != SysState_Gameplay)
+        return;
+    if (g_PsxCutsceneActive || g_PsxPresentLastFrame)
+        return;
+
+    hp = g_SysWork.playerWork.player.health >> Q12_SHIFT;
+    if (hp <= 0 || hp >= GLOW_HP_MAX)
+        return;
+
+    s_phase += g_DeltaTime;
+    while (s_phase >= GLOW_PERIOD)
+        s_phase -= GLOW_PERIOD;
+    pulse    = (Math_Sin((s32)(((s64)s_phase * 4096) / GLOW_PERIOD)) + Q12(1.0f)) >> 1; /* 0..4096 */
+    strength = ((GLOW_HP_MAX - hp) * Q12(1.0f)) / GLOW_HP_MAX;                           /* 0..4096 by deficit */
+    r        = GLOW_R_MIN + (((GLOW_R_MAX - GLOW_R_MIN) * pulse) >> 12);
+    r        = (r * (Q12(0.5f) + (strength >> 1))) >> 12;                                 /* half at 19 hp, full at 0 */
+    if (r <= 0)
+        return;
+
+    /* Centre-origin OT2 space (same as the heal tile). Hor+ shows more width
+     * than the PSX frame, so the side bands follow the window's aspect. */
+    halfH = SCREEN_HEIGHT / 2;
+    halfW = SCREEN_WIDTH / 2;
+    if (g_PcHorPlusEnabled && g_PcConfig.windowHeight > 0)
+    {
+        /* Same visible-extent bound the mesh cull and the overlay quads use:
+         * window aspect * PAR / hfov. The old `halfH * winW / winH` dropped
+         * both the pixel aspect and hfov, landing at ~199 units where the
+         * visible half-extent at 16:9 is ~286 -- so the glow stopped well
+         * short of the screen edges. See project_widescreen_frame_bound_class. */
+        extern float g_PsxPixelAspect;
+        extern float g_PsxWorldHScale;
+        const float hs = (g_PsxWorldHScale > 0.01f) ? g_PsxWorldHScale : 1.0f;
+        float       w  = (((float)halfH * (float)g_PcConfig.windowWidth) /
+                          (float)g_PcConfig.windowHeight) * g_PsxPixelAspect / hs;
+
+        halfW = (s32)(w + 0.5f);
+        /* Cap well past 32:9 but inside the s16 prim range. */
+        if (halfW > 512) halfW = 512;
+        if (halfW < SCREEN_WIDTH / 2) halfW = SCREEN_WIDTH / 2;
+    }
+    dy  = (halfH * 27) / 100; /* halved 2026-08-25: the 55/40 bands swallowed a third of the screen */
+    dx  = (halfW * 20) / 100;
+    buf = g_ActiveBufferIdx;
+
+    for (i = 0; i < 4; i++)
+    {
+        POLY_G4* q = &s_band[buf][i];
+        setPolyG4(q);
+        setSemiTrans(q, 1);
+        switch (i)
+        {
+            case 0: /* top: red along the top edge, black at the inner edge */
+                setXY4(q, -halfW, -halfH, halfW, -halfH, -halfW, -halfH + dy, halfW, -halfH + dy);
+                setRGB0(q, (u8)r, 0, 0); setRGB1(q, (u8)r, 0, 0); setRGB2(q, 0, 0, 0); setRGB3(q, 0, 0, 0);
+                break;
+            case 1: /* bottom */
+                setXY4(q, -halfW, halfH - dy, halfW, halfH - dy, -halfW, halfH, halfW, halfH);
+                setRGB0(q, 0, 0, 0); setRGB1(q, 0, 0, 0); setRGB2(q, (u8)r, 0, 0); setRGB3(q, (u8)r, 0, 0);
+                break;
+            case 2: /* left */
+                setXY4(q, -halfW, -halfH, -halfW + dx, -halfH, -halfW, halfH, -halfW + dx, halfH);
+                setRGB0(q, (u8)r, 0, 0); setRGB1(q, 0, 0, 0); setRGB2(q, (u8)r, 0, 0); setRGB3(q, 0, 0, 0);
+                break;
+            default: /* right */
+                setXY4(q, halfW - dx, -halfH, halfW, -halfH, halfW - dx, halfH, halfW, halfH);
+                setRGB0(q, 0, 0, 0); setRGB1(q, (u8)r, 0, 0); setRGB2(q, 0, 0, 0); setRGB3(q, (u8)r, 0, 0);
+                break;
+        }
+        AddPrim(&g_OtTags0[buf][4], q);
+    }
+    /* Added last so it is drawn first: additive blend for the bands above. */
+    setDrawTPage(&s_tp[buf], 0, 1, getTPageN(0, 1, 0, 0));
+    AddPrim(&g_OtTags0[buf][4], &s_tp[buf]);
+
+    #undef GLOW_HP_MAX
+    #undef GLOW_PERIOD
+    #undef GLOW_R_MIN
+    #undef GLOW_R_MAX
+}
+
 /* Per-frame dispatch for the bound Cycle Weapons + Quick Heal actions (reload is
  * pulled by the combat FSM via PC_PlayerManualReloadRequested). Keyboard + physical
  * controller, edge-detected; gated to safe gameplay. Called from game_main.c. */
@@ -423,8 +689,10 @@ void Pc_ExtraActionsUpdate(void)
 
     g_PcInputFrame++; /* frame identity for the edge caches — see g_PcInputFrame */
 
-    if (s_padCycle[0] == -2) {
+    static int          s_actGen = -1;
+    if (s_padCycle[0] == -2 || s_actGen != g_PcBindsGen) {
         const ControlScheme* sc[2];
+        s_actGen = g_PcBindsGen;
         int i;
         sc[0] = &g_PcConfig.classic;
         sc[1] = &g_PcConfig.altcam;
@@ -465,6 +733,16 @@ void Pc_ExtraActionsUpdate(void)
         s_reloadLatchT    = 0;
     }
 
+    /* Typing in the console presses these keys too: the quick-heal letter fired
+     * mid-command. Pc_ConsoleIsOpen also covers the apply window after Enter,
+     * when input is briefly unfrozen but the panel is still up. */
+    Pc_QuickWeaponInputUpdate();
+    if (Pc_ConsoleIsOpen())
+    {
+        g_PcQuickTurnRequest = 0;
+        g_PcReloadRequest    = 0;
+        return;
+    }
     if (!Pc_ActionSafe())
     {
         g_PcQuickTurnRequest = 0; /* not safe gameplay -> drop any pending turn */
@@ -489,12 +767,15 @@ void Pc_RearLookUpdate(void)
     extern int          g_DebugThirdPersonCam;
     extern int          g_PcFpsCam;
     extern int          g_PcConsoleInputActive;
+    extern int          g_PcQuickOptionsActive;
     const Uint8*        keys;
     int                 sch, held;
 
-    if (s_pad[0] == -2) {
+    static int          s_rlGen = -1;
+    if (s_pad[0] == -2 || s_rlGen != g_PcBindsGen) {
         const ControlScheme* sc[2];
         int i;
+        s_rlGen = g_PcBindsGen;
         sc[0] = &g_PcConfig.classic;
         sc[1] = &g_PcConfig.altcam;
         for (i = 0; i < 2; i++) {
@@ -512,7 +793,7 @@ void Pc_RearLookUpdate(void)
     g_PcRearLookActive = (held && g_DebugThirdPersonCam && !g_PcFpsCam &&
                           g_GameWork.gameState == GameState_InGame &&
                           g_SysWork.sysState   == SysState_Gameplay &&
-                          !g_PcConsoleInputActive) ? 1 : 0;
+                          !Pc_ConsoleIsOpen() && !g_PcQuickOptionsActive) ? 1 : 0;
 }
 
 /* OTS/TPS free-aim aim assist.
@@ -582,6 +863,7 @@ s32 Pc_AimAssistFind(const VECTOR3* camPos, const VECTOR3* camFwd, s32 aimRange,
             continue;
 
         radius = npc->collision.cylinder.field_2;
+        radius = (s32)(((s64)radius * Pc_Pick_CollScale(npc)) >> 12); /* console SCALE */
         if (radius <= 0)
             continue;
 
@@ -608,6 +890,11 @@ s32 Pc_AimAssistFind(const VECTOR3* camPos, const VECTOR3* camFwd, s32 aimRange,
          * hits while manual free-aim only hit near the neck). */
         yA = npc->position.vy + npc->collision.box.top;
         yB = npc->position.vy + npc->collision.box.height;
+        {
+            q19_12 cs = Pc_Pick_CollScale(npc); /* console SCALE */
+            yA = Pc_Pick_ScaleAbout(npc->position.vy, yA, cs);
+            yB = Pc_Pick_ScaleAbout(npc->position.vy, yB, cs);
+        }
         yLo = (yA < yB) ? yA : yB;
         yHi = (yA < yB) ? yB : yA;
         bodyH  = yHi - yLo;

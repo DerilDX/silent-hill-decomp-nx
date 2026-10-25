@@ -245,8 +245,18 @@ int  HiresOverride_RegisterDdsKeyed(const char* label,
  * VRAM region that was just rewritten — pool slots and map atlas VRAM
  * recycle the same rect+clut for different TIMs, and a surviving entry
  * would bind the OLD image to the new material's prims. Call for every
- * VRAM upload (pixels and CLUT rects). */
+ * VRAM upload (pixels and CLUT rects). Pinned entries are exempt. */
 void HiresOverride_InvalidateVramRect(int x, int y, int w, int h);
+
+/* Pin (or unpin) the entry registered under exactly this key, so neither
+ * HiresOverride_InvalidateVramRect nor the evictor removes it. For an override
+ * whose VRAM home is on purpose never uploaded (the PAL font grid on a USA or
+ * Japanese disc); the owner drops it with HiresOverride_DropVramRect. Both
+ * return -1 when no entry has that key. */
+int HiresOverride_PinVramRect(int vramX, int vramY, int vramW, int vramH,
+                              int clutX, int clutY, int bitDepth, int pin);
+int HiresOverride_DropVramRect(int vramX, int vramY, int vramW, int vramH,
+                               int clutX, int clutY, int bitDepth);
 
 /* True once live pack-composed GL textures exceed the byte budget. Pack
  * compose loops (fsqueue_3.c) stop making MORE pack textures then — rows
@@ -276,6 +286,17 @@ void HiresOverride_Tick(void);
 /* "Can this (slot,row) be put back to its own native art?" Rows that answer 0
  * are never evicted — see the note in HiresOverride_EvictColdestPackRow. */
 typedef int (*HiresRestorablePredicate)(int slotId, int row);
+
+/* Validate a rebased prim clut against the pool: returns it unchanged when it
+ * is native or encodes a backed slot, otherwise logs and returns baseClut (the
+ * material's own registered base) so the prim stays drawable. */
+void HiresOverride_PoolSlotSetNativeClut(int slotId, int clutX, int clutY);
+
+unsigned short HiresOverride_RestampValidate(unsigned short newClut,
+                                             unsigned short baseClut,
+                                             unsigned short oldClut,
+                                             unsigned short oldBase,
+                                             const char* matName);
 
 int HiresOverride_EvictColdestPackRow(unsigned minAgeTicks,
                                       HiresRestorablePredicate canRestore,

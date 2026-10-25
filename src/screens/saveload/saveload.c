@@ -11,6 +11,10 @@
 #include "bodyprog/game_boot/game_boot.h"
 #include "screens/saveload.h"
 
+#ifdef SH_PC_PORT
+#include "lang_text.h" /* Pc_LangMenuText/Width - centre the drawn string, not the English one */
+#endif
+
 #define SAVE_FLASH_TIMER_MAX 40
 #define SLOT_COLUMN_OFFSET   150
 #define SLOT_ROW_OFFSET      20
@@ -386,8 +390,20 @@ void SaveScreen_SaveLocationDraw(s_SaveScreenElement* saveEntry, s32 saveIdx, s3
             Gfx_StringSetColor(colorId);
         }
 
+#ifdef SH_PC_PORT
+        /* X_OFFSETS holds the pixel width of each ENGLISH name (X_OFFSETS[0] is
+         * exactly the 82px of "Anywhere"), which centres it only while English
+         * is what gets drawn. Measure the string that will actually be drawn —
+         * identical arithmetic on a US disc, and correctly centred once a
+         * translation, or the disc's own Japanese, is in play. */
+        Gfx_StringSetPosition(((slotIdx * OFFSET_X) + MARGIN_X) -
+                                  (Pc_LangMenuTextWidth(
+                                       Pc_LangMenuText(g_Savegame_SaveLocationNames[nameIdx])) / 2),
+                              (selectedSaveIdx * OFFSET_Y) + MARGIN_Y);
+#else
         Gfx_StringSetPosition(((slotIdx * OFFSET_X) + MARGIN_X) - (X_OFFSETS[nameIdx] / 2),
                               (selectedSaveIdx * OFFSET_Y) + MARGIN_Y);
+#endif
         Gfx_StringDraw(g_Savegame_SaveLocationNames[nameIdx], 50);
     }
 
@@ -749,7 +765,14 @@ void SaveScreen_MemCardStateDraw(s32 g_SaveScreen_SaveScreenState, s32 memCardSt
             }
 
             D_801E7554 = strIdx;
+#ifdef SH_PC_PORT
+            /* Same as the save-name centring above: X_OFFSETS measures the
+             * ENGLISH dialog, so measure what is actually drawn instead. */
+            Gfx_StringSetPosition(160 - (Pc_LangMenuTextWidth(
+                                             Pc_LangMenuText(DIALOG_STRS[strIdx])) / 2), 186);
+#else
             Gfx_StringSetPosition(160 - (X_OFFSETS[strIdx] >> 1), 186);
+#endif
             Gfx_StringDraw(DIALOG_STRS[strIdx], DEFAULT_MAP_MESSAGE_LENGTH);
 
             // Finished saving.
@@ -791,7 +814,14 @@ void SaveScreen_WriteOptionsStepDraw(s32 stringIdx, bool optionSelected) // 0x80
             g_SaveScreen_OverwriteActive = 1;
 
         case 1:
+#ifdef SH_PC_PORT
+            /* Same as the save-name centring above: X_OFFSETS measures the
+             * ENGLISH dialog, so measure what is actually drawn instead. */
+            Gfx_StringSetPosition(160 - (Pc_LangMenuTextWidth(
+                                             Pc_LangMenuText(DIALOG_STRS[stringIdx])) / 2), 178);
+#else
             Gfx_StringSetPosition(160 - (X_OFFSETS[stringIdx] / 2), 178);
+#endif
             Gfx_StringDraw(DIALOG_STRS[stringIdx], DEFAULT_MAP_MESSAGE_LENGTH);
             Gfx_StringSetPosition(104, 196);
             Gfx_StringDraw("\x07Yes__________No", DEFAULT_MAP_MESSAGE_LENGTH);
@@ -1809,6 +1839,24 @@ void SaveScreen_LogicUpdate(void) // 0x801E649C
     {
         int mx, my;
 
+        /* A mouse button that is ALSO bound to a PSX button (key_cross = Mouse1
+         * is the common one) arrived on this screen twice: once here, where the
+         * pointer logic decides what a click MEANS, and once as a raw Cross
+         * press that the switch below reads as "load the selected save". So
+         * pressing the scroll bar, or starting a drag anywhere, loaded whatever
+         * row happened to be selected before the pointer code could say
+         * otherwise. Drop the bits the mouse is producing this frame; every
+         * injection below is added afterwards, and pad or keyboard presses of
+         * the same buttons are unaffected. */
+        {
+            extern unsigned int Pc_MouseCursor_BoundPadBits(void);
+            const u32 pcMouseBits = Pc_MouseCursor_BoundPadBits();
+
+            g_Controller0->clickedBtnFlags &= ~pcMouseBits;
+            g_Controller0->pulsedBtnFlags  &= ~pcMouseBits;
+            g_Controller0->heldBtnFlags    &= ~pcMouseBits;
+        }
+
         /* Re-armed every frame: only a hover that actually moves the selection
          * (below) pins the scroll, so pad/keyboard navigation still scrolls
          * normally. Consumed later in the frame by SaveScreen_ScreenDraw ->
@@ -2576,7 +2624,7 @@ void SaveScreen_ScreenDraw(void) // 0x801E70C8
     /* No pointer on the input-less auto-load flow. */
     if (g_GameWork.gameState != GameState_AutoLoadSavegame)
     {
-        Pc_MouseCursor_Draw();
+        Pc_MouseCursor_Show();
     }
 #endif
 }

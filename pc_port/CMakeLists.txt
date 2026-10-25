@@ -265,14 +265,29 @@ else()
     message(STATUS "RetroAchievements: disabled (rcheevos submodule missing — run: git submodule update --init --recursive)")
 endif()
 
-# Set output name based on platform
-if(SH_SWITCH)
-    set(EXECUTABLE_NAME SilentHillPC)
+# Executable name (shared by PC and Switch builds)
+set(EXECUTABLE_NAME SilentHillPC)
+
+# Lua 5.4 — vendored under third_party/lua/src, compiled into a static lib for
+# the randomizer scripting layer. The standalone programs (lua.c/luac.c) and the
+# amalgamation/test files are not vendored, so a plain src/*.c glob is safe. The
+# generic ISO-C luaconf (no LUA_USE_* platform define) keeps it portable and
+# sandboxes out dynamic C-library loading, which user scripts must not do.
+set(SH_LUA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua")
+if(EXISTS "${SH_LUA_DIR}/src/lua.h")
+    file(GLOB LUA_SOURCES "${SH_LUA_DIR}/src/*.c")
+    add_library(lua_static STATIC ${LUA_SOURCES})
+    target_include_directories(lua_static PUBLIC "${SH_LUA_DIR}/src")
+    if(NOT MSVC)
+        target_compile_options(lua_static PRIVATE -w)
+    endif()
+    set(SH_HAVE_LUA ON)
 else()
-    set(EXECUTABLE_NAME SilentHillPC)
+    set(SH_HAVE_LUA OFF)
+    message(STATUS "Lua scripting: disabled (third_party/lua missing)")
 endif()
 
-add_executable(${EXECUTABLE_NAME}
+add_executable(SilentHillPC
     ${PC_PORT_SOURCES}
     ${MAIN_SOURCES}
     ${BODYPROG_SOURCES}
@@ -287,16 +302,26 @@ add_executable(${EXECUTABLE_NAME}
 # only exports __declspec(dllexport)-marked symbols by default.
 # (Not applicable for Switch/NX)
 if(NOT SH_SWITCH)
-    set_target_properties(${EXECUTABLE_NAME} PROPERTIES ENABLE_EXPORTS ON)
-    if(MINGW)
-        target_link_options(${EXECUTABLE_NAME} PRIVATE "-Wl,--export-all-symbols")
-        # Build as a GUI (windows) subsystem app so Windows doesn't spawn a console
-        # window at launch. We keep the standard C entry (SDL_MAIN_HANDLED is set, so
-        # main() is the real entry); force -emainCRTStartup because the windows
-        # subsystem default entry is WinMainCRTStartup, which we don't provide.
-        # External-console mode calls AllocConsole() at runtime (see main_pc.c).
-        target_link_options(${EXECUTABLE_NAME} PRIVATE "-Wl,--subsystem,windows" "-Wl,-emainCRTStartup")
+#
+# Not with SH_STATIC_MAPS: every overlay is linked in, so nothing resolves
+# against the exe at runtime and the export table has nothing to serve.
+# (Dropping it does not measurably shrink the binary — that is dominated by
+# .bss, see the note on the static path below — but there is no reason to emit
+# an export entry for all 43 overlays' globals.)
+if(NOT SH_STATIC_MAPS)
+set_target_properties(SilentHillPC PROPERTIES ENABLE_EXPORTS ON)
+endif()
+if(MINGW)
+    if(NOT SH_STATIC_MAPS)
+        target_link_options(SilentHillPC PRIVATE "-Wl,--export-all-symbols")
     endif()
+    # Build as a GUI (windows) subsystem app so Windows doesn't spawn a console
+    # window at launch. We keep the standard C entry (SDL_MAIN_HANDLED is set, so
+    # main() is the real entry); force -emainCRTStartup because the windows
+    # subsystem default entry is WinMainCRTStartup, which we don't provide.
+    # External-console mode calls AllocConsole() at runtime (see main_pc.c).
+    target_link_options(SilentHillPC PRIVATE "-Wl,--subsystem,windows" "-Wl,-emainCRTStartup")
+endif()
 endif()
 
 # Shipped runtime assets: pc_port/assets/ mirrors the game folder layout
@@ -308,6 +333,33 @@ add_custom_command(TARGET SilentHillPC POST_BUILD
             "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:SilentHillPC>"
     COMMENT "Copying shipped runtime assets (pc_port/assets/)"
 )
+
+# ANGLE runtime, for the renderer=d3d11 / vulkan / d3d9 / software backends.
+# Optional by design: the game only loads these when the config asks for a
+# translated backend, and falls back to native OpenGL with a logged warning when
+# they are absent, so a build without them is complete and shippable.
+#
+# They are not vendored because ANGLE is ~15 MB of binary with its own release
+# cadence and license. Drop libEGL.dll + libGLESv2.dll (and d3dcompiler_47.dll
+# if your Windows lacks it) into pc_port/angle/ and they are deployed beside the
+# exe. Prebuilt weekly x64/arm64 Windows builds:
+#   https://github.com/mmozeiko/build-angle/releases/latest
+# An Electron release zip is an equally good source of the same two DLLs.
+# copy_directory rather than a file(GLOB) of *.dll: the glob is evaluated once at
+# configure time, so a DLL added to angle/ afterwards is silently never deployed,
+# and ANGLE's Vulkan backend needs companions that are not DLLs at all
+# (vk_swiftshader_icd.json). Copying the directory keeps the deployed set equal
+# to the source set without a reconfigure.
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/angle")
+    add_custom_command(TARGET SilentHillPC POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/angle" "$<TARGET_FILE_DIR:SilentHillPC>"
+        COMMENT "Copying ANGLE runtime (D3D11/Vulkan backends)"
+    )
+    message(STATUS "ANGLE runtime found - D3D11/Vulkan render backends will be available")
+else()
+    message(STATUS "No pc_port/angle/ - only the native OpenGL backend will be selectable at runtime")
+endif()
 
 # Game-specific defines (only on our target, NOT PsyCross)
 target_compile_definitions(${EXECUTABLE_NAME} PRIVATE
@@ -335,6 +387,8 @@ set_property(SOURCE "${CMAKE_SOURCE_DIR}/src/xa_player.c" APPEND PROPERTY
         "Xa_IsVoiceAudioDraining=PcLegacyXa_IsVoiceAudioDraining"
         "Xa_VoiceGapHold=PcLegacyXa_VoiceGapHold"
         "XaPlayer_SetMasterVolume=PcLegacyXa_SetMasterVolume"
+        "XaPlayer_PlayFile=PcLegacyXa_PlayFile"
+        "XaPlayer_StopFile=PcLegacyXa_StopFile"
 )
 if(SH_DEBUG)
     target_compile_definitions(${EXECUTABLE_NAME} PRIVATE SH_DEBUG=1)
@@ -395,6 +449,12 @@ target_link_libraries(${EXECUTABLE_NAME} PRIVATE
     psycross_static
 )
 
+# Lua scripting (randomizer): link the vendored interpreter + flag its presence.
+if(SH_HAVE_LUA)
+    target_link_libraries(SilentHillPC PRIVATE lua_static)
+    target_compile_definitions(SilentHillPC PRIVATE SH_LUA=1)
+endif()
+
 # RetroAchievements: the runtime plus the platform HTTP backend it posts through
 # (WinHTTP ships with Windows; libcurl is the Linux/macOS standard).
 # Switch: no HTTP backend (pc_ra_http.c excluded above), so the client compiles
@@ -429,6 +489,11 @@ if(UNIX AND NOT APPLE)
         "$<TARGET_FILE:psycross_static>"
         "LINKER:--no-whole-archive"
     )
+elseif(APPLE AND SH_BUILD_MAP_DLLS)
+    # Same for macOS: the map dylibs resolve PsyCross from the exe through
+    # -undefined dynamic_lookup (maps/CMakeLists.txt), so all of it must be here.
+    target_link_options(SilentHillPC PRIVATE
+        "LINKER:-force_load,$<TARGET_FILE:psycross_static>")
 endif()
 
 if(SDL2_FOUND)
@@ -681,7 +746,7 @@ if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/run_capture.bat")
 endif()
 
 # =============================================================================
-# Map Overlay DLLs (optional — builds all maps as loadable modules)
+# Map overlays
 # =============================================================================
 # Map overlays: PC builds them as DLLs (dlopen at runtime); Switch has no
 # dynamic loader, so compile every map into the ELF. Each map is partially
@@ -815,10 +880,122 @@ if(SH_SWITCH)
     add_dependencies(${EXECUTABLE_NAME} switch_maps)
     target_sources(${EXECUTABLE_NAME} PRIVATE ${SH_MAP_RELOC_OBJS})
 else()
-    option(SH_BUILD_MAP_DLLS "Build map overlays as DLLs for dynamic loading" OFF)
-    if(SH_BUILD_MAP_DLLS)
-        add_subdirectory(maps)
+# The 42 non-starting maps ship one of two ways. map0_s00 is always compiled
+# straight into the exe (MAP_SOURCES above) and is unaffected by either.
+#
+#   SH_BUILD_MAP_DLLS  each overlay is a dlopen'd module. Desktop default:
+#                      one map rebuilds without relinking the exe, and it is
+#                      what map mods are distributed as.
+#   SH_STATIC_MAPS     each overlay is an archive whose defined symbols are
+#                      prefixed <map>_ and force-loaded into the exe. For
+#                      platforms that refuse loose dynamic libraries — iOS will
+#                      not load a dylib that is not part of the signed bundle.
+#
+# The static path costs memory, and that is its real trade-off rather than code
+# size: each overlay reserves its own .bss (chara/particle/anim working
+# buffers), so all 43 coexist permanently instead of one at a time. Measured on
+# the Windows verification build that is ~198 MB of .bss against ~4 MB of .text.
+# It is demand-zero, so pages cost nothing until a map is actually visited, but
+# nothing releases them afterwards either. Worth watching against the iOS
+# jetsam limit.
+#
+# They are mutually exclusive: the prefixing that lets 43 overlays coexist in
+# one binary also renames the very symbol dlsym would look up.
+option(SH_BUILD_MAP_DLLS "Build map overlays as DLLs for dynamic loading" OFF)
+option(SH_STATIC_MAPS "Link map overlays into the executable with per-map symbol prefixing" OFF)
+
+if(IOS AND NOT SH_BUILD_MAP_DLLS)
+    set(SH_STATIC_MAPS ON CACHE BOOL "" FORCE)
+endif()
+if(SH_BUILD_MAP_DLLS AND SH_STATIC_MAPS)
+    message(FATAL_ERROR "SH_BUILD_MAP_DLLS and SH_STATIC_MAPS are mutually exclusive.")
+endif()
+
+if(SH_STATIC_MAPS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # llvm-objcopy is the only objcopy that rewrites Mach-O symbol tables; GNU
+    # objcopy cannot. Verified against arm64 Mach-O and x86_64 COFF archives.
+    find_program(SH_LLVM_NM      NAMES llvm-nm      llvm-nm-18 llvm-nm-17)
+    find_program(SH_LLVM_OBJCOPY NAMES llvm-objcopy llvm-objcopy-18 llvm-objcopy-17)
+    if(NOT SH_LLVM_NM OR NOT SH_LLVM_OBJCOPY)
+        message(FATAL_ERROR
+            "SH_STATIC_MAPS needs llvm-nm and llvm-objcopy on PATH "
+            "(LLVM/Xcode command line tools). Found nm=${SH_LLVM_NM} objcopy=${SH_LLVM_OBJCOPY}")
     endif()
+    # Mach-O decorates C symbols with a leading underscore; ELF and x86_64 COFF
+    # do not. The prefix has to be inserted after it, not before.
+    if(APPLE)
+        set(SH_SYM_PREFIX "_")
+    else()
+        set(SH_SYM_PREFIX "")
+    endif()
+
+    add_subdirectory(maps)
+
+    get_property(SH_STATIC_MAP_TARGETS GLOBAL PROPERTY SH_STATIC_MAP_TARGETS)
+    if(NOT SH_STATIC_MAP_TARGETS)
+        message(FATAL_ERROR "SH_STATIC_MAPS is on but no overlay targets were created.")
+    endif()
+    list(LENGTH SH_STATIC_MAP_TARGETS SH_STATIC_MAP_COUNT)
+    message(STATUS "Static map overlays: ${SH_STATIC_MAP_COUNT}")
+
+    # Generated registry: MapOverlay_Load resolves a name through this instead
+    # of dlopen/dlsym. Each header is reached by its prefixed name.
+    set(SH_MAP_REG "${CMAKE_BINARY_DIR}/map_static_registry.c")
+    set(_reg "/* GENERATED by pc_port/CMakeLists.txt (SH_STATIC_MAPS) - do not edit. */\n")
+    string(APPEND _reg "#include \"map_overlay_loader.h\"\n")
+    string(APPEND _reg "#include \"map_static_registry.h\"\n#include <string.h>\n\n")
+    foreach(m ${SH_STATIC_MAP_TARGETS})
+        string(APPEND _reg "extern s_MapOverlayHdr ${m}_g_MapOverlayHeader_${m};\n")
+    endforeach()
+    string(APPEND _reg "\nstatic const s_StaticMapEntry k_staticMaps[] = {\n")
+    foreach(m ${SH_STATIC_MAP_TARGETS})
+        string(APPEND _reg "    { \"${m}\", &${m}_g_MapOverlayHeader_${m} },\n")
+    endforeach()
+    string(APPEND _reg "};\n\n")
+    string(APPEND _reg "s_MapOverlayHdr* MapStatic_Find(const char* name)\n{\n")
+    string(APPEND _reg "    unsigned i;\n")
+    string(APPEND _reg "    for (i = 0; i < sizeof(k_staticMaps) / sizeof(k_staticMaps[0]); i++)\n")
+    string(APPEND _reg "    {\n        if (strcmp(k_staticMaps[i].name, name) == 0)\n")
+    string(APPEND _reg "        {\n            return k_staticMaps[i].header;\n        }\n    }\n")
+    string(APPEND _reg "    return (s_MapOverlayHdr*)0;\n}\n")
+    file(GENERATE OUTPUT "${SH_MAP_REG}" CONTENT "${_reg}")
+    # The ALL_C_SOURCES glob that maps static_assert -> _Static_assert only
+    # covers the source tree, and this file is generated into the build dir.
+    # Without it, libgpu.h's static_asserts do not parse.
+    set_source_files_properties("${SH_MAP_REG}" PROPERTIES
+        GENERATED TRUE
+        COMPILE_DEFINITIONS "static_assert=_Static_assert")
+    target_sources(SilentHillPC PRIVATE "${SH_MAP_REG}")
+    target_compile_definitions(SilentHillPC PRIVATE SH_STATIC_MAPS)
+
+    # Force-load: an overlay's event tables and its constructor-patched
+    # anim_info objects are referenced only through the header's pointers, so
+    # ordinary lazy archive semantics would leave them out of the link.
+    set(SH_MAP_ARCHIVES "")
+    foreach(m ${SH_STATIC_MAP_TARGETS})
+        add_dependencies(SilentHillPC ${m})
+        list(APPEND SH_MAP_ARCHIVES "$<TARGET_FILE:${m}>")
+        if(APPLE)
+            target_link_options(SilentHillPC PRIVATE "LINKER:-force_load,$<TARGET_FILE:${m}>")
+        elseif(MSVC)
+            target_link_options(SilentHillPC PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${m}>")
+        endif()
+    endforeach()
+    if(NOT APPLE AND NOT MSVC)
+        # One group around every archive, not a pair per archive: CMake
+        # de-duplicates identical link options, which would collapse 43
+        # --whole-archive/--no-whole-archive pairs into a single pair wrapping
+        # only the first archive and leave the other 42 outside it. They then
+        # sit ahead of the objects that reference them in the link line, where
+        # ordinary archive semantics resolve nothing and every overlay header
+        # comes back undefined.
+        target_link_options(SilentHillPC PRIVATE
+            "LINKER:--whole-archive" ${SH_MAP_ARCHIVES} "LINKER:--no-whole-archive")
+    endif()
+elseif(SH_BUILD_MAP_DLLS)
+    add_subdirectory(maps)
+endif()
 endif()
 
 # =============================================================================
@@ -831,6 +1008,14 @@ install(TARGETS ${EXECUTABLE_NAME} RUNTIME DESTINATION bin)
 # =============================================================================
 if(BUILD_TESTING)
     enable_testing()
+
+    # PSY-Q math used by the flashlight flare's relative-angle calculation.
+    add_executable(pc_gte_math_test
+        tests/pc_gte_math_test.c
+        src/pc_gte_math.c)
+    target_include_directories(pc_gte_math_test PRIVATE
+        "${PSYCROSS_DIR}/include/psx" "${PSYCROSS_DIR}/include")
+    add_test(NAME pc_gte_math_test COMMAND pc_gte_math_test)
 
     # Oversized loose ITEM TMD capacity lift (pc_big_tmd.c). Links the real
     # module against the real file table so path building, slot arithmetic and
@@ -850,4 +1035,32 @@ if(BUILD_TESTING)
         "${DECOMP_DIR}/include" "${DECOMP_DIR}/include/decomp"
         "${PSYCROSS_DIR}/include/psx" "${PSYCROSS_DIR}/include")
     add_test(NAME pc_big_tmd_test COMMAND pc_big_tmd_test)
+
+    # Renderer-free native menu core (scroll, text fitting, row page).
+    add_executable(pc_native_menu_test
+        tests/pc_native_menu_test.c
+        src/pc_native_menu.c)
+    target_include_directories(pc_native_menu_test PRIVATE include)
+    add_test(NAME pc_native_menu_test COMMAND pc_native_menu_test)
+
+    # Achievements screen model (list order, refresh, badge slot cache).
+    add_executable(pc_ach_model_test
+        tests/pc_ach_model_test.c
+        src/pc_ach_model.c)
+    target_include_directories(pc_ach_model_test PRIVATE include)
+    add_test(NAME pc_ach_model_test COMMAND pc_ach_model_test)
+
+    # Bind table logic (rows, usable cells, duplicates, set, toast text).
+    add_executable(pc_bind_core_test
+        tests/pc_bind_core_test.c
+        src/pc_bind_core.c)
+    target_include_directories(pc_bind_core_test PRIVATE include)
+    add_test(NAME pc_bind_core_test COMMAND pc_bind_core_test)
+
+    # Input glyphs (bind mapping, set labels, Auto detection, atlas cells).
+    add_executable(pc_input_glyphs_test
+        tests/pc_input_glyphs_test.c
+        src/pc_input_glyphs.c)
+    target_include_directories(pc_input_glyphs_test PRIVATE include)
+    add_test(NAME pc_input_glyphs_test COMMAND pc_input_glyphs_test)
 endif()

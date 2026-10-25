@@ -73,15 +73,16 @@ void Pc_QuickSaveLoadUpdate(void)
     static int          prevLoad = 0;
 
     extern int g_PcConsoleInputActive;
+    extern int Pc_ConsoleIsOpen(void);
 
     const Uint8* keys;
     int          curSave;
     int          curLoad;
 
-    if (!resolved) {
+    if (resolved != g_PcBindsGen + 1) {
         scSave   = SDL_GetScancodeFromName(g_PcConfig.keyQuickSave);
         scLoad   = SDL_GetScancodeFromName(g_PcConfig.keyQuickLoad);
-        resolved = 1;
+        resolved = g_PcBindsGen + 1;
     }
 
     /* A randomizer run cannot be saved or reloaded. */
@@ -95,11 +96,22 @@ void Pc_QuickSaveLoadUpdate(void)
     curSave = (scSave != SDL_SCANCODE_UNKNOWN) ? keys[scSave] : 0;
     curLoad = (scLoad != SDL_SCANCODE_UNKNOWN) ? keys[scLoad] : 0;
 
+    /* PsyCross owns Ctrl+<key> for its renderer diagnostics, and these binds
+     * read the same raw key state, so a Ctrl shortcut on a key that is also
+     * bound here would fire both. The edge state below still tracks the
+     * physical key, so releasing Ctrl mid-hold cannot fake a new press. */
+    if (SDL_GetModState() & KMOD_CTRL)
+    {
+        prevSave = curSave;
+        prevLoad = curLoad;
+        return;
+    }
+
     /* Gameplay only: not menus, not cutscenes/map events, not while the
      * console input line is open. */
     if (g_GameWork.gameState == GameState_InGame &&
         g_SysWork.sysState == SysState_Gameplay &&
-        !g_PcConsoleInputActive)
+        !Pc_ConsoleIsOpen())
     {
         if (curSave && !prevSave && Pc_QuickSave_BossActive()) {
             SH_DBG_ECHO("Can't quick save during a boss fight");

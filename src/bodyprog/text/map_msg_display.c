@@ -11,6 +11,9 @@
 #include "bodyprog/screen/screen_draw.h"
 #include "bodyprog/sound/sound_system.h"
 #include "bodyprog/text/text_draw.h"
+#ifdef SH_PC_PORT
+#include "pc_msg_voice.h"
+#endif
 #include "main/fsqueue.h"
 
 #ifdef SH_PC_PORT
@@ -40,6 +43,16 @@ s8             g_MapMsg_SelectCancelIdx;
     #define Gfx_StringSetColor Gfx_StringSetColor_JP
 #endif
 
+#ifdef SH_PC_PORT
+/* PSX 0x800BCD6C. File-scope and exported for the RetroAchievements address
+ * map, which resolves each name in configs/USA/sym.*.txt at runtime: a
+ * function-local static is the same object but carries no name to look up, so
+ * this was one of the set's unmapped reads ("needs a translation entry") and
+ * any condition touching it read nothing. A function-local static already had
+ * static lifetime -- only linkage changes, and only for the PC build. */
+s32 msgIdx;
+#endif
+
 s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
 {
 #ifdef SH_PC_PORT
@@ -63,11 +76,16 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
     s32        temp_s1;
     bool       hasInput;
     s32        temp;
+#ifdef SH_PC_PORT
+    Pc_MsgVoice_Touch();
+#endif
     s32        var_a1;
     static s32 stateMachineIdx0;
     static s32 stateMachineIdx1;
     static s32 msgDisplayLength;
+#ifndef SH_PC_PORT
     static s32 msgIdx;
+#endif
     static s32 msgDisplayInc;
     static s32 D_800BCD74;
 
@@ -144,6 +162,7 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
             g_MapMsg_CurrentIdx              = mapMsgIdx;
 #ifdef SH_PC_PORT
             Pc_MapMsgPageReset();
+            Pc_MsgVoice_OnPage(mapMsgIdx);
 #endif
             stateMachineIdx0                 = 0;
             stateMachineIdx1                 = 0;
@@ -319,13 +338,7 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
              * fell seconds behind the wall-clock animation). Real-drain gating
              * restores the authored pacing while still preventing PC's instant
              * next-line SD_Call from cutting a live voice. */
-            /* Also hold through the post-voice inter-line gap
-             * (cutscene_line_gap_ms) so tightly-timed lines get the PSX CD-seek
-             * pause instead of the next voice firing back-to-back. It's a
-             * MINIMUM: mapMsgTimer==0 is still required, so a line whose authored
-             * ~J timer already exceeds the gap is unaffected (Flauros-safe). */
             extern int Xa_IsVoiceAudioDraining(void);
-            extern int Xa_VoiceGapHold(void);
             /* J2 single-audio-file cutscenes (VHS tape: map3_s03 msgs 27-39,
              * map7_s02 msgs 32-44): ONE ~35s XA clip spans ALL pages, which are
              * authored to advance on their ~J timers WHILE it plays (PSX has no
@@ -372,10 +385,18 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
                     }
                 }
             }
+            /* A loose msg_<KEY>.wav added to an UNVOICED box holds too. The
+             * clause above cannot cover it: the game never set
+             * BgmStatusFlag_VoiceDialog for a line it does not voice, so these
+             * pages advanced the instant their authored ~J0 timer ran out and
+             * cut the recording off. Pc_MsgVoice_Holding() is true only for the
+             * page that started the clip, so a take spanning several pages
+             * still lets the later ones keep their authored pacing. */
             const int pcVoiceHold =
                 !pcSingleFileAudio &&
-                (g_SysWork.bgmStatusFlags & BgmStatusFlag_VoiceDialog) &&
-                (Xa_IsVoiceAudioDraining() || Xa_VoiceGapHold());
+                (((g_SysWork.bgmStatusFlags & BgmStatusFlag_VoiceDialog) &&
+                  Xa_IsVoiceAudioDraining()) ||
+                 Pc_MsgVoice_Holding());
 #endif
             temp_s1 = stateMachineIdx0;
             if (temp_s1 == NO_VALUE)
@@ -472,6 +493,7 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
                     else
                     {
                         g_MapMsg_CurrentIdx++;
+                        Pc_MsgVoice_OnPage(g_MapMsg_CurrentIdx);
                     }
 #else
                     g_MapMsg_CurrentIdx++;
@@ -543,6 +565,9 @@ s32 Gfx_MapMsg_Draw(s32 mapMsgIdx) // 0x800365B8
         return MapMsgState_Idle;
     }
 
+#ifdef SH_PC_PORT
+    Pc_MsgVoice_OnEnd();
+#endif
     g_SysWork.isMgsStringSet            = false;
     g_SysWork.enableHighResGlyphs = false;
     msgDisplayLength               = 0;

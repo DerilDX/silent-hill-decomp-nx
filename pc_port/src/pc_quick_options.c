@@ -1,0 +1,2336 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/*
+ * pc_quick_options.c - in-game quick options overlay (key_quick_options, default F10).
+ *
+ * A sibling of pc_rando_settings.c and it repeats that file's hard-won GL
+ * constraints deliberately rather than sharing code:
+ *   - its OWN GL program / VAO / textures, with full state save+restore, so it
+ *     never clobbers PsyCross's or the console's programs.
+ *   - LEGACY GLSL (attribute / varying / gl_FragColor, no #version).
+ *   - all GL work deferred to Draw (post-capture); the game thread only reads
+ *     input and toggles state.
+ *   - wall-clock timing (the draw hook runs after the frame is captured).
+ *
+ * Unlike the randomizer panel there is NO full-screen dim and the panel is
+ * translucent: the point of this menu is to see a change land in the live
+ * scene behind it. Text is stb_truetype, baked to small textures; the toast
+ * owns the only stb_truetype implementation in the build.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <SDL.h>
+#include <PsyX/common/glad.h>
+#include <PsyX/PsyX_backend.h>
+
+#include "stb_truetype.h"
+
+#include "pc_quick_options.h"
+#include "pc_mouse_click_icons.h"
+#include "pc_dpad_icons.h"
+#include "pc_bind_panel.h"
+#include "pc_mouse_cursor.h"
+#include "pc_config.h"
+#include "lang_text.h"
+#include "pc_cheats.h"
+#include "control_style.h"
+#include "lang_quick.h"
+#include "sh_log.h"
+#include "game.h"
+#include "bodyprog/sound/sfx_id_enum.h"
+#include "bodyprog/sound/sound_system.h"
+
+/* Move beep on a page change, cancel beep on close. A beep on every hover
+ * was tried and found excessive; value, toggle and action rows beep in
+ * their own handlers. */
+static void qo_beep(int sfxId)
+{
+    Sd_PlaySfx((u16)sfxId, 0, 64);
+}
+
+/* options.c: the live-applying rows of the PC Options screen, by config key. */
+extern const void* PcOpt_QuickFind(const char* key);
+extern const char* PcOpt_QuickName(const void* h);
+extern const char* PcOpt_QuickLabel(const void* h, char* buf, int bufsz);
+extern void        PcOpt_QuickAdjust(const void* h, int dir);
+extern int         PcOpt_QuickRealtime(const void* h);
+/* options.c: rows that are not in that table. Keep in step with the identical
+ * enum there -- these are indices into its switch, nothing more. */
+enum { QO_X_SHADOW = 0, QO_X_SPEAKERS, QO_X_BGM, QO_X_SFX,
+       QO_X_ASPECT, QO_X_CRTTRIM, QO_X_HFOV, QO_X_VFOV, QO_X_PAR, QO_X_VSHIFT,
+       QO_X_CUTSHIFT,
+       QO_X_TPSFOV, QO_X_FPSFOV,
+       QO_X_FPSHEADX, QO_X_FPSHEADY, QO_X_FPSHEADZ, QO_X_FPSSWING,
+       QO_X_OTSFOV, QO_X_TPSAIMZOOM, QO_X_OTSAIMZOOM, QO_X_TPSOTSAIM,
+       QO_X_TPSRESTZOOM, QO_X_OTSRESTZOOM,
+       QO_X_TPSRESTX, QO_X_TPSRESTY, QO_X_TPSAIMX, QO_X_TPSAIMY,
+       QO_X_OTSRESTX, QO_X_OTSRESTY, QO_X_OTSAIMX, QO_X_OTSAIMY,
+       QO_X_DREAMSTR, QO_X_DREAMBLUR, QO_X_DPADMOVE, QO_X_CROSSHAIRSTYLE,
+       QO_X_LINEGAP, QO_X_CHARALIGHT, QO_X_PPLIGHT, QO_X_HEROLIGHT };
+extern const char* PcOpt_QuickExtraLabel(int which, char* buf, int bufsz);
+extern void        PcOpt_QuickExtraAdjust(int which, int dir);
+extern void        PcOpt_QuickViewReset(int mode);
+
+#define QO_X_QUICK_WEAPONS 1000
+#define QO_GARBAGE  48
+#define QO_MAX_ROWS 16
+#define QO_PAGES    10
+/* Every page lays out on the same row pitch -- the pitch QO_ROW_SLOTS rows
+ * would get in the full-height panel -- and the panel shrinks to its rows.
+ * Deriving the pitch from each page's own row count made the text a different
+ * size on every page and smallest on the longest ones. It has to be at least
+ * the longest page (View in Thirdperson: 11 rows). */
+#define QO_ROW_SLOTS 11
+#define QO_DD_MAX     64  /* dropdown entries cached */
+#define QO_DD_VISIBLE 8
+
+/* ------------------------------------------------------------------ */
+/* Rows                                                                */
+/* ------------------------------------------------------------------ */
+
+/* ROW_ACTION fires from Confirm/click ONLY -- unlike every other row kind,
+ * Left/Right must not trigger it, or scrolling past "Reset View Settings"
+ * with the arrows would undo the player's tuning. */
+enum { ROW_OPT = 0, ROW_EXTRA, ROW_PAGE, ROW_CLOSE, ROW_CHEAT, ROW_ACTION };
+enum { QO_A_VIEWRESET = 0, QO_A_KEYBINDS };
+
+typedef struct
+{
+    int         kind;   /* ROW_* */
+    const char* key;    /* ROW_OPT: config key looked up in options.c */
+    int         extra;  /* ROW_EXTRA: QO_X_*; ROW_CHEAT: row index */
+    const char* label;  /* ROW_EXTRA / ROW_PAGE / ROW_CLOSE display name */
+    int         cpage;  /* ROW_CHEAT: PC_CHEATS_PAGE_* */
+} QoRowDef;
+
+#define QO_IS_VALUE_ROW(k) ((k) == ROW_OPT || (k) == ROW_EXTRA || (k) == ROW_CHEAT)
+
+/* ROW_PAGE's label is only a placeholder: the row draws "Previous / Next" with
+ * the neighbouring pages' names, which depend on where the page sits. */
+#define QO_NAV_ROW   { ROW_PAGE,  NULL, 0, "Previous / Next" }
+#define QO_CLOSE_ROW { ROW_CLOSE, NULL, 0, "Close" }
+
+static const QoRowDef s_pageGfx1[] = {
+    { ROW_OPT,   "texture_filter",       0, NULL },  /* Texture_Filter */
+    { ROW_OPT,   "msaa",                 0, NULL },  /* Antialiasing (restart) */
+    { ROW_OPT,   "post_process",         0, NULL },
+    { ROW_OPT,   "tonemap",              0, NULL },
+    { ROW_OPT,   "fog_strength",         0, NULL },
+    { ROW_OPT,   "bullet_decals",        0, NULL },
+    { ROW_OPT,   "weather_sim_hz",       0, NULL },  /* Weather_Rate: 30 or 60 Hz */
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_pageGfx2[] = {
+    { ROW_OPT,   "flashlight_mode",      0, NULL },
+    { ROW_OPT,   "flashlight_intensity", 0, NULL },
+    { ROW_OPT,   "flashlight_size",      0, NULL },
+    { ROW_EXTRA, NULL, QO_X_SHADOW,         "Shadow Resolution" },
+    { ROW_EXTRA, NULL, QO_X_DREAMBLUR,      "Dream Blur" },  /* not in the PC Options table: that page is full */
+    { ROW_EXTRA, NULL, QO_X_DREAMSTR,       "Dream Blur Strength" },
+    { ROW_EXTRA, NULL, QO_X_CHARALIGHT,     "Character Lighting" },
+    { ROW_EXTRA, NULL, QO_X_PPLIGHT,        "Per-Pixel Lighting" },
+    { ROW_EXTRA, NULL, QO_X_HEROLIGHT,      "Hero Light" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_pageHud[] = {
+    { ROW_OPT,   "minimap",              0, NULL },
+    { ROW_OPT,   "minimap_scale",        0, NULL },
+    { ROW_OPT,   "minimap_corner",       0, NULL },
+    { ROW_OPT,   "minimap_opacity",      0, NULL },
+    { ROW_OPT,   "minimap_require_map",  0, NULL },
+    { ROW_OPT,   "crosshair",            0, NULL },
+    { ROW_OPT,   "crosshair_size",       0, NULL },
+    /* Quick menu only: crosshair_style has no row in the PC Options table and
+     * does not get one, that page keeps its slack for the next HUD setting. */
+    { ROW_EXTRA, NULL, QO_X_CROSSHAIRSTYLE,  "Crosshair Style" },
+    { ROW_OPT,   "text_size",            0, NULL },
+    { ROW_OPT,   "low_health_glow",      0, NULL },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_pageAudio[] = {
+    { ROW_EXTRA, NULL, QO_X_SPEAKERS,       "Speaker Layout" },
+    { ROW_EXTRA, NULL, QO_X_BGM,            "Music Volume" },
+    { ROW_EXTRA, NULL, QO_X_SFX,            "Effects Volume" },
+    { ROW_OPT,   "fmv_volume",           0, NULL },
+    { ROW_EXTRA, NULL, QO_X_LINEGAP,        "Dialog Pause" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+/* Controls: the control settings that apply live, then the keybind panel (the
+ * same one as Options > Controller Config). The action sits centred at the
+ * bottom, where Reset View Settings sits on the View page. */
+static const QoRowDef s_pageControls[] = {
+    { ROW_OPT,   "control_2d",             0, NULL },
+    { ROW_OPT,   "mouse_sensitivity",      0, NULL },
+    { ROW_OPT,   "controller_sensitivity", 0, NULL },
+    { ROW_OPT,   "invert_mouse_y",         0, NULL },
+    { ROW_OPT,   "invert_controller_y",    0, NULL },
+    { ROW_OPT,   "aim_assist",             0, NULL },
+    { ROW_EXTRA, NULL, QO_X_QUICK_WEAPONS, "Quick Weapon Switching" },
+    { ROW_EXTRA, NULL, QO_X_DPADMOVE,        "Disable D-pad for Movement" },
+    { ROW_ACTION, NULL, QO_A_KEYBINDS,       "Edit Keybinds" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+/* View & Aspect, in two shapes.
+ *
+ * Control Type picks how much rope the player gets, and the page then shows
+ * ONLY the knobs that mode actually reads. Simple owns the shape with one
+ * value (Aspect Trim) because its pixel-aspect solve divides hfov straight
+ * back out and never reads par -- both rows would sit there doing nothing.
+ * Advanced multiplies its own shape out of hfov x vfov / par instead, which is
+ * what the released builds did, so there the trim is the inert one.
+ *
+ * FOV is the same knob in both (the world's vertical ortho); it is named for
+ * what it does rather than for the axis it is implemented on, since in Simple
+ * it zooms both axes together with the shape held fixed. */
+static const QoRowDef s_page2Simple[] = {
+    { ROW_EXTRA,  NULL, QO_X_ASPECT,       "Control Type" },
+    { ROW_EXTRA,  NULL, QO_X_CRTTRIM,      "Aspect Trim" },
+    { ROW_EXTRA,  NULL, QO_X_VFOV,         "FOV" },
+    { ROW_EXTRA,  NULL, QO_X_VSHIFT,       "Vertical Shift" },
+    { ROW_EXTRA,  NULL, QO_X_CUTSHIFT,     "Cutscene Shift" },
+    { ROW_ACTION, NULL, QO_A_VIEWRESET,    "Reset View Settings" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_page2Advanced[] = {
+    { ROW_EXTRA,  NULL, QO_X_ASPECT,       "Control Type" },
+    { ROW_EXTRA,  NULL, QO_X_CRTTRIM,      "Aspect Trim" },
+    { ROW_EXTRA,  NULL, QO_X_HFOV,         "Horizontal FOV" },
+    { ROW_EXTRA,  NULL, QO_X_VFOV,         "Vertical FOV" },
+    { ROW_EXTRA,  NULL, QO_X_VSHIFT,       "Vertical Shift" },
+    { ROW_EXTRA,  NULL, QO_X_CUTSHIFT,     "Cutscene Shift" },
+    { ROW_EXTRA,  NULL, QO_X_PAR,          "Pixel Aspect" },
+    { ROW_ACTION, NULL, QO_A_VIEWRESET,    "Reset View Settings" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+/* Thirdperson, OTS and Firstperson shapes. The classic aspect/pixel knobs are
+ * meaningless for the dynamic cameras -- they follow Harry in 3D -- so each shows
+ * only what that camera reads: FOV, aim zoom, the rest/aim camera position (X =
+ * left/right, Y = up/down), and for FPS the eye position + melee-swing pullback.
+ * The View page auto-follows the active camera, so the block matches the camera
+ * you are using, and each Reset is scoped to that camera alone. */
+static const QoRowDef s_page2Tps[] = {
+    { ROW_EXTRA,  NULL, QO_X_TPSFOV,       "FOV" },
+    { ROW_EXTRA,  NULL, QO_X_TPSOTSAIM,    "OTS Aim (while in TPS)" },
+    { ROW_EXTRA,  NULL, QO_X_TPSAIMZOOM,   "Aim Zoom" },
+    { ROW_EXTRA,  NULL, QO_X_TPSRESTZOOM,  "Rest Zoom" },
+    { ROW_EXTRA,  NULL, QO_X_TPSRESTX,     "Rest X (left/right)" },
+    { ROW_EXTRA,  NULL, QO_X_TPSRESTY,     "Rest Y (up/down)" },
+    { ROW_EXTRA,  NULL, QO_X_TPSAIMX,      "Aim X (left/right)" },
+    { ROW_EXTRA,  NULL, QO_X_TPSAIMY,      "Aim Y (up/down)" },
+    { ROW_EXTRA,  NULL, QO_X_CUTSHIFT,     "Cutscene Shift" },
+    { ROW_ACTION, NULL, QO_A_VIEWRESET,    "Reset View Settings" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_page2Ots[] = {
+    { ROW_EXTRA,  NULL, QO_X_OTSFOV,       "FOV" },
+    { ROW_EXTRA,  NULL, QO_X_OTSAIMZOOM,   "Aim Zoom" },
+    { ROW_EXTRA,  NULL, QO_X_OTSRESTZOOM,  "Rest Zoom" },
+    { ROW_EXTRA,  NULL, QO_X_OTSRESTX,     "Rest X (left/right)" },
+    { ROW_EXTRA,  NULL, QO_X_OTSRESTY,     "Rest Y (up/down)" },
+    { ROW_EXTRA,  NULL, QO_X_OTSAIMX,      "Aim X (left/right)" },
+    { ROW_EXTRA,  NULL, QO_X_OTSAIMY,      "Aim Y (up/down)" },
+    { ROW_EXTRA,  NULL, QO_X_CUTSHIFT,     "Cutscene Shift" },
+    { ROW_ACTION, NULL, QO_A_VIEWRESET,    "Reset View Settings" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+static const QoRowDef s_page2Fps[] = {
+    { ROW_EXTRA,  NULL, QO_X_FPSFOV,       "FOV" },
+    { ROW_EXTRA,  NULL, QO_X_FPSHEADX,     "Head X (left/right)" },
+    { ROW_EXTRA,  NULL, QO_X_FPSHEADY,     "Head Y (up/down)" },
+    { ROW_EXTRA,  NULL, QO_X_FPSHEADZ,     "Head Z (fwd/back)" },
+    { ROW_EXTRA,  NULL, QO_X_FPSSWING,     "Melee Swing Pullback" },
+    { ROW_EXTRA,  NULL, QO_X_CUTSHIFT,     "Cutscene Shift" },
+    { ROW_ACTION, NULL, QO_A_VIEWRESET,    "Reset View Settings" },
+    QO_NAV_ROW,
+    QO_CLOSE_ROW,
+};
+
+/* Set when the row SET changes under the cached text (a Control Type switch, a
+ * reset that flips it back, or the active camera changing while the page is up).
+ * Every label is cached by row index, so the page has to re-bake or one shape's
+ * extra rows would draw another shape's words. */
+static int s_viewRowsDirty;
+
+void Pc_QuickOptions_InvalidateRows(void)
+{
+    s_viewRowsDirty = 1;
+}
+
+/* Which camera's settings the View page shows. Auto-follows the live camera.
+ * Values match the mode argument PcOpt_QuickViewReset expects. */
+enum { QO_CAM_CLASSIC = 0, QO_CAM_TPS, QO_CAM_OTS, QO_CAM_FPS };
+static int qo_view_cam_mode(void)
+{
+    extern int g_PcFpsCam;
+    if (g_PcFpsCam || g_ControlStyle == ControlStyle_Fps) return QO_CAM_FPS;
+    if (g_ControlStyle == ControlStyle_Ots) return QO_CAM_OTS;
+    if (g_ControlStyle == ControlStyle_Tps) return QO_CAM_TPS;
+    return QO_CAM_CLASSIC;
+}
+
+static const QoRowDef* qo_view_page(int* count)
+{
+    int mode = qo_view_cam_mode();
+
+    /* Re-bake the cached labels when the active camera changes the row set out
+     * from under them (the page is fetched every frame; the mode can flip while
+     * it is open if the player switches camera). */
+    {
+        static int s_lastViewMode = -1;
+        if (mode != s_lastViewMode)
+        {
+            s_lastViewMode = mode;
+            s_viewRowsDirty = 1;
+        }
+    }
+
+    if (mode == QO_CAM_FPS)
+    {
+        *count = (int)(sizeof(s_page2Fps) / sizeof(s_page2Fps[0]));
+        return s_page2Fps;
+    }
+    if (mode == QO_CAM_OTS)
+    {
+        *count = (int)(sizeof(s_page2Ots) / sizeof(s_page2Ots[0]));
+        return s_page2Ots;
+    }
+    if (mode == QO_CAM_TPS)
+    {
+        *count = (int)(sizeof(s_page2Tps) / sizeof(s_page2Tps[0]));
+        return s_page2Tps;
+    }
+    if (g_PcConfig.aspectRaw)
+    {
+        *count = (int)(sizeof(s_page2Advanced) / sizeof(s_page2Advanced[0]));
+        return s_page2Advanced;
+    }
+    *count = (int)(sizeof(s_page2Simple) / sizeof(s_page2Simple[0]));
+    return s_page2Simple;
+}
+
+/* The Cheats and Debug pages mirror pc_cheats.c's tables, each split in two:
+ * the settings, then the one-shot actions. Split by row kind rather than by
+ * index so a row added to either table lands on the right half by itself.
+ * ROW_CHEAT.extra stays the TABLE index, which is what Pc_Cheats_* takes. */
+static QoRowDef s_cheatRows[2][2][QO_MAX_ROWS];
+static int      s_cheatRowCount[2][2];
+
+static const QoRowDef* qo_cheat_page(int cpage, int actions, int* count)
+{
+    if (s_cheatRowCount[cpage][actions] == 0)
+    {
+        QoRowDef* out = s_cheatRows[cpage][actions];
+        int n = Pc_Cheats_Count(cpage), i, k = 0;
+        for (i = 0; i < n && k < QO_MAX_ROWS - 2; i++)
+        {
+            if ((Pc_Cheats_IsAction(cpage, i) != 0) != (actions != 0))
+                continue;
+            out[k].kind  = ROW_CHEAT;
+            out[k].key   = NULL;
+            out[k].extra = i;
+            out[k].label = NULL;
+            out[k].cpage = cpage;
+            k++;
+        }
+        out[k].kind = ROW_PAGE;  out[k].label = "Previous / Next"; k++;
+        out[k].kind = ROW_CLOSE; out[k].label = "Close";           k++;
+        s_cheatRowCount[cpage][actions] = k;
+    }
+    *count = s_cheatRowCount[cpage][actions];
+    return s_cheatRows[cpage][actions];
+}
+
+enum { QO_PG_GFX1 = 0, QO_PG_GFX2, QO_PG_HUD, QO_PG_AUDIO, QO_PG_VIEW,
+       QO_PG_CHEATS1, QO_PG_CHEATS2, QO_PG_DEBUG1, QO_PG_DEBUG2, QO_PG_CONTROLS };
+
+#define QO_TABLE(t) (*count = (int)(sizeof(t) / sizeof((t)[0])), (t))
+
+static const QoRowDef* qo_page_rows(int page, int* count)
+{
+    switch (page)
+    {
+        case QO_PG_GFX2:     return QO_TABLE(s_pageGfx2);
+        case QO_PG_HUD:      return QO_TABLE(s_pageHud);
+        case QO_PG_AUDIO:    return QO_TABLE(s_pageAudio);
+        case QO_PG_VIEW:     return qo_view_page(count);
+        case QO_PG_CHEATS1:  return qo_cheat_page(PC_CHEATS_PAGE_CHEATS, 0, count);
+        case QO_PG_CHEATS2:  return qo_cheat_page(PC_CHEATS_PAGE_CHEATS, 1, count);
+        case QO_PG_DEBUG1:   return qo_cheat_page(PC_CHEATS_PAGE_DEBUG,  0, count);
+        case QO_PG_DEBUG2:   return qo_cheat_page(PC_CHEATS_PAGE_DEBUG,  1, count);
+        case QO_PG_CONTROLS: return QO_TABLE(s_pageControls);
+        default:             return QO_TABLE(s_pageGfx1);
+    }
+}
+
+/* The title, and the Previous / Next row's destinations. No slashes in these:
+ * the row already separates its two destinations with one. */
+static const char* const s_pageNames[QO_PAGES] = {
+    "Graphics", "Lighting & Effects", "HUD", "Audio", "View",
+    "Cheats", "Cheat Actions", "Debug", "Debug Actions", "Controls" };
+
+/* ------------------------------------------------------------------ */
+/* State                                                               */
+/* ------------------------------------------------------------------ */
+
+enum { QO_CLOSED = 0, QO_OPENING, QO_SHOWN, QO_CLOSING };
+static int    s_phase;
+static Uint32 s_phaseStart;
+#define QO_OPEN_MS  160u
+#define QO_CLOSE_MS 120u
+
+int g_PcQuickOptionsActive = 0;
+
+static int s_page;
+static int s_sel;
+
+/* GL */
+static GLuint s_prog, s_vao, s_vbo;
+static GLint  s_locColor;
+static int    s_glReady;
+static GLuint s_texWhite;
+static GLuint s_garbage[QO_GARBAGE];
+static int    s_garbageCount;
+
+/* Fonts (stb_truetype). */
+static stbtt_fontinfo s_font;
+static unsigned char* s_fontData;
+static int            s_fontOk;
+static int            s_fontsTried;
+static int            s_fontsScript = -1; /* Pc_LangQuickScript the face was picked for */
+
+/* Baked text, re-baked when the pixel size or the page changes; values are
+ * re-baked whenever their text changes. */
+static GLuint s_texTitle, s_texHint, s_texHint2;
+static int    s_titleW, s_titleH, s_hintW, s_hintH, s_hint2W, s_hint2H;
+/* The Previous / Next row, in pieces so the mouse glyphs sit inline. */
+enum { QO_NAV_PREV = 0, QO_NAV_SLASH, QO_NAV_NEXT, QO_NAV_DEST, QO_NAV_ICON_R, QO_NAV_ICON_L,
+       QO_NAV_PAD_L, QO_NAV_PAD_R, QO_NAV_N };
+static GLuint s_texNav[QO_NAV_N];
+static int    s_navW[QO_NAV_N], s_navH[QO_NAV_N];
+static int    s_navPx;
+/* The page row names the buttons of the device used last: the D-pad after
+ * controller input, the mouse after mouse or keyboard input. */
+static int    s_navPadIcons;
+static GLuint s_texLabel[QO_MAX_ROWS];
+static int    s_labelW[QO_MAX_ROWS], s_labelH[QO_MAX_ROWS];
+static GLuint s_texValue[QO_MAX_ROWS];
+static int    s_valueW[QO_MAX_ROWS], s_valueH[QO_MAX_ROWS];
+static char   s_valueText[QO_MAX_ROWS][48];
+static int    s_bakedForPx;
+static int    s_bakedForPage = -1;
+static int    s_bakedForViewMode = -2; /* view page's baked camera mode (-1 = n/a) */
+
+/* Geometry published by Draw for Update's mouse hit-test (viewport px, y up). */
+static float s_vpW = 1920.0f, s_vpH = 1080.0f;
+static float s_geoListT, s_geoRowPitch, s_geoRowH, s_geoPanelL, s_geoPanelR;
+/* Panel drag: grab the title bar and move it. Offsets are in viewport px and
+ * survive close/reopen within a session. The title-bar rect is published for
+ * Update's hit-test the same way the row geometry is. */
+static float s_panelOfsX, s_panelOfsY;
+static float s_geoTitleB, s_geoTitleT;
+static int   s_dragging;
+static float s_dragLastX, s_dragLastY;
+static int   s_geoRows;
+
+/* Dropdown over a list row (the Spawn row): open on clicking its value,
+ * navigated with Up/Down / wheel / hover, picked with confirm / click. */
+static int    s_ddRow = -1;   /* row index on the current page, -1 = closed */
+static int    s_ddSel;
+static int    s_ddScroll;
+static GLuint s_ddTex[QO_DD_MAX];
+static int    s_ddW[QO_DD_MAX], s_ddH[QO_DD_MAX];
+static float  s_ddL, s_ddR, s_ddTop, s_ddRowH; /* published for the hit-test */
+static int    s_ddShown;
+/* Which list s_ddTex holds. The Map and Spawn rows share the cache, so a list
+ * opened after the other drew the first one's names until this was keyed. */
+static int    s_ddTexKey = -1;
+
+static int qo_row_is_list(const QoRowDef* r)
+{
+    return r->kind == ROW_CHEAT && Pc_Cheats_ListCount(r->cpage, r->extra) > 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* GL primitives (mirrors pc_rando_settings.c)                         */
+/* ------------------------------------------------------------------ */
+
+static GLuint qo_make_shader(GLenum type, const char* src)
+{
+    GLuint sh = glCreateShader(type);
+    GLint  ok = 0;
+    const char* parts[2] = { PsyX_Shader_Preamble(type == GL_FRAGMENT_SHADER, PSYX_GLSL_LEGACY), src };
+    glShaderSource(sh, 2, parts, NULL);
+    glCompileShader(sh);
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok)
+    {
+        char log[512];
+        glGetShaderInfoLog(sh, (GLsizei)sizeof(log), NULL, log);
+        SH_DBG("[QUICKOPT] shader failed: %s", log);
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+static int qo_atlas_ensure(void);
+
+static void qo_gl_init(void)
+{
+    static const char* vs_src =
+        "attribute vec2 a_pos;\n"
+        "attribute vec2 a_uv;\n"
+        "varying vec2 v_uv;\n"
+        "void main() { v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+    static const char* fs_src =
+        "#ifdef GL_ES\n"
+        "precision mediump float;\n"
+        "#endif\n"
+        "varying vec2 v_uv;\n"
+        "uniform sampler2D u_tex;\n"
+        "uniform vec4 u_color;\n"
+        "void main() { gl_FragColor = texture2D(u_tex, v_uv) * u_color; }\n";
+
+    GLuint vs, fs;
+    GLint  ok = 0, prevVao = 0, prevBuf = 0, prevProg = 0;
+
+    s_glReady = -1;
+    vs = qo_make_shader(GL_VERTEX_SHADER, vs_src);
+    fs = qo_make_shader(GL_FRAGMENT_SHADER, fs_src);
+    if (!vs || !fs)
+        return;
+
+    s_prog = glCreateProgram();
+    glAttachShader(s_prog, vs);
+    glAttachShader(s_prog, fs);
+    glBindAttribLocation(s_prog, 0, "a_pos");
+    glBindAttribLocation(s_prog, 1, "a_uv");
+    glLinkProgram(s_prog);
+    glGetProgramiv(s_prog, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!ok)
+    {
+        char log[512];
+        glGetProgramInfoLog(s_prog, (GLsizei)sizeof(log), NULL, log);
+        SH_DBG("[QUICKOPT] link failed: %s", log);
+        glDeleteProgram(s_prog);
+        s_prog = 0;
+        return;
+    }
+    /* Restore whatever program was bound, the same way the VAO and array
+     * buffer below are restored. PsyCross caches the bound program in
+     * g_PreviousShader and skips glUseProgram when it believes the right one
+     * is already current, so leaving ours bound here does not just affect the
+     * next draw -- it persists until something asks for a DIFFERENT shader.
+     * A screen whose every split shares one texture format never does, and
+     * renders entirely through this program, which has no Projection uniform:
+     * all geometry collapses and the screen is black. That is what happened to
+     * the Konami and KCET logos once this init moved to startup; they draw only
+     * 4-bit prims, so nothing ever forced the rebind that lets gameplay recover. */
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+    glUseProgram(s_prog);
+    glUniform1i(glGetUniformLocation(s_prog, "u_tex"), 0);
+    qo_atlas_ensure(); /* one texture, created here, never recreated */
+    s_locColor = glGetUniformLocation(s_prog, "u_color");
+    glUseProgram((GLuint)prevProg);
+
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
+    glGenVertexArrays(1, &s_vao);
+    glBindVertexArray(s_vao);
+    glGenBuffers(1, &s_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 6 * 4 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glBindVertexArray((GLuint)prevVao);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevBuf);
+    s_glReady = 1;
+}
+
+static void qo_reg_set(GLuint id, int w, int h, unsigned hash, int nearest);
+static unsigned qo_hash(const unsigned char* p, size_t n);
+
+/* ---------------------------------------------------------------- *
+ * Glyph atlas.
+ *
+ * Everything the panel draws -- every label, value, title, footer and the
+ * solid-white quad behind the panel itself -- lives in ONE texture created
+ * once, at init, and never recreated.
+ *
+ * This is a rewrite of a design that repeatedly drew its text as solid
+ * coloured blocks. What forced it: the panel's own numbers make it
+ * impossible for those blocks to come from our own pixels. A baked string
+ * is white RGB with alpha = coverage, and real text measures 12-21% ink, so
+ * texture2D(...) * u_color can never yield a fully opaque rectangle. The
+ * blocks therefore meant we were not sampling our texture at all -- and
+ * every check written to prove otherwise (name alive, dimensions intact,
+ * pixels byte-identical, sampler state correct) passed, because the pixels
+ * were never the problem.
+ *
+ * The one object that never once failed across every report is s_texWhite,
+ * and what set it apart is that it was created at INIT. Everything that
+ * failed was created lazily, mid-frame, inside the game's own GL stream --
+ * where PsyCross keeps a redundant-bind cache (g_lastBoundTexture) that
+ * early-outs and skips glBindTexture, and where texture names are being
+ * created and destroyed constantly. So the fix is to stop making textures
+ * during a frame at all: one atlas, allocated up front, sub-image updates
+ * only.
+ *
+ * Slots are handed out by a shelf allocator and handed back as the same
+ * GLuint the old code passed around, so every caller and all the layout
+ * maths is untouched -- the value is now a slot index + 1 rather than a
+ * texture name. Padding keeps LINEAR filtering from bleeding between
+ * neighbours. */
+#define QO_ATLAS_W    2048
+#define QO_ATLAS_H    1024
+#define QO_ATLAS_PAD  2
+/* One open dropdown alone caches QO_DD_MAX (64) entries, and a 16-row page
+ * holds a label and a value each: the old 96 could be exhausted by the panel
+ * simply being open, never mind editing anything. */
+#define QO_SLOT_MAX   256
+
+static GLuint s_atlasTex;
+static int    s_atlasReady;
+static int    s_atlasX, s_atlasY, s_atlasRowH;
+/* cw/ch is the rectangle the slot OWNS in the atlas; w/h is how much of it the
+ * current image uses. They differ after a slot is recycled by a shorter string,
+ * and only w/h feed the UVs, so the leftover pixels are never sampled. */
+static struct { int x, y, w, h, cw, ch, free; } s_slot[QO_SLOT_MAX];
+static int    s_slotCount;
+static int    s_atlasExhausted;
+
+/* Slot 0 is the solid white texel and is PERMANENT: the panel background,
+ * the scrollbar and the row highlights all draw from it, and a reset that
+ * handed slot 0 to the next label would repaint those with a word. */
+static void qo_atlas_reset(void)
+{
+    s_atlasX         = QO_ATLAS_PAD;
+    s_atlasY         = QO_ATLAS_PAD;
+    s_atlasRowH      = 0;
+    s_slotCount      = 0;
+    s_atlasExhausted = 0;
+    if (s_atlasTex)
+    {
+        /* re-claim slot 0 in place, exactly as qo_atlas_ensure laid it out */
+        s_slot[0].x = QO_ATLAS_PAD; s_slot[0].y = QO_ATLAS_PAD;
+        s_slot[0].w = 1;            s_slot[0].h = 1;
+        s_slot[0].cw = 1;           s_slot[0].ch = 1;
+        s_slot[0].free = 0;
+        s_slotCount = 1;
+        s_atlasX    = QO_ATLAS_PAD + 1 + QO_ATLAS_PAD;
+        s_atlasRowH = 1;
+    }
+}
+
+static int qo_atlas_ensure(void)
+{
+    if (s_atlasReady)
+        return s_atlasTex != 0;
+
+    s_atlasReady = 1;
+    glGenTextures(1, &s_atlasTex);
+    if (!s_atlasTex)
+        return 0;
+
+    glBindTexture(GL_TEXTURE_2D, s_atlasTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    /* A MIN filter wanting mip levels that do not exist makes a texture
+     * INCOMPLETE, and an incomplete texture samples as (0,0,0,1): opaque
+     * black. Pinning the chain at level 0 puts that state out of reach no
+     * matter what filter anything else sets. */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, QO_ATLAS_W, QO_ATLAS_H, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    {
+        /* Slot 0: one opaque white texel, written once and never reissued. */
+        const unsigned char one[4] = { 255, 255, 255, 255 };
+        glTexSubImage2D(GL_TEXTURE_2D, 0, QO_ATLAS_PAD, QO_ATLAS_PAD, 1, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, one);
+    }
+    qo_atlas_reset();
+    SH_DBG("[QOTEX] glyph atlas %dx%d id=%u", QO_ATLAS_W, QO_ATLAS_H, (unsigned)s_atlasTex);
+    return 1;
+}
+
+/* Returns a slot handle (index + 1), or 0 if it will not fit. */
+static GLuint qo_upload_rgba(const unsigned char* rgba, int w, int h, int nearest)
+{
+    int idx;
+
+    (void)nearest; /* one atlas, one filter; padding covers the bleed */
+
+    if (!qo_atlas_ensure() || w <= 0 || h <= 0)
+        return 0;
+    if (w > QO_ATLAS_W - 2 * QO_ATLAS_PAD || h > QO_ATLAS_H - 2 * QO_ATLAS_PAD)
+        return 0;
+
+    /* Recycle first. Editing a value re-bakes it on EVERY step, so a held
+     * arrow key used to burn one slot per step and never give it back -- the
+     * atlas ran out, this returned 0, and the number the player was adjusting
+     * simply stopped drawing. A re-baked value is nearly always the same size
+     * as the one it replaces, so the slot it just released fits it exactly.
+     * Best fit, so a short string does not claim a long string's rectangle. */
+    {
+        int bestIdx = -1, bestArea = 0;
+        for (idx = 1; idx < s_slotCount; idx++)
+        {
+            int area;
+            if (!s_slot[idx].free || s_slot[idx].cw < w || s_slot[idx].ch < h)
+                continue;
+            area = s_slot[idx].cw * s_slot[idx].ch;
+            if (bestIdx < 0 || area < bestArea) { bestIdx = idx; bestArea = area; }
+        }
+        if (bestIdx >= 0)
+        {
+            s_slot[bestIdx].w    = w;
+            s_slot[bestIdx].h    = h;
+            s_slot[bestIdx].free = 0;
+            glBindTexture(GL_TEXTURE_2D, s_atlasTex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, s_slot[bestIdx].x, s_slot[bestIdx].y,
+                            w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            return (GLuint)(bestIdx + 1);
+        }
+    }
+
+    if (s_atlasX + w + QO_ATLAS_PAD > QO_ATLAS_W)
+    {
+        s_atlasX     = QO_ATLAS_PAD;
+        s_atlasY    += s_atlasRowH + QO_ATLAS_PAD;
+        s_atlasRowH  = 0;
+    }
+    /* Out of slots or out of atlas. Never draw nothing and never say nothing:
+     * the flag makes the next Draw drop every cached handle and re-bake the
+     * page from an empty atlas, which costs one frame and always recovers. */
+    if (s_slotCount >= QO_SLOT_MAX ||
+        s_atlasY + h + QO_ATLAS_PAD > QO_ATLAS_H)
+    {
+        if (!s_atlasExhausted)
+            SH_DBG("[QOTEX] atlas exhausted (%d slots, cursor %d,%d) -- rebuilding",
+                   s_slotCount, s_atlasX, s_atlasY);
+        s_atlasExhausted = 1;
+        return 0;
+    }
+
+    idx = s_slotCount++;
+    s_slot[idx].x  = s_atlasX;
+    s_slot[idx].y  = s_atlasY;
+    s_slot[idx].w  = w;
+    s_slot[idx].h  = h;
+    s_slot[idx].cw = w;
+    s_slot[idx].ch = h;
+    s_slot[idx].free = 0;
+
+    glBindTexture(GL_TEXTURE_2D, s_atlasTex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, s_atlasX, s_atlasY, w, h,
+                    GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+    s_atlasX    += w + QO_ATLAS_PAD;
+    if (h > s_atlasRowH)
+        s_atlasRowH = h;
+
+    return (GLuint)(idx + 1);
+}
+
+/* Retiring a texture used to queue it for glDeleteTextures. It must not.
+ *
+ * A deleted GL name goes straight back to the driver's pool and the game takes
+ * it on its next texture create -- after which these quads sample whatever the
+ * game put there. That is the solid red/black block corruption: the [QOTEX]
+ * probe showed every upload is clean (right size, first texel 255,255,255,0,
+ * glErr 0), so the content is only wrong LATER, once the name is no longer
+ * ours. It also explains why the colour varied by area (whatever texture
+ * inherited the name) and why glIsTexture-based validation could not catch it
+ * -- the name is still a perfectly valid texture, just not ours.
+ *
+ * Retired names are therefore kept alive and simply abandoned. The caller has
+ * already zeroed its slot, so the next draw bakes a fresh texture. That leaks
+ * one small texture per re-bake (page switches and value edits only), which is
+ * a few MB across a long session -- the correct fix is to re-upload into the
+ * same name instead of allocating a new one, but that is a wider change than
+ * belongs in a release build. */
+static void qo_retire(GLuint tex)
+{
+    int idx = (int)tex - 1;
+
+    /* Slot 0 is the permanent white texel; freeing it would hand the panel
+     * background to the next string that fits in one pixel. */
+    if (idx > 0 && idx < s_slotCount)
+        s_slot[idx].free = 1;
+}
+
+/* Nothing is queued for deletion any more (see qo_retire); kept so the draw
+ * path is unchanged and a future in-place-reuse rewrite has a hook. */
+static void qo_gl_pump(void)
+{
+    s_garbageCount = 0;
+}
+
+/* Quad in NDC (yTop > yBot). */
+/* `tex` is an atlas SLOT handle (index + 1), not a texture name. */
+static void qo_quad(GLuint tex, float x0, float yTop, float x1, float yBot,
+                    float r, float g, float b, float a)
+{
+    float v[6][4];
+    float u0, v0, u1, v1;
+    int   idx = (int)tex - 1;
+
+    if (tex == 0 || idx < 0 || idx >= s_slotCount || !s_atlasTex)
+        return;
+
+    /* Half-texel inset: with LINEAR filtering an edge tap would otherwise
+     * reach into the padding between neighbouring slots. */
+    u0 = ((float)s_slot[idx].x + 0.5f) / (float)QO_ATLAS_W;
+    v0 = ((float)s_slot[idx].y + 0.5f) / (float)QO_ATLAS_H;
+    u1 = ((float)(s_slot[idx].x + s_slot[idx].w) - 0.5f) / (float)QO_ATLAS_W;
+    v1 = ((float)(s_slot[idx].y + s_slot[idx].h) - 0.5f) / (float)QO_ATLAS_H;
+
+    v[0][0] = x0; v[0][1] = yTop; v[0][2] = u0; v[0][3] = v0;
+    v[1][0] = x0; v[1][1] = yBot; v[1][2] = u0; v[1][3] = v1;
+    v[2][0] = x1; v[2][1] = yTop; v[2][2] = u1; v[2][3] = v0;
+    v[3][0] = x1; v[3][1] = yTop; v[3][2] = u1; v[3][3] = v0;
+    v[4][0] = x0; v[4][1] = yBot; v[4][2] = u0; v[4][3] = v1;
+    v[5][0] = x1; v[5][1] = yBot; v[5][2] = u1; v[5][3] = v1;
+
+    glUniform4f(s_locColor, r, g, b, a);
+    glBindTexture(GL_TEXTURE_2D, s_atlasTex);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+/* ------------------------------------------------------------------ */
+/* Fonts                                                               */
+/* ------------------------------------------------------------------ */
+
+static unsigned char* qo_read_file(const char* path, long* outSize)
+{
+    FILE* f = fopen(path, "rb");
+    long  n;
+    unsigned char* buf;
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0) { fclose(f); return NULL; }
+    if (outSize) *outSize = n;
+    buf = (unsigned char*)malloc((size_t)n);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    return buf;
+}
+
+/* stb_truetype does not copy the font file -- it reads this buffer on every
+ * glyph. If it is corrupted, glyphs rasterize as filled boxes, which is exactly
+ * what the panel shows, and the texture checks all pass because the block is
+ * uploaded faithfully. A strided signature is cheap enough to verify per frame
+ * and catches a stray write into the buffer. */
+static const char* s_fontPath;
+static long        s_fontSize;
+static unsigned    s_fontSig;
+
+static unsigned qo_font_sig(const unsigned char* p, long n)
+{
+    unsigned h = 2166136261u;
+    long     i;
+
+    for (i = 0; i < n; i += 61)
+    {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h ^ (unsigned)n;
+}
+
+/* Re-reads the font into a fresh buffer. The old one is abandoned, never freed:
+ * stbtt may still hold pointers into it, and whatever scribbled on it will keep
+ * doing so. */
+static int qo_font_reload(void)
+{
+    long           sz    = 0;
+    unsigned char* fresh = s_fontPath ? qo_read_file(s_fontPath, &sz) : NULL;
+
+    if (fresh && stbtt_InitFont(&s_font, fresh, stbtt_GetFontOffsetForIndex(fresh, 0)))
+    {
+        s_fontData = fresh;
+        s_fontSize = sz;
+        s_fontSig  = qo_font_sig(fresh, sz);
+        return 1;
+    }
+    if (fresh)
+        free(fresh);
+    return 0;
+}
+
+/* Returns non-zero when the font memory changed under us (and reloads it). */
+static int qo_font_check(void)
+{
+    static int s_fontLogs = 0;
+    unsigned   now;
+
+    if (!s_fontOk || !s_fontData || s_fontSize <= 0)
+        return 0;
+
+    now = qo_font_sig(s_fontData, s_fontSize);
+    if (now == s_fontSig)
+        return 0;
+
+    if (s_fontLogs < 8)
+    {
+        s_fontLogs++;
+        SH_DBG("[QOFONT] font memory CORRUPTED: sig %08x -> %08x (%ld bytes at %p, %s) "
+               "-- glyphs would rasterize as blocks; reloading",
+               s_fontSig, now, s_fontSize, (void*)s_fontData,
+               s_fontPath ? s_fontPath : "?");
+    }
+
+    if (qo_font_reload())
+        return 1;
+    s_fontSig = now; /* cannot reload; stop re-reporting every frame */
+    return 1;
+}
+
+static void qo_fonts_init(void)
+{
+    static const char* paths[16];
+    int count = Pc_LangQuickFontPaths(paths, 16);
+    int i;
+
+    s_fontsTried  = 1;
+    s_fontsScript = Pc_LangQuickScript();
+    s_fontOk      = 0;
+
+    for (i = 0; i < count; i++)
+    {
+        long           sz   = 0;
+        unsigned char* data = qo_read_file(paths[i], &sz);
+        if (!data)
+            continue;
+        if (stbtt_InitFont(&s_font, data, stbtt_GetFontOffsetForIndex(data, 0)))
+        {
+            s_fontData = data; /* stbtt keeps pointers into this - never free */
+            s_fontOk   = 1;
+            s_fontPath = paths[i];
+            s_fontSize = sz;
+            s_fontSig  = qo_font_sig(data, sz);
+            return;
+        }
+        free(data);
+    }
+    SH_DBG("[QUICKOPT] no usable font - text disabled");
+}
+
+/* Rasterize one line of ASCII to a white-coverage RGBA texture, trimmed to
+ * the ink so right-alignment and centring use the real text width. */
+static GLuint qo_bake_once(const char* text, float px, int* outW, int* outH, int* outInk)
+{
+    const char* p;
+    float scale, penX, baseY;
+    int   asc, desc, gap, W, H, i, pad = 1, prev = 0, stride;
+    unsigned char *cov, *rgba, *scratch;
+    GLuint tex;
+
+    if (!s_fontOk || !text || !text[0] || px < 4.0f)
+        return 0;
+
+    scale = stbtt_ScaleForPixelHeight(&s_font, px);
+    stbtt_GetFontVMetrics(&s_font, &asc, &desc, &gap);
+
+    W = (int)(px * 0.62f * (float)strlen(text)) + 8 * pad;
+    H = (int)ceilf(px * 1.4f) + 2 * pad;
+    if (W <= 0 || H <= 0 || W > 4096 || H > 512)
+        return 0;
+    stride = W;
+
+    cov     = (unsigned char*)calloc((size_t)W * H, 1);
+    rgba    = (unsigned char*)calloc((size_t)W * H, 4);
+    scratch = (unsigned char*)malloc((size_t)W * H);
+    if (!cov || !rgba || !scratch) { free(cov); free(rgba); free(scratch); return 0; }
+
+    penX  = (float)pad;
+    baseY = (float)pad + asc * scale;
+    p     = text;
+    while (*p)
+    {
+        int cp = (int)Pc_LangUtf8Next(&p);
+        int gx0, gy0, gx1, gy1, gw, gh, adv, lsb, sx, sy;
+        float shiftX;
+        if (prev)
+            penX += stbtt_GetCodepointKernAdvance(&s_font, prev, cp) * scale;
+        shiftX = penX - floorf(penX);
+        stbtt_GetCodepointBitmapBoxSubpixel(&s_font, cp, scale, scale, shiftX, 0.0f, &gx0, &gy0, &gx1, &gy1);
+        gw = gx1 - gx0;
+        gh = gy1 - gy0;
+        if (gw > 0 && gh > 0 && gw <= W && gh <= H)
+        {
+            memset(scratch, 0, (size_t)gw * gh);
+            stbtt_MakeCodepointBitmapSubpixel(&s_font, scratch, gw, gh, gw, scale, scale, shiftX, 0.0f, cp);
+            for (sy = 0; sy < gh; sy++)
+            {
+                int dy = (int)baseY + gy0 + sy;
+                if (dy < 0 || dy >= H) continue;
+                for (sx = 0; sx < gw; sx++)
+                {
+                    int dx = (int)penX + gx0 + sx;
+                    unsigned char v;
+                    if (dx < 0 || dx >= W) continue;
+                    v = scratch[sy * gw + sx];
+                    if (v > cov[dy * W + dx]) cov[dy * W + dx] = v;
+                }
+            }
+        }
+        stbtt_GetCodepointHMetrics(&s_font, cp, &adv, &lsb);
+        penX += adv * scale;
+        prev = cp;
+        if (penX > (float)(W - pad)) break;
+    }
+
+    {
+        int inkW = (int)ceilf(penX) + pad;
+        if (inkW > 0 && inkW < W) W = inkW;
+    }
+    for (i = 0; i < W * H; i++)
+    {
+        rgba[i * 4 + 0] = 255; rgba[i * 4 + 1] = 255; rgba[i * 4 + 2] = 255;
+        rgba[i * 4 + 3] = cov[(i / W) * stride + (i % W)];
+    }
+    {
+        /* Ink coverage of what was actually rasterized. This separates a bake
+         * that produced filled boxes (~100%) from a bake that is fine and a
+         * draw that samples something opaque -- the texture checks cannot tell
+         * those apart, because a faithfully-uploaded block passes every one. */
+        int    n   = W * H;
+        int    ink = 0;
+        int    k;
+
+        for (k = 0; k < n; k++)
+        {
+            if (rgba[k * 4 + 3] >= 32)
+                ink++;
+        }
+        if (outInk)
+            *outInk = n ? (ink * 100 / n) : -1;
+    }
+    tex = qo_upload_rgba(rgba, W, H, 0);
+    if (outW) *outW = W;
+    if (outH) *outH = H;
+    free(cov); free(rgba); free(scratch);
+    return tex;
+}
+
+/* Glyphs rasterized from bad font memory come out as filled boxes -- the solid
+ * blotches users hit. That is measurable: real text inks 12-21% of its box, a
+ * block ~100%. So a bake that comes back saturated is not shipped. The font is
+ * re-read and the string baked again; if it is still saturated nothing is
+ * returned, because a blank row is at least honest and the next frame retries.
+ * Single characters are exempt -- a glyph like a full block legitimately fills
+ * its box. */
+#define QO_INK_MAX 55
+
+
+static GLuint qo_bake(const char* text, float px, int* outW, int* outH)
+{
+    static int s_bakeLogs = 0;
+    int    ink = -1;
+    GLuint tex = qo_bake_once(text, px, outW, outH, &ink);
+
+    if (tex == 0 || ink < QO_INK_MAX || !text || !text[1])
+        return tex;
+
+    if (s_bakeLogs < 8)
+    {
+        s_bakeLogs++;
+        SH_DBG("[QOBAKE] \"%.24s\" baked SATURATED (ink=%d%%, normal is 12-21) -- "
+               "glyph data is bad; reloading the font and re-baking", text, ink);
+    }
+
+    qo_retire(tex);
+    if (!qo_font_reload())
+        return 0;
+
+    ink = -1;
+    tex = qo_bake_once(text, px, outW, outH, &ink);
+    if (tex && ink >= QO_INK_MAX)
+    {
+        qo_retire(tex);
+        return 0;
+    }
+    return tex;
+}
+
+static void qo_build_white(void)
+{
+    if (qo_atlas_ensure())
+        s_texWhite = 1; /* slot 0 handle */
+
+}
+
+/* A mouse glyph at `size` px, area-averaged down from the embedded 48 px
+ * coverage mask so it stays clean at text size (the atlas has no mips, and a
+ * LINEAR minify of the full mask would alias the thin outline). White with
+ * alpha = coverage, like the baked text, so it tints the same way. */
+static GLuint qo_bake_icon(const unsigned char* mask, int srcSize, int size, int* outW, int* outH)
+{
+    const float    scale = (float)srcSize / (float)size;
+    unsigned char* rgba;
+    GLuint         tex;
+    int            x, y;
+
+    if (size < 4 || size > 256)
+        return 0;
+    rgba = (unsigned char*)malloc((size_t)size * size * 4);
+    if (!rgba)
+        return 0;
+
+    for (y = 0; y < size; y++)
+    {
+        const float sy0 = y * scale, sy1 = (y + 1) * scale;
+        for (x = 0; x < size; x++)
+        {
+            const float sx0 = x * scale, sx1 = (x + 1) * scale;
+            float       acc = 0.0f;
+            int         iy, ix;
+
+            for (iy = (int)sy0; iy < srcSize && (float)iy < sy1; iy++)
+            {
+                const float wy = fminf(sy1, (float)(iy + 1)) - fmaxf(sy0, (float)iy);
+                for (ix = (int)sx0; ix < srcSize && (float)ix < sx1; ix++)
+                {
+                    const float wx = fminf(sx1, (float)(ix + 1)) - fmaxf(sx0, (float)ix);
+                    acc += (float)mask[iy * srcSize + ix] * wx * wy;
+                }
+            }
+            acc /= scale * scale;
+            rgba[(y * size + x) * 4 + 0] = 255;
+            rgba[(y * size + x) * 4 + 1] = 255;
+            rgba[(y * size + x) * 4 + 2] = 255;
+            rgba[(y * size + x) * 4 + 3] = (unsigned char)(acc > 255.0f ? 255.0f : acc + 0.5f);
+        }
+    }
+
+    tex = qo_upload_rgba(rgba, size, size, 0);
+    free(rgba);
+    if (outW) *outW = size;
+    if (outH) *outH = size;
+    return tex;
+}
+
+/* Previous / Next row pieces for `page`, baked so the whole row fits `avail`:
+ * at `px` if it does, otherwise once more scaled down to fit. Right click goes
+ * back and left click forward (the row adjusts like a value row), so each word
+ * carries the button that does it; on a controller that is D-pad left / right.
+ * Both icon pairs are square at one size, so the fit holds for either. */
+static void qo_bake_nav(int page, int px, float avail)
+{
+    char dest[192];
+    int  pass, i;
+
+    snprintf(dest, sizeof(dest), "(%s  /  %s)",
+             Pc_LangQuick(s_pageNames[(page + QO_PAGES - 1) % QO_PAGES]),
+             Pc_LangQuick(s_pageNames[(page + 1) % QO_PAGES]));
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        const int destPx = (int)((float)px * 0.82f);
+        const int icon   = (int)((float)px * 1.15f + 0.5f);
+        float     total;
+
+        s_texNav[QO_NAV_PREV]   = qo_bake(Pc_LangQuick("Previous"), (float)px, &s_navW[QO_NAV_PREV], &s_navH[QO_NAV_PREV]);
+        s_texNav[QO_NAV_SLASH]  = qo_bake("/", (float)px, &s_navW[QO_NAV_SLASH], &s_navH[QO_NAV_SLASH]);
+        s_texNav[QO_NAV_NEXT]   = qo_bake(Pc_LangQuick("Next"), (float)px, &s_navW[QO_NAV_NEXT], &s_navH[QO_NAV_NEXT]);
+        s_texNav[QO_NAV_DEST]   = qo_bake(dest, (float)destPx, &s_navW[QO_NAV_DEST], &s_navH[QO_NAV_DEST]);
+        s_texNav[QO_NAV_ICON_R] = qo_bake_icon(g_PcMouseIconRight, PC_MOUSE_ICON_SIZE, icon, &s_navW[QO_NAV_ICON_R], &s_navH[QO_NAV_ICON_R]);
+        s_texNav[QO_NAV_ICON_L] = qo_bake_icon(g_PcMouseIconLeft,  PC_MOUSE_ICON_SIZE, icon, &s_navW[QO_NAV_ICON_L], &s_navH[QO_NAV_ICON_L]);
+        s_texNav[QO_NAV_PAD_L]  = qo_bake_icon(g_PcDpadIconLeft,   PC_DPAD_ICON_SIZE,  icon, &s_navW[QO_NAV_PAD_L],  &s_navH[QO_NAV_PAD_L]);
+        s_texNav[QO_NAV_PAD_R]  = qo_bake_icon(g_PcDpadIconRight,  PC_DPAD_ICON_SIZE,  icon, &s_navW[QO_NAV_PAD_R],  &s_navH[QO_NAV_PAD_R]);
+
+        total = (float)(s_navW[QO_NAV_ICON_R] + s_navW[QO_NAV_PREV] + s_navW[QO_NAV_SLASH] +
+                        s_navW[QO_NAV_NEXT] + s_navW[QO_NAV_ICON_L] + s_navW[QO_NAV_DEST]) +
+                (float)px * (0.3f * 2.0f + 0.45f * 2.0f + 0.9f);
+        if (pass == 1 || total <= avail || total <= 0.0f)
+        {
+            s_navPx = px;
+            return;
+        }
+
+        for (i = 0; i < QO_NAV_N; i++)
+        {
+            qo_retire(s_texNav[i]);
+            s_texNav[i] = 0;
+        }
+        px = (int)((float)px * avail / total);
+        if (px < 6)
+            px = 6;
+    }
+}
+
+static void qo_free_text(void)
+{
+    int i;
+
+    /* Slots are recycled wholesale: the atlas itself is never freed, so
+     * there is no texture lifetime left to get wrong.
+     *
+     * EVERY handle held outside this function has to be dropped with them,
+     * or it keeps pointing at a slot index that now belongs to a different
+     * image. Only slot 0, the white texel, survives a reset, because
+     * qo_atlas_reset re-claims it in place. */
+    qo_atlas_reset();
+    qo_retire(s_texTitle); s_texTitle = 0;
+    qo_retire(s_texHint);  s_texHint  = 0;
+    qo_retire(s_texHint2); s_texHint2 = 0;
+    for (i = 0; i < QO_NAV_N; i++)
+    {
+        qo_retire(s_texNav[i]); s_texNav[i] = 0;
+    }
+    for (i = 0; i < QO_MAX_ROWS; i++)
+    {
+        qo_retire(s_texLabel[i]); s_texLabel[i] = 0;
+        qo_retire(s_texValue[i]); s_texValue[i] = 0;
+        s_valueText[i][0] = 0;
+    }
+    for (i = 0; i < QO_DD_MAX; i++)
+    {
+        qo_retire(s_ddTex[i]); s_ddTex[i] = 0;
+    }
+    s_ddTexKey = -1;
+}
+
+/* The overlay's baked textures have twice been seen drawing as solid blocks
+ * -- red once, black once. The COLOUR VARYING is the tell: the quads sample
+ * whatever texture currently owns that GL name, i.e. the name was freed out
+ * from under us and handed to the game (the 1x1 white panel texture, created
+ * once at init, never shows it). Deletion is detectable, so verify every
+ * cached name before use and rebuild any that went stale, and say so once. */
+/* What we uploaded, per texture name. glIsTexture cannot tell that a name is
+ * still OURS -- only that it is a live texture -- so the size we put there is
+ * kept and checked against what the driver reports. Round-robin; a name that
+ * ages out simply stops being checked. */
+#define QO_TEXREG 256
+static GLuint   s_regId[QO_TEXREG];
+static GLint    s_regW[QO_TEXREG], s_regH[QO_TEXREG];
+static unsigned s_regHash[QO_TEXREG];
+static unsigned char s_regNearest[QO_TEXREG];
+static int      s_regNext;
+/* One texture is content-checked per frame, rotating, so the readback stall
+ * stays off the per-frame path. */
+static int s_deepIdx, s_passSlot;
+
+static unsigned qo_hash(const unsigned char* p, size_t n)
+{
+    unsigned h = 2166136261u;
+    size_t   i;
+
+    for (i = 0; i < n; i++)
+    {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void qo_reg_set(GLuint id, int w, int h, unsigned hash, int nearest)
+{
+    int i;
+
+    if (id == 0)
+        return;
+    for (i = 0; i < QO_TEXREG; i++)
+    {
+        if (s_regId[i] == id)
+        {
+            s_regW[i] = w; s_regH[i] = h; s_regHash[i] = hash;
+            s_regNearest[i] = (unsigned char)(nearest ? 1 : 0);
+            return;
+        }
+    }
+    s_regId[s_regNext]   = id;
+    s_regW[s_regNext]    = w;
+    s_regH[s_regNext]    = h;
+    s_regHash[s_regNext] = hash;
+    s_regNearest[s_regNext] = (unsigned char)(nearest ? 1 : 0);
+    s_regNext = (s_regNext + 1) % QO_TEXREG;
+}
+
+/* A texture whose min filter wants mip levels it does not have is INCOMPLETE,
+ * and an incomplete texture samples as (0,0,0,1) -- a solid opaque black quad,
+ * exactly what the panel shows. This is why the 1x1 white background is immune
+ * while every baked label is not: at 1x1, level 0 IS the whole mip chain, so no
+ * filter can ever make it incomplete. Content, size and name all check out
+ * clean, so the sampler state is what is left. Re-assert it every frame and say
+ * so once if it had drifted. */
+
+
+static void qo_validate_ex(GLuint* t, const char* what, int deep);
+
+static void qo_validate(GLuint* t, const char* what)
+{
+    qo_validate_ex(t, what, s_passSlot++ == s_deepIdx);
+}
+
+/* Nothing to validate any more. These are atlas slot indices, not texture
+ * names, and the single atlas is created once and never deleted -- the
+ * lifetime problem this used to police no longer exists. */
+static void qo_validate_ex(GLuint* t, const char* what, int deep)
+{
+    (void)t; (void)what; (void)deep;
+
+}
+
+static void qo_validate_cache(void)
+{
+    int i;
+
+    s_passSlot = 0;
+
+    if (qo_font_check())
+    {
+        qo_free_text();   /* every cached label was baked from bad glyph data */
+        return;
+    }
+
+    qo_validate(&s_texTitle,  "title");
+    qo_validate(&s_texHint,   "hint");
+    qo_validate(&s_texWhite,  "white");
+    for (i = 0; i < QO_MAX_ROWS; i++)
+    {
+        qo_validate(&s_texLabel[i], "label");
+        qo_validate(&s_texValue[i], "value");
+        if (s_texValue[i] == 0)
+            s_valueText[i][0] = 0; /* force the value string to re-bake too */
+    }
+    for (i = 0; i < QO_DD_MAX; i++)
+        qo_validate(&s_ddTex[i], "dropdown");
+
+    if (s_passSlot > 0)
+        s_deepIdx = (s_deepIdx + 1) % s_passSlot;
+}
+
+/* Options-table names use underscores for spaces. */
+static void qo_row_name(const QoRowDef* r, char* out, int n)
+{
+    const char* src = NULL;
+    int i;
+
+    if (r->kind == ROW_OPT)
+    {
+        const void* h = PcOpt_QuickFind(r->key);
+        src = h ? Pc_LangQuickMenu(PcOpt_QuickName(h)) : r->key;
+    }
+    else if (r->kind == ROW_CHEAT)
+        src = Pc_LangQuick(Pc_Cheats_Name(r->cpage, r->extra));
+    else
+        src = Pc_LangQuick(r->label);
+
+    for (i = 0; i < n - 1 && src[i]; i++)
+        out[i] = (src[i] == '_') ? ' ' : src[i];
+    out[i] = 0;
+}
+
+static void qo_row_value(const QoRowDef* r, char* out, int n)
+{
+    char buf[48];
+    out[0] = 0;
+    if (r->kind == ROW_OPT)
+    {
+        const void* h = PcOpt_QuickFind(r->key);
+        const char* v = h ? Pc_LangQuickMenu(PcOpt_QuickLabel(h, buf, (int)sizeof(buf))) : "?";
+        int i;
+        for (i = 0; i < n - 1 && v[i]; i++)
+            out[i] = (v[i] == '_') ? ' ' : v[i];
+        out[i] = 0;
+        if (h && !PcOpt_QuickRealtime(h) && i < n - 3)
+        {
+            out[i++] = ' '; out[i++] = '*'; out[i] = 0;
+        }
+    }
+    else if (r->kind == ROW_EXTRA)
+    {
+        if (r->extra == QO_X_QUICK_WEAPONS) {
+            extern int g_PcQuickWeaponsEnabled;
+            snprintf(out, (size_t)n, "%s", g_PcQuickWeaponsEnabled ? "On" : "Off");
+        } else
+            snprintf(out, (size_t)n, "%s", PcOpt_QuickExtraLabel(r->extra, buf, (int)sizeof(buf)));
+    }
+    else if (r->kind == ROW_CHEAT)
+    {
+        snprintf(out, (size_t)n, "%s", Pc_Cheats_Label(r->cpage, r->extra, buf, (int)sizeof(buf)));
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Open / close                                                        */
+/* ------------------------------------------------------------------ */
+
+int Pc_QuickOptions_IsOpen(void)
+{
+    return s_phase != QO_CLOSED;
+}
+
+int Pc_QuickOptions_ShowsMinimapRows(void)
+{
+    const QoRowDef* rows;
+    int             n, i;
+
+    if (s_phase == QO_CLOSED)
+    {
+        return 0;
+    }
+    rows = qo_page_rows(s_page, &n);
+    for (i = 0; i < n; i++)
+    {
+        if (rows[i].kind == ROW_OPT && rows[i].key != NULL &&
+            strncmp(rows[i].key, "minimap", 7) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void qo_open(void)
+{
+    if (s_phase == QO_OPENING || s_phase == QO_SHOWN)
+        return;
+    s_phase      = QO_OPENING;
+    s_phaseStart = SDL_GetTicks();
+    s_sel        = 0;
+    g_PcQuickOptionsActive = 1;
+}
+
+void Pc_QuickOptions_Close(void)
+{
+    s_ddRow = -1;
+    if (s_phase == QO_CLOSED || s_phase == QO_CLOSING)
+        return;
+    /* The keybind panel opened from here gets its input only through this
+     * menu's Update, so closing the menu under it left it on screen with
+     * nothing able to close it. Whatever closes the menu closes it too. */
+    Pc_BindPanel_Close();
+    s_phase      = QO_CLOSING;
+    s_phaseStart = SDL_GetTicks();
+}
+
+void Pc_QuickOptions_Toggle(void)
+{
+    /* The keybind panel owns the keyboard while it is up -- F10 may be the
+     * very key being bound -- so the toggle does nothing until it closes. */
+    if (Pc_BindPanel_IsOpen())
+        return;
+    if (s_phase == QO_CLOSED || s_phase == QO_CLOSING)
+        qo_open();
+    else
+    {
+        qo_beep(Sfx_MenuCancel);
+        Pc_QuickOptions_Close();
+    }
+}
+
+/* Phase machine on the GAME thread, wall clock. It used to live in Draw, and a
+ * Draw that bailed (shader failed on ANGLE/ES) left the panel stuck in OPENING
+ * with the freeze flag set: game frozen, input swallowed, cursor gone, no way
+ * out. Draw only renders now; if GL is unusable the panel closes itself. */
+static float qo_phase_tick(void)
+{
+    Uint32 age = SDL_GetTicks() - s_phaseStart;
+    float  dim = 1.0f;
+
+    if (s_glReady < 0)
+    {
+        static int s_warned;
+        if (!s_warned) { s_warned = 1; SH_DBG("[QUICKOPT] GL unavailable -- quick options disabled for this run"); }
+        s_phase = QO_CLOSED;
+        g_PcQuickOptionsActive = 0;
+        return 0.0f;
+    }
+    if (s_phase == QO_OPENING)
+    {
+        dim = (float)age / (float)QO_OPEN_MS;
+        if (dim >= 1.0f) { dim = 1.0f; s_phase = QO_SHOWN; }
+    }
+    else if (s_phase == QO_CLOSING)
+    {
+        dim = 1.0f - (float)age / (float)QO_CLOSE_MS;
+        if (dim <= 0.0f) { dim = 0.0f; s_phase = QO_CLOSED; g_PcQuickOptionsActive = 0; }
+    }
+    return dim;
+}
+
+/* ------------------------------------------------------------------ */
+/* Input                                                               */
+/* ------------------------------------------------------------------ */
+
+/* Rising edge for a scancode, own history so it never fights the pad path. */
+static int qo_key_edge(int sc)
+{
+    static unsigned char s_prev[SDL_NUM_SCANCODES];
+    const unsigned char* ks = SDL_GetKeyboardState(NULL);
+    int down = ks ? ks[sc] : 0;
+    int edge = down && !s_prev[sc];
+    s_prev[sc] = (unsigned char)down;
+    return edge;
+}
+
+static void qo_set_page(int page)
+{
+    int n;
+    s_ddRow = -1;
+    s_page = (page + QO_PAGES) % QO_PAGES;
+    qo_page_rows(s_page, &n);
+    if (s_sel >= n) s_sel = n - 1;
+    if (s_sel < 0)  s_sel = 0;
+}
+
+/* Paging from the nav row keeps the cursor on the new page's nav row. Pages
+ * differ in length, so the same index could land on Close, and the next
+ * confirm would shut the menu. */
+static void qo_select_nav_row(void)
+{
+    int             n, i;
+    const QoRowDef* rows = qo_page_rows(s_page, &n);
+
+    for (i = 0; i < n; i++)
+    {
+        if (rows[i].kind == ROW_PAGE)
+        {
+            s_sel = i;
+            return;
+        }
+    }
+}
+
+/* Confirm / click: cheat rows have their own confirm (the Spawn row fires
+ * its browsed entry); everything else steps up. */
+static void qo_confirm(const QoRowDef* r);
+
+static void qo_activate(const QoRowDef* r, int dir)
+{
+    switch (r->kind)
+    {
+        case ROW_OPT:
+        {
+            const void* h = PcOpt_QuickFind(r->key);
+            if (h) PcOpt_QuickAdjust(h, dir);
+            break;
+        }
+        case ROW_EXTRA:
+            if (r->extra == QO_X_QUICK_WEAPONS) {
+                extern int g_PcQuickWeaponsEnabled;
+                extern void PcConfig_SaveKeyValues(const char* const*, const char* const*, int);
+                const char* key = "quick_weapon_switch";
+                const char* value;
+                g_PcQuickWeaponsEnabled = !g_PcQuickWeaponsEnabled;
+                value = g_PcQuickWeaponsEnabled ? "1" : "0";
+                PcConfig_SaveKeyValues(&key, &value, 1);
+            } else PcOpt_QuickExtraAdjust(r->extra, dir);
+            break;
+        case ROW_CHEAT: Pc_Cheats_Adjust(r->cpage, r->extra, dir); break;
+        case ROW_PAGE:  qo_beep(Sfx_MenuMove); qo_set_page(s_page + (dir < 0 ? -1 : +1)); qo_select_nav_row(); break;
+        case ROW_CLOSE: qo_beep(Sfx_MenuCancel); Pc_QuickOptions_Close(); break;
+        case ROW_ACTION: break; /* confirm-only; see the ROW_ACTION comment */
+        default: break;
+    }
+}
+
+/* Directions arrive as HELD state and repeat on the wall clock here. The
+ * pad's own pulse repeat counts vblanks per rendered frame, so with an
+ * uncapped frame rate a held arrow stepped every few milliseconds. */
+#define QO_REPEAT_FIRST_MS 380u
+#define QO_REPEAT_MS       85u
+static int qo_repeat(int idx, int held)
+{
+    static int    s_wasHeld[4];
+    static Uint32 s_nextAt[4];
+    Uint32 now = SDL_GetTicks();
+    int fire = 0;
+
+    if (held && !s_wasHeld[idx])
+    {
+        fire = 1;
+        s_nextAt[idx] = now + QO_REPEAT_FIRST_MS;
+    }
+    else if (held && (Sint32)(now - s_nextAt[idx]) >= 0)
+    {
+        fire = 1;
+        s_nextAt[idx] = now + QO_REPEAT_MS;
+    }
+    s_wasHeld[idx] = held;
+    return fire;
+}
+
+/* Keyboard counts as the mouse side: its arrows are not the D-pad the icons
+ * would show. Checked every frame, since the choice is the last device used. */
+static void qo_track_input_device(void)
+{
+    extern int   PsyX_RawControllerBindHeld(int buttonOrAxis);
+    extern int   PsyX_Pad_AxisValue(int sdlAxis);
+    const Uint8* ks;
+    int          n, i;
+
+    for (i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++)
+    {
+        if (PsyX_RawControllerBindHeld(i))
+        {
+            s_navPadIcons = 1;
+            return;
+        }
+    }
+    for (i = 0; i < SDL_CONTROLLER_AXIS_MAX; i++)
+    {
+        if (abs(PsyX_Pad_AxisValue(i)) > 16384)
+        {
+            s_navPadIcons = 1;
+            return;
+        }
+    }
+    if (Pc_MouseCursor_Moved() || Pc_MouseCursor_LeftClicked() ||
+        Pc_MouseCursor_RightClicked() || Pc_MouseCursor_WheelStep())
+    {
+        s_navPadIcons = 0;
+        return;
+    }
+    ks = SDL_GetKeyboardState(&n);
+    for (i = 0; i < n; i++)
+    {
+        if (ks[i])
+        {
+            s_navPadIcons = 0;
+            return;
+        }
+    }
+}
+
+void Pc_QuickOptions_Update(int up, int down, int left, int right,
+                            int confirm, int close, int pageNext, int pagePrev)
+{
+    int nRows;
+    const QoRowDef* rows = qo_page_rows(s_page, &nRows);
+    int mMoved, mClick, mRClick, wheel;
+    float mx, my;
+
+    /* Advanced has two rows Simple does not, so a switch while parked on one of
+     * them would leave the cursor past the end of the array. */
+    if (s_sel >= nRows) s_sel = nRows - 1;
+    if (s_sel < 0)      s_sel = 0;
+
+    up    = qo_repeat(0, up);
+    down  = qo_repeat(1, down);
+    left  = qo_repeat(2, left);
+    right = qo_repeat(3, right);
+
+    qo_phase_tick();
+    qo_track_input_device();
+
+    /* Keyboard extras (arrows arrive through the pad emulation already). */
+    if (qo_key_edge(SDL_SCANCODE_ESCAPE))   close    = 1;
+    if (qo_key_edge(SDL_SCANCODE_PAGEDOWN) || qo_key_edge(SDL_SCANCODE_E)) pageNext = 1;
+    if (qo_key_edge(SDL_SCANCODE_PAGEUP)   || qo_key_edge(SDL_SCANCODE_Q)) pagePrev = 1;
+
+    /* The keybind panel opened from the Controls page owns input until it has
+     * closed; then this menu is back where it was. The key edges above still
+     * run while it is up, so the Esc that closed the panel is not read here as
+     * a fresh press. */
+    if (Pc_BindPanel_IsOpen())
+    {
+        Pc_BindPanel_Update();
+        return;
+    }
+
+    if (s_phase != QO_SHOWN) /* ignore input while animating in/out */
+        return;
+
+    /* Dropdown open: it owns every input until it closes. */
+    if (s_ddRow >= 0 && s_ddRow < nRows && qo_row_is_list(&rows[s_ddRow]))
+    {
+        const QoRowDef* r = &rows[s_ddRow];
+        int n = Pc_Cheats_ListCount(r->cpage, r->extra);
+        int pick = -1, mMoved2, mClick2, wheel2;
+        float mx2, my2;
+
+        if (n > QO_DD_MAX) n = QO_DD_MAX;
+        if (n <= 0) { s_ddRow = -1; return; }
+
+        if (close) { qo_beep(Sfx_MenuCancel); s_ddRow = -1; return; }
+        if (up)   s_ddSel = (s_ddSel + n - 1) % n;
+        if (down) s_ddSel = (s_ddSel + 1) % n;
+        /* Keyboard steps the selection; the window follows it. */
+        if (s_ddSel < s_ddScroll) s_ddScroll = s_ddSel;
+        if (s_ddSel >= s_ddScroll + QO_DD_VISIBLE) s_ddScroll = s_ddSel - QO_DD_VISIBLE + 1;
+
+        /* The wheel scrolls the WINDOW (standard dropdown feel). It used to step
+         * the selection instead, which hover re-snapped to the line under the
+         * cursor on the next jitter -- so with the pointer resting over the
+         * list the wheel felt dead. */
+        wheel2 = Pc_MouseCursor_WheelNotches();
+        if (wheel2) s_ddScroll -= wheel2 * 3;
+        {
+            int vis = (n < QO_DD_VISIBLE) ? n : QO_DD_VISIBLE;
+            if (s_ddScroll > n - vis) s_ddScroll = n - vis;
+            if (s_ddScroll < 0) s_ddScroll = 0;
+            if (s_ddSel < s_ddScroll) s_ddSel = s_ddScroll;
+            if (s_ddSel > s_ddScroll + vis - 1) s_ddSel = s_ddScroll + vis - 1;
+        }
+
+        mMoved2 = Pc_MouseCursor_Moved();
+        mClick2 = Pc_MouseCursor_LeftClicked();
+        if (s_ddShown && (mMoved2 || mClick2 || wheel2) && Pc_MouseCursor_ViewportPos(&mx2, &my2))
+        {
+            float py  = (1.0f - my2) * s_vpH;
+            float mpx = mx2 * s_vpW;
+            int   vis = (n < QO_DD_VISIBLE) ? n : QO_DD_VISIBLE;
+            int   line = (int)((s_ddTop - py) / s_ddRowH);
+            int   inside = mpx >= s_ddL && mpx <= s_ddR && py <= s_ddTop && py >= s_ddTop - vis * s_ddRowH;
+            if (inside && line >= 0 && line < vis)
+            {
+                /* highlight follows the pointer as the list moves under it */
+                if (mMoved2 || wheel2) s_ddSel = s_ddScroll + line;
+                if (mClick2) pick = s_ddScroll + line;
+            }
+            else if (mClick2)
+            {
+                s_ddRow = -1; /* clicked away */
+                return;
+            }
+        }
+        if (confirm) pick = s_ddSel;
+
+        if (pick >= 0)
+        {
+            Pc_Cheats_ListSet(r->cpage, r->extra, pick);
+            s_ddRow = -1;
+        }
+        return;
+    }
+    s_ddRow = -1;
+
+    if (close) { qo_beep(Sfx_MenuCancel); Pc_QuickOptions_Close(); return; }
+
+    /* Title-bar drag. Held (not clicked) so it tracks continuously, and it is
+     * resolved before the row hit-test below so dragging never also activates
+     * whatever the cursor passes over. */
+    {
+        float dmx, dmy;
+
+        if (Pc_MouseCursor_LeftHeld() && Pc_MouseCursor_ViewportPos(&dmx, &dmy))
+        {
+            float px_ = dmx * s_vpW;
+            float py_ = (1.0f - dmy) * s_vpH;
+
+            if (!s_dragging &&
+                px_ >= s_geoPanelL && px_ <= s_geoPanelR &&
+                py_ >= s_geoTitleB && py_ <= s_geoTitleT)
+            {
+                s_dragging  = 1;
+                s_dragLastX = px_;
+                s_dragLastY = py_;
+            }
+            if (s_dragging)
+            {
+                s_panelOfsX += px_ - s_dragLastX;
+                s_panelOfsY += py_ - s_dragLastY;
+                s_dragLastX  = px_;
+                s_dragLastY  = py_;
+                return; /* the drag owns the mouse this frame */
+            }
+        }
+        else
+        {
+            s_dragging = 0;
+        }
+    }
+
+    if (pageNext || pagePrev) qo_beep(Sfx_MenuMove);
+    if (pageNext) qo_set_page(s_page + 1);
+    if (pagePrev) qo_set_page(s_page - 1);
+    rows = qo_page_rows(s_page, &nRows);
+
+    if (up)   { s_sel = (s_sel + nRows - 1) % nRows; }
+    if (down) { s_sel = (s_sel + 1) % nRows; }
+
+    /* Mouse: hover selects, wheel adjusts, left click steps a value up (or
+     * runs an action), right click steps it down. */
+    mMoved  = Pc_MouseCursor_Moved();
+    mClick  = Pc_MouseCursor_LeftClicked();
+    mRClick = Pc_MouseCursor_RightClicked();
+    wheel   = Pc_MouseCursor_WheelStep();
+    if (Pc_MouseCursor_ViewportPos(&mx, &my) && s_geoRowPitch > 0.0f)
+    {
+        float py  = (1.0f - my) * s_vpH; /* top-left norm -> bottom-left px */
+        float mpx = mx * s_vpW;
+        int   row = (int)((s_geoListT - py) / s_geoRowPitch);
+        int   inX = mpx >= s_geoPanelL && mpx <= s_geoPanelR;
+        if (inX && row >= 0 && row < nRows)
+        {
+            if (mMoved) s_sel = row;
+            if (mClick)
+            {
+                s_sel = row;
+                if (qo_row_is_list(&rows[row]) && mpx > (s_geoPanelL + s_geoPanelR) * 0.5f)
+                {
+                    /* Right half of a list row: open the dropdown on the value. */
+                    s_ddRow    = row;
+                    s_ddSel    = Pc_Cheats_ListGet(rows[row].cpage, rows[row].extra);
+                    s_ddScroll = s_ddSel - QO_DD_VISIBLE / 2;
+                    if (s_ddScroll < 0) s_ddScroll = 0;
+                    s_ddShown  = 0;
+                }
+                else
+                    qo_confirm(&rows[row]);
+            }
+            if (mRClick && (QO_IS_VALUE_ROW(rows[row].kind) || rows[row].kind == ROW_PAGE))
+            { s_sel = row; qo_activate(&rows[row], -1); }
+            if (wheel && QO_IS_VALUE_ROW(rows[row].kind))
+                qo_activate(&rows[row], wheel > 0 ? +1 : -1);
+        }
+    }
+
+    /* The page row adjusts like a value: Left/right-click go back a page,
+     * Right/confirm go forward. */
+    if (QO_IS_VALUE_ROW(rows[s_sel].kind) || rows[s_sel].kind == ROW_PAGE)
+    {
+        if (left)  qo_activate(&rows[s_sel], -1);
+        if (right) qo_activate(&rows[s_sel], +1);
+        if (confirm) qo_confirm(&rows[s_sel]);
+    }
+    else if (confirm)
+    {
+        qo_confirm(&rows[s_sel]);
+    }
+}
+
+static void qo_confirm(const QoRowDef* r)
+{
+    if (r->kind == ROW_CHEAT)
+        Pc_Cheats_Confirm(r->cpage, r->extra);
+    else if (r->kind == ROW_ACTION)
+    {
+        if (r->extra == QO_A_VIEWRESET)
+            PcOpt_QuickViewReset(qo_view_cam_mode());
+        else if (r->extra == QO_A_KEYBINDS)
+        {
+            qo_beep(Sfx_MenuConfirm);
+            Pc_BindPanel_Open();
+        }
+    }
+    else
+        qo_activate(r, +1);
+}
+
+/* ------------------------------------------------------------------ */
+/* Draw                                                                */
+/* ------------------------------------------------------------------ */
+
+/* Claim the atlas EARLY, at startup, rather than on the first time the panel
+ * is opened.
+ *
+ * The atlas was being written over while alive: the text drew correctly for a
+ * frame and then went black, with the texture never deleted (glIsTexture never
+ * fails and the atlas is created exactly once). A live texture whose contents
+ * are replaced means something RENDERS INTO it -- and the way that happens is a
+ * recycled name. PsyCross creates and destroys framebuffer targets as the
+ * resolution and MSAA state settle (GR_DestroyInternalTarget frees the internal
+ * colour and resolve textures), and a framebuffer object elsewhere can still
+ * refer to a freed name. Allocating our atlas AFTER that churn means we can be
+ * handed such a name, and the next pass through that framebuffer paints the
+ * scene into our glyphs: black in the cafe, red in an otherworld map.
+ *
+ * Claiming the name before any of that churn happens means it is never in the
+ * free pool at a moment when a stale attachment could point at it. MSAA made
+ * this reliable rather than occasional because it adds another create/destroy
+ * pair to the same window. */
+void Pc_QuickOptions_PreloadGL(void)
+{
+    if (!s_glReady) qo_gl_init();
+    if (s_glReady != 1) return;
+    qo_atlas_ensure();
+    qo_build_white();
+}
+void Pc_QuickOptions_Draw(void)
+{
+    GLint vp[4];
+    float vpW, vpH, panelW, panelH, panelL, panelR, panelT, panelB;
+    float titleH, hintH, listT, rowPitch, rowH, pad, dim = 1.0f;
+    int   nRows;
+    const QoRowDef* rows = qo_page_rows(s_page, &nRows);
+    int   px, i;
+
+    GLint  prevProg = 0, prevVao = 0, prevBuf = 0, prevTex = 0, prevUnit = GL_TEXTURE0, prevAlign = 4;
+    GLint  prevSrcRgb = GL_ONE, prevDstRgb = GL_ZERO, prevSrcA = GL_ONE, prevDstA = GL_ZERO;
+    GLint  prevEqRgb = GL_FUNC_ADD, prevEqA = GL_FUNC_ADD;
+    GLboolean prevBlend, prevDepth, prevCull;
+
+    if (s_phase == QO_CLOSED)
+        return;
+    /* The keybind panel stands in for this menu while it is open. */
+    if (Pc_BindPanel_IsOpen())
+        return;
+
+    glGetIntegerv(GL_VIEWPORT, vp);
+    if (vp[2] <= 0 || vp[3] <= 0)
+        return;
+    vpW = (float)vp[2];
+    vpH = (float)vp[3];
+
+    if (!s_glReady) qo_gl_init();
+    if (s_glReady != 1) return;
+
+    /* The atlas is created once and never deleted BY US -- but something else
+     * frees its name. Binding a freed name creates a brand new EMPTY texture
+     * object, and an empty texture samples as (0,0,0,1): opaque black over
+     * every quad. That is the block corruption, and it survived the rewrite
+     * because one texture can be lost exactly as easily as twenty-five.
+     *
+     * Checked BEFORE anything binds the atlas -- once a freed name is bound the
+     * object springs back as a valid but EMPTY texture and glIsTexture can no
+     * longer tell. One call per frame, and it does not stall.
+     *
+     * The panel background cannot show this by eye: it is drawn with a
+     * near-black low-alpha colour, so white and opaque-black give the same dark
+     * translucent panel. Only the text ever revealed it. */
+    if (s_atlasTex != 0 && !glIsTexture(s_atlasTex))
+    {
+        static int s_lostLogs = 0;
+        if (s_lostLogs < 8)
+        {
+            s_lostLogs++;
+            SH_DBG("[QOTEX] atlas texture %u was DELETED by something else -- recreating",
+                   (unsigned)s_atlasTex);
+        }
+        s_atlasTex   = 0;
+        s_atlasReady = 0;
+        qo_free_text();   /* every slot handle refers to the dead atlas */
+        s_texWhite   = 0;
+        qo_atlas_ensure();
+        qo_build_white();
+    }
+    /* Also when the language changes script: a Latin face has no kana, so the
+     * text baked from it is dropped with it. The old face's memory is
+     * abandoned rather than freed, as on any reload (stbtt points into it). */
+    if (!s_fontsTried || s_fontsScript != Pc_LangQuickScript())
+    {
+        if (s_fontsTried)
+        {
+            qo_free_text();
+            s_viewRowsDirty = 1;
+        }
+        qo_fonts_init();
+    }
+
+    if (s_sel >= nRows) s_sel = nRows - 1;
+    if (s_sel < 0)      s_sel = 0;
+
+    /* Either a bake failed for want of atlas room, or the Control Type switch
+     * changed which rows this page has. Both are fixed the same way: drop every
+     * cached handle so the page rebuilds from an empty atlas this frame, rather
+     * than drawing gaps or the previous mode's labels. */
+    if (s_atlasExhausted || s_viewRowsDirty)
+    {
+        s_viewRowsDirty = 0;
+        qo_free_text();
+    }
+
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prevUnit);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &prevSrcRgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &prevDstRgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevSrcA);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prevDstA);
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &prevEqRgb);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prevEqA);
+    prevBlend = glIsEnabled(GL_BLEND);
+    prevDepth = glIsEnabled(GL_DEPTH_TEST);
+    prevCull  = glIsEnabled(GL_CULL_FACE);
+
+    qo_gl_pump();
+    qo_validate_cache();
+
+    /* Fade only; the phase itself advances in Update (game thread). */
+    {
+        Uint32 age = SDL_GetTicks() - s_phaseStart;
+        if (s_phase == QO_OPENING)
+        {
+            dim = (float)age / (float)QO_OPEN_MS;
+            if (dim > 1.0f) dim = 1.0f;
+        }
+        else if (s_phase == QO_CLOSING)
+        {
+            dim = 1.0f - (float)age / (float)QO_CLOSE_MS;
+            if (dim <= 0.0f) goto restore;
+        }
+    }
+
+    /* Layout (viewport px, origin bottom-left). Left-anchored rather than
+     * centred so the scene stays visible beside it while you tune. */
+    /* One row pitch for every page (see QO_ROW_SLOTS); the panel is as tall as
+     * its page, with its top edge where the full-height panel's was so the
+     * title bar stays put when the page changes. */
+    {
+        const float fullH = 0.74f * vpH;
+
+        titleH   = fullH * 0.09f;
+        hintH    = fullH * 0.10f;
+        rowPitch = fullH * 0.84f / (float)QO_ROW_SLOTS;
+        panelH   = titleH + rowPitch * (float)nRows + hintH;
+        panelW   = 0.80f * fullH;
+        if (panelW > 0.90f * vpW) panelW = 0.90f * vpW;
+        panelL   = vpW * 0.04f;
+        panelB   = (vpH + fullH) * 0.5f - panelH;
+    }
+
+    /* User drag offset, clamped so a good part of the panel always stays on
+     * screen (never let it be dragged fully out of reach). */
+    {
+        const float minL = -panelW * 0.75f;
+        const float maxL = vpW - panelW * 0.25f;
+        const float minB = -panelH * 0.75f;
+        const float maxB = vpH - panelH * 0.25f;
+
+        panelL += s_panelOfsX;
+        panelB += s_panelOfsY;
+        if (panelL < minL) { s_panelOfsX += minL - panelL; panelL = minL; }
+        if (panelL > maxL) { s_panelOfsX += maxL - panelL; panelL = maxL; }
+        if (panelB < minB) { s_panelOfsY += minB - panelB; panelB = minB; }
+        if (panelB > maxB) { s_panelOfsY += maxB - panelB; panelB = maxB; }
+    }
+
+    panelR = panelL + panelW;
+    panelT = panelB + panelH;
+
+    pad      = panelW * 0.05f;
+    listT    = panelT - titleH;
+    rowH     = rowPitch * 0.84f;
+    px       = (int)(rowH * 0.52f);
+    if (px < 8) px = 8;
+
+    {
+        /* The View page (2) titles by the active camera, which can change while
+         * the page is open, so key the bake on it too and re-bake on a switch. */
+        int viewMode = (s_page == QO_PG_VIEW) ? qo_view_cam_mode() : -1;
+        if (s_bakedForPx != px || s_bakedForPage != s_page || s_bakedForViewMode != viewMode)
+        {
+            qo_free_text();
+            s_bakedForPx       = px;
+            s_bakedForPage     = s_page;
+            s_bakedForViewMode = viewMode;
+        }
+    }
+    if (!s_texTitle)
+    {
+        char titleBuf[192];
+        char name[96];
+
+        Pc_LangUtf8Upper(Pc_LangQuick(s_pageNames[s_page]), name, (int)sizeof(name));
+        if (s_page == QO_PG_VIEW)
+        {
+            int m = qo_view_cam_mode();
+            snprintf(titleBuf, sizeof(titleBuf), "%s  -  %s  (%s)", Pc_LangQuick("QUICK OPTIONS"), name,
+                     Pc_LangQuick((m == QO_CAM_FPS) ? "Firstperson" :
+                                  (m == QO_CAM_OTS) ? "Over-the-Shoulder" :
+                                  (m == QO_CAM_TPS) ? "Thirdperson" : "Classic"));
+        }
+        else
+            snprintf(titleBuf, sizeof(titleBuf), "%s  -  %s", Pc_LangQuick("QUICK OPTIONS"), name);
+        s_texTitle = qo_bake(titleBuf, (float)(int)(titleH * 0.46f), &s_titleW, &s_titleH);
+    }
+    /* Controls footer, on two lines: as one it had to shrink to fit the panel
+     * and came out too small to read. Both lines share one size, scaled down
+     * once only if the wider of them still overflows. */
+    if (!s_texHint)
+    {
+        char  hint[384], hint2[384];
+        float avail = panelW - 2.0f * pad;
+        int   hpx   = (int)(hintH * 0.30f);
+        int   widest;
+
+        if (hpx < 7) hpx = 7;
+        snprintf(hint, sizeof(hint), "%s    %s    %s", Pc_LangQuick("Up/Down select"),
+                 Pc_LangQuick("Left/Right adjust"), Pc_LangQuick("Q/E or PgUp/PgDn page"));
+        snprintf(hint2, sizeof(hint2), "%s    %s    %s", Pc_LangQuick("Drag the title to move"),
+                 Pc_LangQuickFill("{key} or Esc close", "{key}",
+                                  g_PcConfig.keyQuickOptions[0] ? g_PcConfig.keyQuickOptions : "F10"),
+                 Pc_LangQuick("* needs restart"));
+        s_texHint  = qo_bake(hint,  (float)hpx, &s_hintW,  &s_hintH);
+        s_texHint2 = qo_bake(hint2, (float)hpx, &s_hint2W, &s_hint2H);
+        widest = (s_hintW > s_hint2W) ? s_hintW : s_hint2W;
+        if (widest > avail && widest > 0 && avail > 0.0f)
+        {
+            int fit = (int)((float)hpx * avail / (float)widest);
+            if (fit < 6)   fit = 6;
+            if (fit > hpx) fit = hpx;
+            qo_retire(s_texHint);
+            qo_retire(s_texHint2);
+            s_texHint  = qo_bake(hint,  (float)fit, &s_hintW,  &s_hintH);
+            s_texHint2 = qo_bake(hint2, (float)fit, &s_hint2W, &s_hint2H);
+        }
+    }
+    if (!s_texNav[QO_NAV_PREV])
+        qo_bake_nav(s_page, px, panelW - 2.0f * pad);
+
+    /* Publish geometry for Update's mouse hit-test. */
+    s_vpW = vpW; s_vpH = vpH;
+    s_geoListT = listT; s_geoRowPitch = rowPitch; s_geoRowH = rowH;
+    s_geoPanelL = panelL; s_geoPanelR = panelR; s_geoRows = nRows;
+    s_geoTitleT = panelT; s_geoTitleB = panelT - titleH;
+
+    qo_build_white();
+
+    glUseProgram(s_prog);
+    glBindVertexArray(s_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    /* Re-assert the vertex layout every draw instead of trusting the VAO to
+     * have preserved it.
+     *
+     * The shader is texture2D(u_tex, v_uv) * u_color, so everything depends on
+     * a_uv (attribute 1). If that array is left disabled or repointed by other
+     * GL code, v_uv collapses to a single value and every vertex samples ONE
+     * texel -- and when that texel sits inside a glyph, the quad paints a solid
+     * rectangle in u_color: the grey and red blotches, exactly the size of each
+     * label, with the geometry still perfect because a_pos (attribute 0) is
+     * unaffected.
+     *
+     * This is why every texture-side check came back clean: the name, size,
+     * pixels and sampler state were all genuinely correct. It is also why the
+     * panel background never showed it -- that quad samples a 1x1 texture,
+     * where ANY uv resolves to the same texel, so broken uvs are invisible on
+     * it and visible on everything else. */
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendEquation(GL_FUNC_ADD);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+#define NX(px_) (-1.0f + 2.0f * (px_) / vpW)
+#define NY(py_) (-1.0f + 2.0f * (py_) / vpH)
+
+    /* Translucent panel -- no screen dim, so a change shows in the live scene. */
+    qo_quad(s_texWhite, NX(panelL), NY(panelT), NX(panelR), NY(panelB), 0.04f, 0.04f, 0.05f, 0.58f * dim);
+    /* Title band + rule. */
+    qo_quad(s_texWhite, NX(panelL + 2.0f), NY(panelT - 2.0f), NX(panelR - 2.0f), NY(listT),
+            0.10f, 0.05f, 0.05f, 0.70f * dim);
+    qo_quad(s_texWhite, NX(panelL + 2.0f), NY(listT), NX(panelR - 2.0f), NY(listT - 2.0f),
+            0.47f, 0.11f, 0.08f, dim);
+    if (s_texTitle)
+    {
+        float tx = panelL + (panelW - (float)s_titleW) * 0.5f;
+        float ty = panelT - titleH * 0.30f;
+        qo_quad(s_texTitle, NX(tx), NY(ty), NX(tx + s_titleW), NY(ty - s_titleH), 1.0f, 0.93f, 0.86f, dim);
+    }
+
+    for (i = 0; i < nRows && i < QO_MAX_ROWS; i++)
+    {
+        const QoRowDef* r = &rows[i];
+        float rowTop = listT - (float)i * rowPitch;
+        float rowMid = rowTop - rowH * 0.5f;
+        float tH, tY;
+        char  txt[64];
+
+        if (i == s_sel)
+            qo_quad(s_texWhite, NX(panelL + 4.0f), NY(rowTop), NX(panelR - 4.0f), NY(rowTop - rowH),
+                    0.42f, 0.16f, 0.12f, 0.55f * dim);
+
+        if (!s_texLabel[i] && r->kind != ROW_PAGE)
+        {
+            qo_row_name(r, txt, (int)sizeof(txt));
+            s_texLabel[i] = qo_bake(txt, (float)px, &s_labelW[i], &s_labelH[i]);
+        }
+
+        if (QO_IS_VALUE_ROW(r->kind))
+        {
+            qo_row_value(r, txt, (int)sizeof(txt));
+            if (s_texValue[i] == 0 || strcmp(txt, s_valueText[i]) != 0)
+            {
+                qo_retire(s_texValue[i]);
+                snprintf(s_valueText[i], sizeof(s_valueText[i]), "%s", txt);
+                s_texValue[i] = qo_bake(txt, (float)px, &s_valueW[i], &s_valueH[i]);
+            }
+            if (s_texLabel[i])
+            {
+                tH = (float)s_labelH[i]; tY = rowMid + tH * 0.5f;
+                qo_quad(s_texLabel[i], NX(panelL + pad), NY(tY), NX(panelL + pad + s_labelW[i]), NY(tY - tH),
+                        0.92f, 0.92f, 0.95f, dim);
+            }
+            if (s_texValue[i])
+            {
+                float vg = (i == s_sel) ? 1.0f : 0.85f;
+                float vr = panelR - pad - (float)s_valueW[i];
+                tH = (float)s_valueH[i]; tY = rowMid + tH * 0.5f;
+                qo_quad(s_texValue[i], NX(vr), NY(tY), NX(vr + s_valueW[i]), NY(tY - tH),
+                        vg, vg * 0.85f, vg * 0.45f, dim);
+            }
+        }
+        else if (r->kind == ROW_PAGE)
+        {
+            /* [R] Previous  /  Next [L]    (previous page  /  next page),
+             * centred as one line, each piece on the row's middle. */
+            const int order[] = { s_navPadIcons ? QO_NAV_PAD_L : QO_NAV_ICON_R, QO_NAV_PREV, QO_NAV_SLASH,
+                                  QO_NAV_NEXT, s_navPadIcons ? QO_NAV_PAD_R : QO_NAV_ICON_L, QO_NAV_DEST };
+            const float gap[] = { 0.30f, 0.45f, 0.45f, 0.30f, 0.90f, 0.0f };
+            float total = 0.0f, x;
+            int   k;
+
+            for (k = 0; k < 6; k++)
+                total += (float)s_navW[order[k]] + gap[k] * (float)s_navPx;
+            x = panelL + (panelW - total) * 0.5f;
+            for (k = 0; k < 6; k++)
+            {
+                const int   p    = order[k];
+                const int   icon = (p == QO_NAV_ICON_R || p == QO_NAV_ICON_L ||
+                                    p == QO_NAV_PAD_L  || p == QO_NAV_PAD_R);
+                const float c    = (p == QO_NAV_DEST) ? 0.62f : (p == QO_NAV_SLASH) ? 0.55f : 1.0f;
+
+                if (s_texNav[p])
+                {
+                    tH = (float)s_navH[p]; tY = rowMid + tH * 0.5f;
+                    if (icon)
+                        qo_quad(s_texNav[p], NX(x), NY(tY), NX(x + s_navW[p]), NY(tY - tH),
+                                0.92f, 0.92f, 0.95f, dim);
+                    else
+                        qo_quad(s_texNav[p], NX(x), NY(tY), NX(x + s_navW[p]), NY(tY - tH),
+                                0.80f * c, 0.85f * c, 0.95f * c, dim);
+                }
+                x += (float)s_navW[p] + gap[k] * (float)s_navPx;
+            }
+        }
+        else if (s_texLabel[i])
+        {
+            /* Action row, centred. */
+            float lx = panelL + (panelW - (float)s_labelW[i]) * 0.5f;
+            tH = (float)s_labelH[i]; tY = rowMid + tH * 0.5f;
+            qo_quad(s_texLabel[i], NX(lx), NY(tY), NX(lx + s_labelW[i]), NY(tY - tH),
+                    0.80f, 0.85f, 0.95f, dim);
+        }
+    }
+
+    if (s_texHint)
+    {
+        float hx = panelL + (panelW - (float)s_hintW) * 0.5f;
+        float hy = panelB + hintH * 0.88f;
+        qo_quad(s_texHint, NX(hx), NY(hy), NX(hx + s_hintW), NY(hy - s_hintH), 0.7f, 0.7f, 0.75f, dim);
+    }
+    if (s_texHint2)
+    {
+        float hx = panelL + (panelW - (float)s_hint2W) * 0.5f;
+        float hy = panelB + hintH * 0.46f;
+        qo_quad(s_texHint2, NX(hx), NY(hy), NX(hx + s_hint2W), NY(hy - s_hint2H), 0.7f, 0.7f, 0.75f, dim);
+    }
+
+    /* Dropdown list over the value column of its row, on top of the rows. */
+    s_ddShown = 0;
+    if (s_ddRow >= 0 && s_ddRow < nRows && qo_row_is_list(&rows[s_ddRow]))
+    {
+        const QoRowDef* r  = &rows[s_ddRow];
+        int   n   = Pc_Cheats_ListCount(r->cpage, r->extra);
+        int   vis = (n < QO_DD_VISIBLE) ? n : QO_DD_VISIBLE;
+        const int key = (r->cpage << 8) | (r->extra & 0xFF);
+
+        if (key != s_ddTexKey)
+        {
+            int i;
+            for (i = 0; i < QO_DD_MAX; i++)
+            {
+                qo_retire(s_ddTex[i]); s_ddTex[i] = 0;
+            }
+            s_ddTexKey = key;
+        }
+        float ddL = panelL + panelW * 0.5f;
+        float ddR = panelR - 4.0f;
+        float ddTop = listT - (float)(s_ddRow + 1) * rowPitch + rowPitch * 0.08f;
+        float ddH = rowH;
+        int   k;
+
+        if (n > QO_DD_MAX) n = QO_DD_MAX;
+        if (s_ddScroll > n - vis) s_ddScroll = n - vis;
+        if (s_ddScroll < 0) s_ddScroll = 0;
+        /* Don't run off the panel bottom: open upward instead. */
+        if (ddTop - vis * ddH < panelB) ddTop = listT - (float)s_ddRow * rowPitch + vis * ddH;
+
+        qo_quad(s_texWhite, NX(ddL - 2.0f), NY(ddTop + 2.0f), NX(ddR + 2.0f), NY(ddTop - vis * ddH - 2.0f), 0.47f, 0.11f, 0.08f, dim);
+        qo_quad(s_texWhite, NX(ddL), NY(ddTop), NX(ddR), NY(ddTop - vis * ddH), 0.05f, 0.045f, 0.06f, 0.97f * dim);
+        for (k = 0; k < vis; k++)
+        {
+            int   e  = s_ddScroll + k;
+            float et = ddTop - (float)k * ddH;
+            if (e >= n) break;
+            if (e == s_ddSel)
+                qo_quad(s_texWhite, NX(ddL + 2.0f), NY(et), NX(ddR - 2.0f), NY(et - ddH), 0.42f, 0.16f, 0.12f, 0.75f * dim);
+            if (!s_ddTex[e])
+                s_ddTex[e] = qo_bake(Pc_Cheats_ListName(r->cpage, r->extra, e), (float)px, &s_ddW[e], &s_ddH[e]);
+            if (s_ddTex[e])
+            {
+                float ty = et - (ddH - (float)s_ddH[e]) * 0.5f;
+                qo_quad(s_ddTex[e], NX(ddL + 10.0f), NY(ty), NX(ddL + 10.0f + s_ddW[e]), NY(ty - s_ddH[e]),
+                        e == s_ddSel ? 1.0f : 0.85f, 0.9f, 0.9f, dim);
+            }
+        }
+        s_ddL = ddL; s_ddR = ddR; s_ddTop = ddTop; s_ddRowH = ddH;
+        s_ddShown = 1;
+    }
+
+#undef NX
+#undef NY
+
+restore:
+    /* Restore GL state so PsyCross / the console are untouched. */
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    glActiveTexture((GLenum)prevUnit);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+    glBlendEquationSeparate((GLenum)prevEqRgb, (GLenum)prevEqA);
+    glBlendFuncSeparate((GLenum)prevSrcRgb, (GLenum)prevDstRgb, (GLenum)prevSrcA, (GLenum)prevDstA);
+    if (!prevBlend) glDisable(GL_BLEND);
+    if (prevDepth)  glEnable(GL_DEPTH_TEST);
+    if (prevCull)   glEnable(GL_CULL_FACE);
+    glUseProgram((GLuint)prevProg);
+    glBindVertexArray((GLuint)prevVao);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevBuf);
+
+    /* PsyCross keeps a redundant-bind cache and RETURNS EARLY from
+     * GR_SetTexture when it believes the texture is already bound. We just
+     * bound our own atlas behind that cache, so the binding it restores
+     * above is not necessarily what the cache thinks. Invalidate it and the
+     * next GR_SetTexture is forced to issue a real glBindTexture. */
+    {
+        extern unsigned int g_lastBoundTexture; /* PsyX TextureID */
+        g_lastBoundTexture = (unsigned int)-1;
+    }
+}

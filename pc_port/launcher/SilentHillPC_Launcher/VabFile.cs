@@ -77,12 +77,72 @@ namespace SilentHillPC_Launcher
         }
     }
 
+    /// <summary>How many banks can answer each sound id at all.
+    ///
+    /// A row names a slot, and every map's ambient bank sits in the same slot with the
+    /// same program and note grid, so one id is answered by dozens of banks: in MAP201
+    /// alone 99 ambient ids reach sample 1. Which one really plays depends on the map
+    /// the player is in, and nothing in the bank or the sound table says that. Counting
+    /// the banks that could answer at least sorts the ids that are peculiar to this
+    /// bank to the front, where they are worth reading.</summary>
+    internal sealed class SfxAnswerIndex
+    {
+        private static SfxAnswerIndex s_cached;
+        private static string s_cachedDir;
+
+        private readonly Dictionary<int, int> _counts = new Dictionary<int, int>();
+
+        public int BanksAnswering(int sfxId)
+        {
+            int n;
+            return _counts.TryGetValue(sfxId, out n) ? n : 0;
+        }
+
+        public static SfxAnswerIndex For(string cleanSndDir)
+        {
+            if (string.IsNullOrEmpty(cleanSndDir) || !Directory.Exists(cleanSndDir)) return null;
+            string full;
+            try { full = Path.GetFullPath(cleanSndDir); } catch { return null; }
+            if (s_cached != null && string.Equals(s_cachedDir, full, StringComparison.OrdinalIgnoreCase)) return s_cached;
+
+            var idx = new SfxAnswerIndex();
+            string[] files;
+            try { files = Directory.GetFiles(full, "*.vab"); } catch { return null; }
+
+            foreach (string f in files)
+            {
+                string stem = Path.GetFileNameWithoutExtension(f);
+                int slot = VabFile.SlotOfBank(stem);
+                if (slot < 0 || VabFile.IsMapOnlyBank(stem)) continue;
+
+                string err;
+                VabFile v = VabFile.Load(f, out err);
+                if (v == null) continue;
+
+                foreach (SfxRow row in SfxTable.Rows)
+                {
+                    if (row.Id == SfxTable.SfxBase || row.Slot != slot) continue;
+                    if (v.ResolveTones(row.Program, row.Note).Count == 0) continue;
+                    int n;
+                    idx._counts[row.Id] = idx._counts.TryGetValue(row.Id, out n) ? n + 1 : 1;
+                }
+            }
+
+            s_cached = idx;
+            s_cachedDir = full;
+            return idx;
+        }
+    }
+
     /// <summary>A sound id that plays a given sample, and the rate it plays at.</summary>
     internal sealed class SfxMatch
     {
         public SfxRow Row;
         public int Pitch;          // SPU pitch register value; 0x1000 is unity
         public double RateHz;
+        /// <summary>How many samples this id keys on at once. Above 1 the id is a layer
+        /// of several samples, so replacing this one changes part of the sound.</summary>
+        public int Layers = 1;
 
         public string Label
         {
@@ -147,6 +207,29 @@ namespace SilentHillPC_Launcher
         public readonly List<VabTone> Tones = new List<VabTone>();
 
         private byte[] _data;
+
+        /* Seven SND banks exist on the disc but are absent from the sound system's
+         * own table (g_AudioData[].fileOffset_8), which is what identifies a bank
+         * when it loads. Nothing ever requests them, so a replacement aimed at one
+         * cannot fire however it is named or resampled — and the Audio tool used to
+         * hand out an export name for them like any other, which is how
+         * MAP000_005.wav came to be a reasonable-looking file that did nothing.
+         *
+         * Derived by pairing every SND/*.VAB in filetable.c.USA.inc against that
+         * table: 83 of 90 are reachable, these are not. Names, not sectors, so it
+         * holds for every region. */
+        public static readonly string[] MapOnlyBanks =
+        {
+            "MAP000", "MAP100", "MAP101", "MAP102", "MAP103", "MAP502", "MAP604",
+        };
+
+        public static bool IsMapOnlyBank(string stem)
+        {
+            if (string.IsNullOrEmpty(stem)) return false;
+            foreach (string b in MapOnlyBanks)
+                if (string.Equals(stem, b, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
 
         public byte[] Raw { get { return _data; } }
         public int BodiesOffset { get; private set; }
@@ -284,21 +367,28 @@ namespace SilentHillPC_Launcher
         private static readonly int[] Filter0 = { 0, 60, 115, 98 };
         private static readonly int[] Filter1 = { 0, 0, -52, -55 };
 
-        /// <summary>Decode one sample's ADPCM to 16-bit mono PCM. Each 16-byte block
-        /// is a shift/filter byte, a flag byte, then 14 bytes holding 28 nibbles.</summary>
         public short[] Decode(int vagIndex)
         {
             VabVag vag = Vags[vagIndex - 1];
-            var outBuf = new short[vag.BlockCount * 28];
+            return DecodeAdpcm(_data, vag.Offset, vag.Length);
+        }
+
+        /// <summary>Decode PSX ADPCM to 16-bit mono PCM. Each 16-byte block is a
+        /// shift/filter byte, a flag byte, then 14 bytes holding 28 nibbles. Static so a
+        /// replacement staged in the Audio tool previews before it is in any bank.</summary>
+        public static short[] DecodeAdpcm(byte[] data, int offset, int length)
+        {
+            int blocks = length / 16;
+            var outBuf = new short[blocks * 28];
             int w = 0;
             int prev1 = 0, prev2 = 0;
 
-            for (int b = 0; b < vag.BlockCount; b++)
+            for (int b = 0; b < blocks; b++)
             {
-                int p = vag.Offset + b * 16;
-                int shift = _data[p] & 0x0F;
-                int filter = (_data[p] >> 4) & 0x0F;
-                int flag = _data[p + 1];
+                int p = offset + b * 16;
+                int shift = data[p] & 0x0F;
+                int filter = (data[p] >> 4) & 0x0F;
+                int flag = data[p + 1];
 
                 if (filter > 3) filter = 3;
                 // A shift of 13..15 is not meaningful; hardware treats it as a mute.
@@ -306,7 +396,7 @@ namespace SilentHillPC_Launcher
 
                 for (int i = 0; i < 14; i++)
                 {
-                    int by = _data[p + 2 + i];
+                    int by = data[p + 2 + i];
                     for (int half = 0; half < 2; half++)
                     {
                         int nib = half == 0 ? (by & 0x0F) : (by >> 4);
@@ -374,30 +464,36 @@ namespace SilentHillPC_Launcher
             }
         }
 
-        /// <summary>Which tone a program plays for a given note. Every tone in these
-        /// banks has a one-note range (48..48, 49..49, ...), so the note identifies the
-        /// tone exactly — there is deliberately NO fallback. Returning "some tone in the
-        /// program" instead made every sound id match every bank.</summary>
-        public VabTone ResolveTone(int program, int note)
+        /// <summary>Every tone a program keys on for a note, which is what SdVoKeyOn
+        /// does: it walks the program's tones and starts a voice for each one whose
+        /// note range covers the note. Four fifths of the tones in these banks have a
+        /// one-note range, so a note usually picks exactly one; where ranges overlap
+        /// (MAP201 does it at 24 notes) one sound id really does play several samples
+        /// at once, and stopping at the first tone hid that.</summary>
+        public List<VabTone> ResolveTones(int program, int note)
         {
+            var hits = new List<VabTone>();
             foreach (VabTone t in Tones)
             {
-                if (t.Program == program && note >= t.MinNote && note <= t.MaxNote) return t;
+                if (t.Program == program && note >= t.MinNote && note <= t.MaxNote) hits.Add(t);
             }
-            return null;
+            return hits;
         }
 
         /// <summary>The sound-table rows that land on a given sample in this bank, with
         /// the exact rate each plays at.
         ///
-        /// A bank file does not record which slot it gets loaded into — the weapon slot
-        /// holds PISTOL/SHOTGUN/RIFEL/SAW depending on what Harry carries, and the
-        /// ambient slot changes per map — so a row is matched on program + note and the
-        /// slot is reported rather than assumed. Two independent constraints have to
-        /// agree: the note must land in a tone's range, AND the row's own tone index
-        /// must be that tone's slot. Either alone lets rows from other slots through.
+        /// A row says which SLOT it plays from, never which bank, and the slot's
+        /// occupant changes as the game runs: the weapon slot holds PISTOL, SHOTGUN,
+        /// RIFEL or SAW depending on what Harry carries, the ambient slot changes per
+        /// map. So a row can only be matched the way the engine resolves it, on program
+        /// plus note, and every bank loaded into that slot that has the same program and
+        /// note answers to the same id. Pass the bank's own slot to keep ids meant for
+        /// another slot out, or -1 for any.
         ///
-        /// Pass a slot to restrict further, or -1 for any.</summary>
+        /// The row's first byte is NOT a tone index to match on. SdVoKeyOn ignores it
+        /// and selects tones purely by note range; requiring it to equal the tone's slot
+        /// dropped real ids and let others through.</summary>
         public List<SfxMatch> MatchesFor(int vagIndex, int slotFilter)
         {
             var hits = new List<SfxMatch>();
@@ -406,19 +502,34 @@ namespace SilentHillPC_Launcher
                 if (row.Id == SfxTable.SfxBase) continue;
                 if (slotFilter >= 0 && row.Slot != slotFilter) continue;
 
-                VabTone tone = ResolveTone(row.Program, row.Note);
-                if (tone == null || tone.Vag != vagIndex) continue;
-                if (tone.Slot != row.VabIndex) continue;
-
-                int pitch = PsxPitch.Note2Pitch(row.Note, 0, tone.CenterNote, tone.CenterFine);
-                hits.Add(new SfxMatch
+                List<VabTone> tones = ResolveTones(row.Program, row.Note);
+                foreach (VabTone tone in tones)
                 {
-                    Row = row,
-                    Pitch = pitch,
-                    RateHz = PsxPitch.RateHz(pitch),
-                });
+                    if (tone.Vag != vagIndex) continue;
+
+                    int pitch = PsxPitch.Note2Pitch(row.Note, 0, tone.CenterNote, tone.CenterFine);
+                    hits.Add(new SfxMatch
+                    {
+                        Row = row,
+                        Pitch = pitch,
+                        RateHz = PsxPitch.RateHz(pitch),
+                        Layers = tones.Count,
+                    });
+                }
             }
             return hits;
+        }
+
+        /// <summary>The slot this bank is loaded into, or -1 when it is not a bank the
+        /// sound system ever asks for. The seven dead MAP twins answer with their MEP
+        /// twin's slot, since that is the bank the game loads in their place.</summary>
+        public static int SlotOfBank(string bank)
+        {
+            if (string.IsNullOrEmpty(bank)) return -1;
+            int slot;
+            if (SfxTable.BankSlots.TryGetValue(bank, out slot)) return slot;
+            if (IsMapOnlyBank(bank) && SfxTable.BankSlots.TryGetValue("MEP" + bank.Substring(3), out slot)) return slot;
+            return -1;
         }
 
         /// <summary>Raw ADPCM body, for users who want to edit or re-inject the exact

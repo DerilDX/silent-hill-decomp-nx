@@ -326,21 +326,6 @@ void MapEvent_CutsceneOpening(void) // 0x0x800D9748
         vcChangeProjectionValue(Dms_CameraTargetGet(&g_Cutscene_CameraPositionTarget, &g_Cutscene_CameraLookAtTarget, NULL, g_Cutscene_Timer, (s_DmsHeader*)FS_BUFFER_16));
         vcUserCamTarget(&g_Cutscene_CameraPositionTarget, NULL, true);
         vcUserWatchTarget(&g_Cutscene_CameraLookAtTarget, NULL, true);
-        #ifdef SH_PC_PORT
-        {
-            static s32 _dmsDbg = 0;
-            if ((_dmsDbg++ % 60) == 0) {
-                printf("[DMS] t=%d cam=(%d,%d,%d) look=(%d,%d,%d) hero=(%d,%d,%d)\n",
-                       g_Cutscene_Timer,
-                       g_Cutscene_CameraPositionTarget.vx, g_Cutscene_CameraPositionTarget.vy, g_Cutscene_CameraPositionTarget.vz,
-                       g_Cutscene_CameraLookAtTarget.vx, g_Cutscene_CameraLookAtTarget.vy, g_Cutscene_CameraLookAtTarget.vz,
-                       g_SysWork.playerWork.player.position.vx,
-                       g_SysWork.playerWork.player.position.vy,
-                       g_SysWork.playerWork.player.position.vz);
-                fflush(stdout);
-            }
-        }
-        #endif
     }
 }
 

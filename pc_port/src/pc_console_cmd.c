@@ -15,11 +15,29 @@
  *   FMV                  - list all FMV names (numbered)
  *   FMV <name|number>    - play an FMV (fades out, plays, fades back in)
  *   FMV INTROn / ENDn    - alias for the nth intro (C*) / ending (Z*) movie
+ *   (console open) left-click the scene to select a character,
+ *                  hold TAB to hide the panel and click through it,
+ *                  right-click to deselect
+ *   SELECT [clear|player|nearest] - show / clear / set the selection
+ *   SCALE <f>            - resize the selected character (0.05..20)
+ *   HEALTH [n] / HEAL    - show/set or refill the selection's health
+ *                          (Harry when nothing is selected)
+ *   INFO                 - name, health, position and state of the selection
+ *   GOTO / BRING         - Harry to the selection / the selected enemy to Harry
+ *   FREEZE [0|1|ALL|NONE] - hold enemies still (UNFREEZE = FREEZE 0)
+ *   AFKEGG                  - trigger the Dark Harry easter egg now (debug)
+ *   NOCOL / NOCOLLIDE [0|1] - phase the selection (player if none) out of
+ *                             collision except the ground
+ *   BIND <key> <cmds>    - run one or more console commands from a key;
+ *                          BIND LIST / UNBIND <key> / UNBINDALL
+ *   ABOUT                - PC port credits (same block the staff roll appends)
+ *   PCCREDITS [0|1]      - toggle that block in the staff roll (persists)
  *   LOGA / LOGB          - stamp an incremental A#/B# position mark
  *                          (Harry + camera pos/angles) into SilentHill.log;
  *                          LOGA RESET / LOGB RESET restarts the counter
  */
 #include "game.h"
+#include "pc_mod_registry.h"
 #include "bodyprog/bodyprog.h"
 #include "bodyprog/game_boot/game_boot.h"
 #include "bodyprog/game_boot/fs_chara_anim.h" /* g_CharaModelAnimsData (spawn anim-ready gate) */
@@ -37,18 +55,26 @@
 #include "map_registry.h"
 #include "dbg_overlay.h"
 #include "pc_config.h"
+#include "pc_title_style.h"
+#include "pc_credits.h"
+#include "pc_pick.h"
+#include "pc_binds.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 /* fmv_player.cpp */
 extern int         FMV_Play(int file_idx, int max_frames);
 extern int         FMV_GetCount(void);
 extern const char* FMV_GetName(int tableIdx);
 extern int         FMV_GetFileIdx(int tableIdx);
+
+/* game_main.c */
+extern int g_PcFmvClockDiscard;
 
 /* Same toggle as debug key 0: player_control.c skips Collision_WallDetect and
  * substitutes the floor surface directly, so Harry keeps walking on ground. */
@@ -471,11 +497,17 @@ static const char* const HELP_LINES[] = {
     " getflags       show ending flags",
     " setending <e>  bad | bad+ | good | good+",
     " setflag <n> 0|1  set any event flag",
-    " kill           kill Harry (death animation)",
+    " kill           kill the selection, or Harry if nothing is selected",
     " killall        kill all nearby enemies",
     " spawn list     list monsters loaded in this map",
     " spawn <name>   spawn a monster in front of Harry",
     " noclip         walk through walls (floor stays on)",
+    " infammo [0|1]  fire without spending ammo (no reloads)",
+    " notarget [0|1]  enemies ignore Harry",
+    " freecam [0|1]  free camera (mouse look, WASD, Space/C)",
+    " collvis [0|1]  collision visualizer panel",
+    " fastforward [0|1] / ff   speed the game up",
+    " wireframe [0|1] / notex [0|1]   render debug",
     " god [0|1]      toggle/set damage immunity for Harry",
     " invaspect 0|1  inventory item proportions: PSX | square",
     " invscale <pct> inventory item vertical scale (def 125)",
@@ -484,8 +516,21 @@ static const char* const HELP_LINES[] = {
     " invdim <pct>   off-center carousel dim strength",
     " fmv            list movies (numbered)",
     " fmv <name|#>   play a movie (also intro1-2, end1-5)",
-    " kf [n]         keyframe inspector: set/show frame (K key)",
+    " kf [n]         keyframe viewer: toggle, or view frame n",
     " playas [name]  play as another character (bare = list)",
+    " minimapnomap [0|1]  minimap before the map is found: 0 hide, 1 empty panel",
+    " bind <key> <cmd>[;<cmd>...]  run console commands from a key",
+    " bind list / unbind <key> / unbindall",
+    " select [clear|player|nearest]  show/clear/set the selection",
+    " (hold TAB to hide the console and click through it)",
+    " scale <f>      resize the selected character (click one first)",
+    " health [n] / heal   show/set or refill the selection's health",
+    " info           name, health, position, state of the selection",
+    " goto           move Harry next to the selected enemy or prop",
+    " bring          move the selected enemy in front of Harry",
+    " freeze [0|1]   hold the selected enemy still (freeze all/none)",
+    " about          PC port credits",
+    " pccredits [0|1]  PC port credits block in the staff roll",
     " loga / logb    log Harry+camera pos/angles to SilentHill.log",
     "Quick Save: F6   Quick Load: F8 (work outside console)",
 };
@@ -523,38 +568,27 @@ int g_PsxBarOuter = 112;
 int g_PsxBarInner = 96;
 
 static const char* const DEBUG_PAGE1[] = {
-    "Debug keys (page 1/2) - cheats & tools:",
+    "Debug keys (page 1/2) - what is left on the keyboard:",
     " Esc     warm reset to the title screen",
-    " 0       noclip toggle (walk through walls)",
-    " 4 / 5   map config prev / next (loads on New Game)",
-    " 6       kill nearby enemies",
-    " 7       invincibility toggle",
-    " 8       +15 handgun bullets",
-    " 9       no-target toggle (enemies ignore Harry)",
-    " -       give Hunting Rifle + 30 shells (not in K view)",
-    " =       give Shotgun + 30 shells (not in K view)",
-    " '       collision visualizer panel",
-    " K       keyframe inspector; , . scrub (hold = faster)",
-    " - / =   in K view: cycle play-as character",
-    " [ / ]   drop A/B position markers into the log",
+    " , .     keyframe scrub while the viewer is on (hold = faster)",
+    " [ / ]   graphics effect intensity down / up (key_gfx_prev/next)",
     " ~       console open/close (game pauses; PgUp/PgDn scroll)",
+    " TAB     with the console open: hide the panel, keep the cursor",
+    "The cheat/tool keys moved to F10 Quick Options > Cheats and",
+    "Debug: noclip, god, no-target, ammo/rifle/shotgun, kill nearby,",
+    "collision visualizer, keyframe viewer, play as, starting map.",
     "type DEBUG 2 for the camera keys",
 };
-
 static const char* const DEBUG_PAGE2[] = {
     "Debug keys (page 2/2) - camera:",
-    " Num *        free debug camera on/off",
-    " Num 2        third-person chase cam (mouse look)",
-    " Num 8/5/4/6  fly forward / back / strafe left / right",
-    " Num 7 / 9    turn left / right",
-    " Num + / -    tilt up / down",
-    " PgUp / PgDn  move up / down",
-    " Num /        print camera coordinates to the log",
-    " (with debug cam OFF the same numpad keys nudge the",
-    "  normal game camera - live camera tuning aid)",
-    " Num 3        reset cam nudge / in-game rescue teleport",
-    " Num 0        raw cam mode (zero all nudges)",
-    " Num .        log Harry position (+fog toggle in cam)",
+    " Num *        free camera on/off (also a Quick Options row)",
+    " Free camera: mouse look, W/A/S/D move, Space/C up/down,",
+    "              Shift fast, Ctrl slow. Fog starts off so the",
+    "              world is visible outdoors; Num . toggles it.",
+    " Num .        log Harry position (+ fog toggle in free cam)",
+    " Num 3        rescue teleport after falling through a floor",
+    "The old camera-nudge keys are gone; FPS eye tuning moved to",
+    "Quick Options > View (Head X/Y/Z).",
 };
 
 static void push_lines(const char* const* lines, int count)
@@ -580,6 +614,7 @@ void Pc_ConsoleFmvUpdate(void)
     fileIdx             = s_pendingFmvFileIdx;
     s_pendingFmvFileIdx = -1;
     FMV_Play(fileIdx, 0);
+    g_PcFmvClockDiscard = 1;
     ScreenFade_Start(true, true, false);
 }
 
@@ -739,6 +774,34 @@ static int spawn_chara_anim_ready(s32 charaId)
     s8 idx = g_CharaAnimDataIdxs[charaId];
     return idx != (s8)NO_VALUE &&
            g_CharaModelAnimsData[idx].activeAnmHdr != NULL;
+}
+
+static void cmd_spawn(const char* arg);
+
+/* Quick options > Debug "Spawn" row: browse SPAWN_CHARAS and fire cmd_spawn
+ * for the pick, so the row and the console command are one code path. */
+int Pc_SpawnList_Count(void)
+{
+    return (int)(sizeof(SPAWN_CHARAS) / sizeof(SPAWN_CHARAS[0]));
+}
+
+const char* Pc_SpawnList_Name(int i)
+{
+    if (i < 0 || i >= Pc_SpawnList_Count()) return "";
+    return SPAWN_CHARAS[i].name;
+}
+
+int Pc_SpawnList_Ready(int i)
+{
+    if (i < 0 || i >= Pc_SpawnList_Count()) return 0;
+    return spawn_chara_model_ready(SPAWN_CHARAS[i].charaId) &&
+           spawn_chara_anim_ready(SPAWN_CHARAS[i].charaId);
+}
+
+void Pc_SpawnList_Spawn(int i)
+{
+    if (i < 0 || i >= Pc_SpawnList_Count()) return;
+    cmd_spawn(SPAWN_CHARAS[i].name);
 }
 
 static void cmd_spawn(const char* arg)
@@ -996,6 +1059,356 @@ static void cmd_logmark(char letter, const char* arg)
             (int)vcWork.cam_mat_ang.vx, (int)vcWork.cam_mat_ang.vy);
 }
 
+/* pc_pick.c labels a picked NPC with the name SPAWN uses for it. */
+const char* Pc_Console_CharaName(s32 charaId)
+{
+    return spawn_chara_name(charaId);
+}
+
+static void cmd_select(const char* arg)
+{
+    char what[64];
+
+    if (strcmp(arg, "CLEAR") == 0 || strcmp(arg, "NONE") == 0) {
+        Pc_Pick_Clear(1);
+        return;
+    }
+    if (strcmp(arg, "PLAYER") == 0) {
+        Pc_Pick_SelectPlayer();
+    } else if (strcmp(arg, "NEAREST") == 0 || strcmp(arg, "NEAR") == 0) {
+        int slot = Pc_Pick_NearestNpc();
+        if (slot < 0 || !Pc_Pick_SelectNpc(slot)) {
+            cprintf("select: no live enemy in this room");
+            return;
+        }
+    }
+
+    if (Pc_Pick_Kind() == PcPick_None) {
+        cprintf("nothing selected - left-click a character in the scene");
+        return;
+    }
+
+    Pc_Pick_Describe(what, sizeof(what));
+    cprintf("selected %s  scale %.2f", what, Pc_Pick_GetScale() / 4096.0f);
+}
+
+static void cmd_nocol(const char* arg)
+{
+    char what[64];
+    int  on;
+
+    /* Primarily a player cheat, so a bare NOCOL with nothing clicked means
+     * Harry rather than an error. */
+    if (Pc_Pick_Kind() == PcPick_None)
+        Pc_Pick_SelectPlayer();
+
+    on = (arg[0] == '1') ? 1 :
+         (arg[0] == '0') ? 0 : !Pc_Pick_GetNoCollide();
+
+    if (!Pc_Pick_SetNoCollide(on)) {
+        cprintf("nocollide: select a character first (props have no character collision)");
+        return;
+    }
+
+    Pc_Pick_Describe(what, sizeof(what));
+    cprintf("%s nocollide %s%s", what, on ? "ON" : "off",
+            on ? " - walls, characters and attacks pass through; the ground still holds"
+               : "");
+}
+
+static void cmd_scale(const char* arg)
+{
+    char what[64];
+
+    if (Pc_Pick_Kind() == PcPick_None) {
+        cprintf("scale: nothing selected - left-click a character in the scene first");
+        return;
+    }
+
+    if (arg[0] != '\0') {
+        double v = atof(arg);
+        Pc_Pick_SetScale((int)(v * 4096.0));
+    }
+
+    Pc_Pick_Describe(what, sizeof(what));
+    cprintf("%s scale %.2f (0.05..20; collision and hitboxes are not scaled)",
+            what, Pc_Pick_GetScale() / 4096.0f);
+}
+
+/* HEALTH / HEAL / INFO / GOTO / BRING / FREEZE act on the click selection.
+ * HEALTH, HEAL and INFO fall back to Harry with nothing selected, like KILL. */
+static s_SubCharacter* sel_chara(char* what, int whatSize)
+{
+    s_SubCharacter* npc;
+
+    switch (Pc_Pick_Kind()) {
+        case PcPick_Npc:
+            npc = (s_SubCharacter*)Pc_Pick_SelectedNpc();
+            if (npc == NULL) {
+                Pc_Pick_Clear(0);
+                break;
+            }
+            Pc_Pick_Describe(what, whatSize);
+            return npc;
+        case PcPick_Prop:
+            return NULL;
+        default:
+            break;
+    }
+    snprintf(what, whatSize, "Harry");
+    return &g_SysWork.playerWork.player;
+}
+
+static void cmd_health(const char* arg, int heal)
+{
+    char            what[64];
+    s_SubCharacter* ch;
+    int             isHarry;
+    int             slot = Pc_Pick_Slot();
+
+    if (Pc_Pick_Kind() == PcPick_Prop) {
+        cprintf("%s: props have no health", heal ? "heal" : "health");
+        return;
+    }
+    ch      = sel_chara(what, sizeof(what));
+    isHarry = (ch == &g_SysWork.playerWork.player);
+
+    if (ch->health <= Q12(0.0f) && (heal || arg[0])) {
+        cprintf("%s is dead", what);
+        return;
+    }
+
+    if (heal) {
+        s32 full = isHarry ? Q12(100.0f) : Pc_Pick_NpcMaxHealth(slot);
+        if (full <= Q12(0.0f)) {
+            cprintf("heal: %s's full health is not known yet", what);
+            return;
+        }
+        ch->health = full;
+    } else if (arg[0]) {
+        double v = atof(arg);
+        if (v <= 0.0) {
+            cprintf("health: use a value above 0 (or 'kill')");
+            return;
+        }
+        if (isHarry && v > 100.0)
+            v = 100.0;
+        ch->health = (s32)(v * 4096.0);
+    }
+
+    if (isHarry)
+        cprintf("%s health %.1f / 100", what, ch->health / 4096.0f);
+    else
+        cprintf("%s health %.1f (full %.1f)", what, ch->health / 4096.0f,
+                Pc_Pick_NpcMaxHealth(slot) / 4096.0f);
+}
+
+static void cmd_info(void)
+{
+    char            what[64];
+    s_SubCharacter* ch;
+    int             slot = Pc_Pick_Slot();
+
+    if (Pc_Pick_Kind() == PcPick_Prop) {
+        int x, y, z;
+        Pc_Pick_Describe(what, sizeof(what));
+        Pc_Pick_PropPosition(&x, &y, &z);
+        cprintf("%s", what);
+        cprintf(" pos %.2f %.2f %.2f  scale %.2f", x / 4096.0f, y / 4096.0f, z / 4096.0f,
+                Pc_Pick_GetScale() / 4096.0f);
+        return;
+    }
+
+    ch = sel_chara(what, sizeof(what));
+    cprintf("%s  charaId %d", what, (int)ch->model.charaId);
+    cprintf(" health %.1f  pos %.2f %.2f %.2f  facing %d deg",
+            ch->health / 4096.0f, ch->position.vx / 4096.0f, ch->position.vy / 4096.0f,
+            ch->position.vz / 4096.0f, (int)(((ch->rotation.vy & 0xFFF) * 360) >> 12));
+    if (ch == &g_SysWork.playerWork.player)
+        cprintf(" scale %.2f", Pc_Pick_GetScale() / 4096.0f);
+    else
+        cprintf(" scale %.2f  state %d/%d%s", Pc_Pick_GetScale() / 4096.0f,
+                (int)ch->model.controlState, (int)ch->model.stateStep,
+                Pc_Pick_IsFrozen(slot) ? "  FROZEN" : "");
+}
+
+static void cmd_goto(void)
+{
+    char            what[64];
+    s_SubCharacter* hr = &g_SysWork.playerWork.player;
+    s_CollisionSurface surf;
+    s32             tx, tz, dx, dz, dist, gap;
+
+    if (Pc_Pick_Kind() == PcPick_Npc) {
+        s_SubCharacter* npc = sel_chara(what, sizeof(what));
+        if (npc == hr) {
+            cprintf("goto: the selection is gone - select again");
+            return;
+        }
+        tx = npc->position.vx;
+        tz = npc->position.vz;
+    } else if (Pc_Pick_Kind() == PcPick_Prop) {
+        int x, y, z;
+        Pc_Pick_Describe(what, sizeof(what));
+        Pc_Pick_PropPosition(&x, &y, &z);
+        tx = x;
+        tz = z;
+    } else {
+        cprintf("goto: select an enemy or prop first");
+        return;
+    }
+
+    /* Land a little short of it on Harry's side, facing it, so he does not
+     * spawn inside its body or a prop's mesh. */
+    dx   = hr->position.vx - tx;
+    dz   = hr->position.vz - tz;
+    dist = (s32)sqrt((double)dx * dx + (double)dz * dz);
+    gap  = Q12(1.2f);
+    if (dist > 0) {
+        tx += (s32)(((s64)dx * gap) / dist);
+        tz += (s32)(((s64)dz * gap) / dist);
+    } else {
+        tz -= gap;
+    }
+
+    Collision_SurfaceGet(&surf, tx, tz);
+    hr->position.vx                          = tx;
+    hr->position.vz                          = tz;
+    hr->position.vy                          = surf.groundHeight;
+    hr->properties.player.groundHeight       = surf.groundHeight;
+    hr->fallSpeed                            = 0;
+    hr->rotation.vy = (s16)(ratan2(-dx, -dz) & 0xFFF);
+    cprintf("Harry moved to %s", what);
+}
+
+static void cmd_bring(void)
+{
+    char            what[64];
+    s_SubCharacter* hr = &g_SysWork.playerWork.player;
+    s_SubCharacter* npc;
+    s_CollisionSurface surf;
+    s32             yaw = hr->rotation.vy;
+    s32             dist = Q12(2.0f);
+    s32             x, z;
+
+    if (Pc_Pick_Kind() == PcPick_Prop) {
+        cprintf("bring: props cannot be moved");
+        return;
+    }
+    if (Pc_Pick_Kind() != PcPick_Npc) {
+        cprintf("bring: select an enemy first");
+        return;
+    }
+    npc = sel_chara(what, sizeof(what));
+    if (npc == hr) {
+        cprintf("bring: the selection is gone - select again");
+        return;
+    }
+    /* A frozen NPC is not re-posed, so it would keep drawing where it was. */
+    if (Pc_Pick_IsFrozen(Pc_Pick_Slot())) {
+        cprintf("bring: %s is frozen - 'freeze 0' first", what);
+        return;
+    }
+
+    x = hr->position.vx + (s32)(((s64)dist * Math_Sin(yaw)) >> 12);
+    z = hr->position.vz + (s32)(((s64)dist * Math_Cos(yaw)) >> 12);
+    Collision_SurfaceGet(&surf, x, z);
+    npc->position.vx = x;
+    npc->position.vz = z;
+    npc->position.vy = surf.groundHeight;
+    npc->rotation.vy = (s16)((yaw + 0x800) & 0xFFF);
+    cprintf("brought %s in front of Harry", what);
+}
+
+static void cmd_freeze(const char* arg)
+{
+    char what[64];
+    int  i, n = 0;
+
+    if (strcmp(arg, "ALL") == 0 || strcmp(arg, "NONE") == 0) {
+        int on = (arg[0] == 'A');
+        for (i = 0; i < NPC_COUNT_MAX; i++) {
+            s_SubCharacter* npc = &g_SysWork.npcs[i];
+            if (npc->model.charaId == Chara_None || npc->model.charaId == Chara_Harry)
+                continue;
+            if (Pc_Pick_SetFrozen(i, on))
+                n++;
+        }
+        cprintf("%s %d characters", on ? "froze" : "unfroze", n);
+        return;
+    }
+
+    if (Pc_Pick_Kind() != PcPick_Npc) {
+        cprintf("freeze: select an enemy first (or 'freeze all' / 'freeze none')");
+        return;
+    }
+    if (sel_chara(what, sizeof(what)) == &g_SysWork.playerWork.player) {
+        cprintf("freeze: the selection is gone - select again");
+        return;
+    }
+
+    {
+        int slot = Pc_Pick_Slot();
+        int on   = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !Pc_Pick_IsFrozen(slot);
+        Pc_Pick_SetFrozen(slot, on);
+        cprintf("%s %s", what, on ? "frozen" : "unfrozen");
+    }
+}
+
+/* The staff-roll block, read straight off the same table pc_credits.c encodes
+ * for the roll, so the two can never drift apart. */
+static void cmd_about(void)
+{
+    int rows    = PcCredits_RowCount();
+    int emitted = 0;
+    int gap     = 0;
+    int i;
+
+    {
+        #include "sh_build_info.h"
+        cprintf("Silent Hill - Native PC Port (build %s)", SH_BUILD_GIT_HASH);
+    }
+    DbgOverlay_PushLine("");
+
+    for (i = 0; i < rows; i++) {
+        const s_PcCreditRow* row = PcCredits_Row(i);
+        if (row == NULL)
+            continue;
+        if (row->kind == PcCreditRow_Blank) {
+            gap = emitted;
+            continue;
+        }
+        if (gap) {
+            DbgOverlay_PushLine("");
+            gap = 0;
+        }
+        switch (row->kind) {
+            case PcCreditRow_Header: cprintf("%s", row->left); break;
+            case PcCreditRow_Pair:   cprintf("  %-20s %s", row->left, row->right); break;
+            default:                 cprintf("  %s", row->left); break;
+        }
+        emitted = 1;
+    }
+
+    if (!emitted)
+        cprintf("no PC port credits defined");
+}
+
+/* Console args are passed through as typed, so word arguments compare without
+ * regard to case. */
+static int StrCaseEq(const char* a, const char* b)
+{
+    for (; *a != '\0' && *b != '\0'; a++, b++)
+    {
+        int ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
+        int cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
+
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
+}
+
 void Pc_ConsoleExec(const char* line)
 {
     char cmd[48];
@@ -1022,6 +1435,13 @@ void Pc_ConsoleExec(const char* line)
                 push_lines(HELP_GIVE_PAGE1, (int)(sizeof(HELP_GIVE_PAGE1) / sizeof(HELP_GIVE_PAGE1[0])));
         } else {
             push_lines(HELP_LINES, (int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0])));
+            {
+                const char* mn; const char* mh; int k = 0;
+                if (Pc_ModConsole_List(&mn, &mh, 0))
+                    DbgOverlay_PushLine("-- mod commands --");
+                while (Pc_ModConsole_List(&mn, &mh, k++))
+                    cprintf(" %s%s%s", mn, (mh && mh[0]) ? " - " : "", (mh && mh[0]) ? mh : "");
+            }
         }
     } else if (strcmp(cmd, "GETFLAGS") == 0) {
         cmd_getflags();
@@ -1038,6 +1458,51 @@ void Pc_ConsoleExec(const char* line)
             push_lines(DEBUG_PAGE1, (int)(sizeof(DEBUG_PAGE1) / sizeof(DEBUG_PAGE1[0])));
     } else if (strcmp(cmd, "AMBSFX") == 0) {
         cmd_ambsfx(arg);
+    } else if (strcmp(cmd, "BIND") == 0) {
+        PcBinds_CmdBind(arg);
+    } else if (strcmp(cmd, "UNBIND") == 0) {
+        PcBinds_CmdUnbind(arg);
+    } else if (strcmp(cmd, "UNBINDALL") == 0) {
+        PcBinds_CmdUnbindAll();
+    } else if (strcmp(cmd, "SELECT") == 0 || strcmp(cmd, "SEL") == 0) {
+        cmd_select(arg);
+    } else if (strcmp(cmd, "SCALE") == 0) {
+        cmd_scale(arg);
+    } else if (strcmp(cmd, "AFKEGG") == 0) {
+        /* Debug trigger for the Dark Harry easter egg (pc_dark_harry.c), so it
+         * can be tested without standing still for five minutes. */
+        extern const char* Pc_DarkHarry_Spawn(void);
+        const char* why = Pc_DarkHarry_Spawn();
+        if (why == NULL) {
+            cprintf("afkegg: he is here");
+        } else {
+            cprintf("afkegg: refused - %s", why);
+        }
+    } else if (strcmp(cmd, "NOCOL") == 0 || strcmp(cmd, "NOCOLLIDE") == 0) {
+        cmd_nocol(arg);
+    } else if (strcmp(cmd, "HEALTH") == 0 || strcmp(cmd, "HP") == 0) {
+        cmd_health(arg, 0);
+    } else if (strcmp(cmd, "HEAL") == 0) {
+        cmd_health(arg, 1);
+    } else if (strcmp(cmd, "INFO") == 0) {
+        cmd_info();
+    } else if (strcmp(cmd, "GOTO") == 0) {
+        cmd_goto();
+    } else if (strcmp(cmd, "BRING") == 0) {
+        cmd_bring();
+    } else if (strcmp(cmd, "FREEZE") == 0) {
+        cmd_freeze(arg);
+    } else if (strcmp(cmd, "UNFREEZE") == 0) {
+        cmd_freeze((arg[0] == '\0') ? "0" : (strcmp(arg, "ALL") == 0) ? "NONE" : arg);
+    } else if (strcmp(cmd, "ABOUT") == 0 || strcmp(cmd, "CREDITS") == 0) {
+        cmd_about();
+    } else if (strcmp(cmd, "PCCREDITS") == 0) {
+        int on = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_PcConfig.pcPortCredits;
+        g_PcConfig.pcPortCredits = on;
+        PcConfig_SaveKeyValue("pc_port_credits", on ? "1" : "0");
+        PcCredits_Begin(); /* rebuild now so a roll started later picks it up */
+        cprintf("PC port credits in the staff roll %s%s", on ? "ON" : "OFF",
+                on ? "" : " (vanilla roll)");
     } else if (strcmp(cmd, "LOGA") == 0) {
         cmd_logmark('A', arg);
     } else if (strcmp(cmd, "LOGB") == 0) {
@@ -1049,8 +1514,33 @@ void Pc_ConsoleExec(const char* line)
     } else if (strcmp(cmd, "GIVEMAP") == 0) {
         cmd_givemap(arg);
     } else if (strcmp(cmd, "KILL") == 0) {
-        g_SysWork.playerWork.player.health = -Q12(1.0f);
-        cprintf("killed Harry");
+        /* Acts on the click selection when there is one, so the same command
+         * kills whatever you picked; with nothing selected it still kills
+         * Harry, which is what it always did. */
+        if (Pc_Pick_Kind() == PcPick_Npc) {
+            char what[64];
+            s_SubCharacter* npc = &g_SysWork.npcs[Pc_Pick_Slot()];
+            Pc_Pick_Describe(what, sizeof(what));
+            if (npc->health <= Q12(0.0f)) {
+                cprintf("%s is already dead", what);
+            } else {
+                /* Lethal damage rather than health = 0: each enemy applies
+                 * damage.amount itself and then runs its own death path, so
+                 * the kill routes through the real cleanup for every type. */
+                npc->damage.amount = Q12(99999.0f);
+                /* The damage is applied by the enemy's own AI tick, which a
+                 * frozen enemy skips. */
+                Pc_Pick_SetFrozen(Pc_Pick_Slot(), 0);
+                cprintf("killed %s", what);
+            }
+        } else if (Pc_Pick_Kind() == PcPick_Prop) {
+            char what[64];
+            Pc_Pick_Describe(what, sizeof(what));
+            cprintf("%s cannot be killed (select an enemy, or nothing for Harry)", what);
+        } else {
+            g_SysWork.playerWork.player.health = -Q12(1.0f);
+            cprintf("killed Harry");
+        }
     } else if (strcmp(cmd, "KILLALL") == 0) {
         s_SubCharacter* hr   = &g_SysWork.playerWork.player;
         int             killed = 0;
@@ -1066,6 +1556,7 @@ void Pc_ConsoleExec(const char* line)
                 continue;
             }
             npc->damage.amount = Q12(99999.0f);
+            Pc_Pick_SetFrozen(i, 0);
             killed++;
         }
         cprintf("killed %d nearby enemies", killed);
@@ -1077,6 +1568,81 @@ void Pc_ConsoleExec(const char* line)
         else if (arg[0] == '0') g_PcUnlimitedEnemies = 0;
         else g_PcUnlimitedEnemies = !g_PcUnlimitedEnemies;
         cprintf("unlimited enemies %s (cap now %d)", g_PcUnlimitedEnemies ? "ON" : "OFF", NPC_COUNT_MAX);
+    } else if (strcmp(cmd, "LANGCHECK") == 0) {
+        /* Every layer of the current language in one place. The layers
+         * install independently, so "the menus are translated" is no
+         * evidence that the story text is. */
+        Pc_LangSelfCheck(cprintf);
+    } else if (strcmp(cmd, "MENUSTYLE") == 0) {
+        /* Three main menus, and no disc carries all three: us is a full
+         * picture, pal composes black + logo + fog, japanese has its own
+         * stylized logo. The port ships the two a disc can lack. */
+        static const char* const names[3] = { "US", "PAL", "JAPANESE" };
+        int was = g_PcConfig.menuStyle;
+        int now;
+
+        if (StrCaseEq(arg, "auto"))
+            g_PcConfig.menuStyle = TITLE_STYLE_AUTO;
+        else if (StrCaseEq(arg, "us") || StrCaseEq(arg, "western") || StrCaseEq(arg, "ntsc"))
+            g_PcConfig.menuStyle = TITLE_STYLE_US;
+        else if (StrCaseEq(arg, "pal") || StrCaseEq(arg, "eur"))
+            g_PcConfig.menuStyle = TITLE_STYLE_PAL;
+        else if (StrCaseEq(arg, "japanese") || StrCaseEq(arg, "jp") || StrCaseEq(arg, "ntscj"))
+            g_PcConfig.menuStyle = TITLE_STYLE_JP;
+        else if (arg[0] != '\0') {
+            cprintf("usage: MENUSTYLE auto|us|pal|japanese");
+            return;
+        } else {
+            /* No argument: step auto -> us -> pal -> japanese -> auto. */
+            g_PcConfig.menuStyle = (was < TITLE_STYLE_US || was >= TITLE_STYLE_JP)
+                                       ? (was < TITLE_STYLE_US ? TITLE_STYLE_US : TITLE_STYLE_AUTO)
+                                       : was + 1;
+        }
+
+        PcConfig_SaveKeyValue("menu_style",
+                              g_PcConfig.menuStyle == TITLE_STYLE_US  ? "us" :
+                              g_PcConfig.menuStyle == TITLE_STYLE_PAL ? "pal" :
+                              g_PcConfig.menuStyle == TITLE_STYLE_JP  ? "japanese" : "auto");
+        now = Pc_TitleStyle();
+        if (g_PcConfig.menuStyle == TITLE_STYLE_AUTO)
+            cprintf("menu style AUTO - this disc's own, %s", names[now]);
+        else
+            cprintf("menu style %s", names[now]);
+        if (was != g_PcConfig.menuStyle && !Pc_TitleStyleApply())
+            cprintf("  shows next time the title screen is up");
+    } else if (strcmp(cmd, "INFAMMO") == 0 || strcmp(cmd, "INFINITEAMMO") == 0) {
+        extern int g_PcInfiniteAmmo;
+        g_PcInfiniteAmmo = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_PcInfiniteAmmo;
+        cprintf("infinite ammo %s%s", g_PcInfiniteAmmo ? "ON" : "OFF",
+                g_PcInfiniteAmmo ? " (guns you own fire without spending rounds)" : "");
+    } else if (strcmp(cmd, "NOTARGET") == 0) {
+        extern int g_DebugNoTarget;
+        g_DebugNoTarget = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_DebugNoTarget;
+        cprintf("enemies ignore Harry %s", g_DebugNoTarget ? "ON" : "OFF");
+    } else if (strcmp(cmd, "FREECAM") == 0) {
+        extern void Pc_FreeCam_Set(int on);
+        extern int  g_DebugCamEnabled;
+        int on = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_DebugCamEnabled;
+        Pc_FreeCam_Set(on);
+        cprintf("free camera %s%s", g_DebugCamEnabled ? "ON" : "OFF",
+                g_DebugCamEnabled ? " - mouse look, WASD, Space/C, Shift fast" : "");
+    } else if (strcmp(cmd, "COLLVIS") == 0) {
+        extern int g_CollVisEnabled;
+        g_CollVisEnabled = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_CollVisEnabled;
+        cprintf("collision visualizer %s", g_CollVisEnabled ? "ON" : "OFF");
+    } else if (strcmp(cmd, "FASTFORWARD") == 0 || strcmp(cmd, "FF") == 0) {
+        /* The sticky flag the Quick Options row drives, not the Ctrl+F5 hold. */
+        extern int g_PcFastForward;
+        g_PcFastForward = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_PcFastForward;
+        cprintf("fast forward %s", g_PcFastForward ? "ON" : "OFF");
+    } else if (strcmp(cmd, "WIREFRAME") == 0) {
+        extern int g_dbg_wireframeMode;
+        g_dbg_wireframeMode = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_dbg_wireframeMode;
+        cprintf("wireframe %s", g_dbg_wireframeMode ? "ON" : "OFF");
+    } else if (strcmp(cmd, "NOTEX") == 0) {
+        extern int g_dbg_texturelessMode;
+        g_dbg_texturelessMode = (arg[0] == '1') ? 1 : (arg[0] == '0') ? 0 : !g_dbg_texturelessMode;
+        cprintf("textures %s", g_dbg_texturelessMode ? "OFF" : "ON");
     } else if (strcmp(cmd, "NOCLIP") == 0) {
         g_DebugNoWallCollision = !g_DebugNoWallCollision;
         cprintf("noclip %s", g_DebugNoWallCollision ? "ON" : "OFF");
@@ -1111,6 +1677,36 @@ void Pc_ConsoleExec(const char* line)
         int v = atoi(arg);
         if (v >= 0 && v <= 100) g_PcInvDimStrength = v;
         cprintf("off-center carousel dim: %d%%", g_PcInvDimStrength);
+    } else if (strcmp(cmd, "BIGHEAD") == 0) {
+        extern int g_PcBigHead;
+        if (arg[0]) g_PcBigHead = atoi(arg) ? 1 : 0;
+        cprintf("big head mode: %s", g_PcBigHead ? "ON" : "OFF");
+    } else if (strcmp(cmd, "CROSSHAIRSIZE") == 0) {
+        if (arg[0]) {
+            float v = (float)atof(arg);
+            if (v < 25.0f) v = 25.0f;
+            if (v > 125.0f) v = 125.0f;
+            g_PcConfig.crosshairSize = v;
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", (int)(v + 0.5f));
+                PcConfig_SaveKeyValue("crosshair_size", buf);
+            }
+        }
+        cprintf("crosshair size: %d%% (25..125)", (int)(g_PcConfig.crosshairSize + 0.5f));
+    } else if (strcmp(cmd, "TEXTSIZE") == 0) {
+        if (arg[0]) {
+            float v = (float)atof(arg);
+            if (v < 100.0f) v = 100.0f;
+            if (v > 150.0f) v = 150.0f;
+            g_PcConfig.textSize = v;
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", (int)(v + 0.5f));
+                PcConfig_SaveKeyValue("text_size", buf);
+            }
+        }
+        cprintf("text size: %d%% (100..150, subtitles and messages)", (int)(g_PcConfig.textSize + 0.5f));
     } else if (strcmp(cmd, "OBST") == 0) {
         extern int g_PcObstacleCollision;
         if (arg[0]) g_PcObstacleCollision = atoi(arg) ? 1 : 0;
@@ -1126,17 +1722,153 @@ void Pc_ConsoleExec(const char* line)
     } else if (strcmp(cmd, "VFOV") == 0) {
         extern float g_PsxWorldVScale;
         if (arg[0]) g_PsxWorldVScale = (float)atof(arg);
-        cprintf("world vertical FOV scale: %.3f (1.0=off; ~0.872 matches DuckStation)", g_PsxWorldVScale);
+        cprintf("world vertical FOV scale: %.3f (1.0=off; vertical crop/zoom of the world)", g_PsxWorldVScale);
+    } else if (strcmp(cmd, "CUTFOV") == 0) {
+        /* EXPLICIT cutscene vertical scale override; 0 (default) = cutscenes
+         * follow the gameplay vfov crop. Defaulting this to 1.0 once shipped a
+         * squished-cutscene release -- it is a live-tuning knob only. */
+        extern float g_PsxCutsceneVScale;
+        if (arg[0]) g_PsxCutsceneVScale = (float)atof(arg);
+        cprintf("cutscene vscale override: %.3f (0=follow vfov, the default)", g_PsxCutsceneVScale);
     } else if (strcmp(cmd, "HFOV") == 0) {
         /* 3D-world horizontal scale (Hor+ only). 1.0 = current behaviour; >1 = wider
          * models, <1 = narrower. Pure tuning/preference knob, default neutral. */
         extern float g_PsxWorldHScale;
         if (arg[0]) g_PsxWorldHScale = (float)atof(arg);
-        cprintf("world horizontal scale: %.3f (1.0=off; >1 wider models, <1 narrower)", g_PsxWorldHScale);
+        cprintf("world horizontal scale: %.3f (1.0=off; >1 wider models, <1 narrower; all 3D modes)", g_PsxWorldHScale);
+    } else if (strcmp(cmd, "VCROPANCHOR") == 0) {
+        /* Where the vfov crop sits: 0 = keep the top rows (default, today's
+         * framing), 0.5 = centred like an overscan crop, 1 = keep the bottom. */
+        extern float g_PsxWorldVCropAnchor;
+        if (arg[0]) g_PsxWorldVCropAnchor = (float)atof(arg);
+        if (g_PsxWorldVCropAnchor < 0.0f) g_PsxWorldVCropAnchor = 0.0f;
+        if (g_PsxWorldVCropAnchor > 1.0f) g_PsxWorldVCropAnchor = 1.0f;
+        cprintf("vfov crop anchor: %.2f (0=top/default, 0.5=centred, 1=bottom)", g_PsxWorldVCropAnchor);
+    } else if (strcmp(cmd, "PAR") == 0) {
+        /* PsyCross pixel-aspect compensation (320x224 shown as 4:3 -> 15/14).
+         * Live for A/B only; main_pc.c bakes the correct value at boot. */
+        extern float g_PsxPixelAspect;
+        if (arg[0]) g_PsxPixelAspect = (float)atof(arg);
+        cprintf("pixel aspect compensation: %.4f (15/14 = 1.0714 is the 4:3 picture; 1.0 = square pixels)", g_PsxPixelAspect);
+    } else if (strcmp(cmd, "CRTASPECT") == 0) {
+        /* Trim on the 4:3 CRT picture (display_aspect = crt). 1.0 = textbook
+         * 4:3. The target assumes the 224-line frame fills the screen height,
+         * but a console puts 224 active lines inside a 240-line window and sets
+         * overscan differently, so the truth is a few percent either way. Judge
+         * it on Harry, not on a corridor: below 1.0 makes him taller/thinner. */
+        extern float g_PsxCrtAspectTrim;
+        if (arg[0]) g_PsxCrtAspectTrim = (float)atof(arg);
+        if (g_PsxCrtAspectTrim < 0.5f) g_PsxCrtAspectTrim = 0.5f;
+        if (g_PsxCrtAspectTrim > 1.5f) g_PsxCrtAspectTrim = 1.5f;
+        cprintf("crt aspect trim: %.4f (1.0 = 4:3; lower = taller/thinner figures)",
+                g_PsxCrtAspectTrim);
+    } else if (strcmp(cmd, "CAMSNAP") == 0) {
+        extern void Pc_CamSnapDump(void);
+        Pc_CamSnapDump();
     } else if (strcmp(cmd, "VSHIFT") == 0) {
         extern float g_PsxWorldVShift;
         if (arg[0]) g_PsxWorldVShift = (float)atof(arg);
         cprintf("world vertical view shift: %.1f psx-units (+ = view up; 0=off)", g_PsxWorldVShift);
+    } else if (strcmp(cmd, "DRAWDIST") == 0) {
+        /* Live version of the config-only draw_distance_pct. Read every frame by
+         * the five SH_FAR_BASE sites and the chunk material window, so setting it
+         * takes effect immediately. 200 cap: past ~210 the Q8 view Z wraps. */
+        if (arg[0]) {
+            int v = atoi(arg);
+            g_PcConfig.drawDistancePct = (v < 25) ? 25 : ((v > 200) ? 200 : v);
+        }
+        cprintf("draw distance: %d%% (25..200; config key draw_distance_pct)", g_PcConfig.drawDistancePct);
+    } else if (strcmp(cmd, "WHOLEMAP") == 0) {
+        /* Live, not saved. */
+        int on;
+        if (strncmp(arg, "PROBE", 5) == 0 || strncmp(arg, "probe", 5) == 0) {
+            extern int g_PsxWholeMapProbe;
+            g_PsxWholeMapProbe = 2;
+            cprintf("whole map: one-frame [WMPROBE] queued (see the log)");
+            return;
+        }
+        if (strncmp(arg, "FAST", 4) == 0) {
+            extern int g_PcWholeMapFast;
+            const char* v = arg + 4;
+            while (*v == ' ') v++;
+            g_PcWholeMapFast = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PcWholeMapFast);
+            cprintf("whole map fast far path: %s", g_PcWholeMapFast ? "ON" : "OFF (all chunks through the PSX path)");
+            return;
+        }
+        if (strncmp(arg, "GPU", 3) == 0) {
+            extern int g_PcWholeMapGpu;
+            const char* v = arg + 3;
+            while (*v == ' ') v++;
+            g_PcWholeMapGpu = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PcWholeMapGpu);
+            cprintf("whole map GPU far meshes: %s", g_PcWholeMapGpu ? "ON" : "OFF (far quads built on the CPU)");
+            return;
+        }
+        if (strncmp(arg, "LAYER", 5) == 0) {
+            extern float g_PsxFarLayerK;
+            const char* v = arg + 5;
+            while (*v == ' ') v++;
+            if (*v) g_PsxFarLayerK = (float)atof(v);
+            cprintf("whole map far layer bias: %.4f (0 = none; default 0.0625)", g_PsxFarLayerK);
+            return;
+        }
+        if (strncmp(arg, "DEPTH", 5) == 0 || strncmp(arg, "depth", 5) == 0) {
+            extern int g_PsxWholeMapFarDepth;
+            const char* v = arg + 5;
+            while (*v == ' ') v++;
+            g_PsxWholeMapFarDepth = (*v == '0') ? 0 : ((*v == '1') ? 1 : !g_PsxWholeMapFarDepth);
+            cprintf("whole map far depth test: %s", g_PsxWholeMapFarDepth ? "ON" : "OFF (painter order)");
+            return;
+        }
+        if (strncmp(arg, "AUTO", 4) == 0 || strncmp(arg, "auto", 4) == 0) on = 2;
+        else if (arg[0] == '1') on = 1;
+        else if (arg[0] == '0') on = 0;
+        else on = !g_PcConfig.wholeMapExteriors;
+        g_PcConfig.wholeMapExteriors = on;
+        cprintf("whole map: %s (engaged here: %s)%s", on == 2 ? "AUTO (on below fogstr 1.0)" : (on ? "ON" : "OFF"),
+                Pc_WholeMapDrawActive() ? "yes" : "no",
+                (on && !(g_PcConfig.preloadChunks && g_PcConfig.residentTextures))
+                    ? " -- needs preload_chunks=1 and resident_textures=1" : "");
+        {
+            extern int g_PsxUsePgxp;
+            if (on && !g_PsxUsePgxp)
+                cprintf("distant geometry needs PGXP: pgxp 1");
+        }
+    } else if (strcmp(cmd, "FOGDIST") == 0) {
+        /* Push the fog planes out (or in). Indoors the fog is BLACK, so this is
+         * also the "see further in the sewers" knob: the wall of black is the fog
+         * far plane. Re-applies immediately via the remembered raw distances. */
+        extern int  g_PcFogDistScalePct;
+        extern void Pc_FogDistanceReapply(void);
+        if (arg[0]) {
+            int v = atoi(arg);
+            g_PcFogDistScalePct = (v < 50) ? 50 : ((v > 400) ? 400 : v);
+            Pc_FogDistanceReapply();
+        }
+        cprintf("fog distance: %d%% (50..400; 100=stock)", g_PcFogDistScalePct);
+    } else if (strcmp(cmd, "BRIGHT") == 0) {
+        /* Whole-image brightness, the same value the launcher's brightness
+         * setting drives (config key brightness). Applied in the post shader,
+         * so it works everywhere including menus. */
+        extern float g_cfg_brightness;
+        if (arg[0]) {
+            float v = (float)atof(arg);
+            if (v < 0.2f) v = 0.2f;
+            if (v > 4.0f) v = 4.0f;
+            g_cfg_brightness = v;
+        }
+        cprintf("brightness: %.2f (0.2..4.0; 1.0=stock; config key brightness)", g_cfg_brightness);
+    } else if (strcmp(cmd, "SHADOWRES") == 0) {
+        /* Flashlight shadow-map resolution. The target is rebuilt on the next
+         * frame that needs it, so this takes effect immediately. Clamped to
+         * 256..8192 inside GR_EnsureShadowTarget. */
+        extern int g_PsyX_ShadowMapSize;
+        if (arg[0]) g_PsyX_ShadowMapSize = atoi(arg);
+        cprintf("flashlight shadow map: %dx%d (256..8192; default 1024)",
+                g_PsyX_ShadowMapSize, g_PsyX_ShadowMapSize);
+    } else if (strcmp(cmd, "CUTSHIFT") == 0) {
+        extern float g_PsxCutsceneVShift;
+        if (arg[0]) g_PsxCutsceneVShift = (float)atof(arg);
+        cprintf("cutscene vertical view shift: %.1f psx-units (+ = view up; 0=off)", g_PsxCutsceneVShift);
     } else if (strcmp(cmd, "MSGSHIFT") == 0) {
         extern int g_PsxMsgVShift;
         if (arg[0]) g_PsxMsgVShift = atoi(arg);
@@ -1161,6 +1893,26 @@ void Pc_ConsoleExec(const char* line)
         extern float g_pgxpWeldWRatio;
         if (arg[0]) g_pgxpWeldWRatio = (float)atof(arg);
         cprintf("PGXP weld depth ratio: %.3f", g_pgxpWeldWRatio);
+    } else if (strcmp(cmd, "WEATHERHZ") == 0) {
+        if (arg[0]) g_PcConfig.weatherSimHz = (atoi(arg) == 30) ? 30 : 60;
+        cprintf("Weather (rain/snow) simulation: %d Hz%s", g_PcConfig.weatherSimHz,
+                g_PcConfig.weatherSimHz == 30 ? " (original console cadence)" : " (per rendered frame)");
+    } else if (strcmp(cmd, "VOIDPROBE") == 0) {
+        /* One-shot: the renderer prints the clear bytes, the fog uniform and a
+         * colour histogram of the top rows of the scene target and of the window
+         * on the next frame. Stand looking at the far void with a lamp post in
+         * view and run it. */
+        extern int   g_PsxVoidProbeArmed;
+        extern float g_PsyX_FogColor[3];
+        extern int   g_cfg_psxDither, g_cfg_tonemap, g_cfg_postProcess;
+        g_PsxVoidProbeArmed = 1;
+        /* cprintf only reaches the overlay; the log is what gets sent back. */
+        SH_DBG("[VOIDPROBE] armed: background2dColor=(%d,%d,%d) shaderFog=(%.2f,%.2f,%.2f)/255 psxDither=%d tonemap=%d post=%d fogStrength=%.3f gameState=%d sysState=%d",
+               g_GameWork.background2dColor.r, g_GameWork.background2dColor.g, g_GameWork.background2dColor.b,
+               g_PsyX_FogColor[0] * 255.0f, g_PsyX_FogColor[1] * 255.0f, g_PsyX_FogColor[2] * 255.0f,
+               g_cfg_psxDither, g_cfg_tonemap, g_cfg_postProcess, g_PcConfig.fogStrength,
+               (int)g_GameWork.gameState, (int)g_SysWork.sysState);
+        cprintf("[VOIDPROBE] armed -- readback lands in the log on the next frame");
     } else if (strcmp(cmd, "PGXPEDGE") == 0) {
         extern float g_PgxpEdgeMax;
         if (arg[0]) g_PgxpEdgeMax = (float)atof(arg);
@@ -1209,6 +1961,13 @@ void Pc_ConsoleExec(const char* line)
         else if (arg[0] == '0') g_PsxPgxpWorldDepth = 0;
         else g_PsxPgxpWorldDepth = !g_PsxPgxpWorldDepth;
         cprintf("PGXP world depth channel: %s", g_PsxPgxpWorldDepth ? "ON" : "OFF");
+    } else if (strcmp(cmd, "PGXPACTORDEPTH") == 0) {
+        /* OFF gives each character prim one flat depth again. */
+        extern int g_PsxPgxpActorDepth;
+        if (arg[0] == '1') g_PsxPgxpActorDepth = 1;
+        else if (arg[0] == '0') g_PsxPgxpActorDepth = 0;
+        else g_PsxPgxpActorDepth = !g_PsxPgxpActorDepth;
+        cprintf("PGXP character depth: %s", g_PsxPgxpActorDepth ? "ON" : "OFF");
     } else if (strcmp(cmd, "PGXPWALLBIAS") == 0) {
         /* Writer-side far-push margin M (SZ units) on world geometry. */
         extern int g_PsxPgxpWorldFarBias;
@@ -1250,15 +2009,68 @@ void Pc_ConsoleExec(const char* line)
         else if (arg[0] == '0') g_PcFastBlockingLoads = 0;
         else g_PcFastBlockingLoads = !g_PcFastBlockingLoads;
         cprintf("fast blocking loads: %s", g_PcFastBlockingLoads ? "ON (disk speed)" : "OFF (PSX CD pace)");
+    } else if (strcmp(cmd, "LOADPACE") == 0) {
+        /* Harry-running loading screen: one step of Harry and the blur every N
+         * vblanks, each capped at 1/30 s, which is what turns his run into the
+         * console's jog. 2 (30 fps, full speed) is the default; 0 or 1
+         * steps every frame at full speed. The load itself is never slowed. */
+        extern s32 g_PcLoadScreenPaceVblanks;
+        if (arg[0]) g_PcLoadScreenPaceVblanks = atoi(arg);
+        if (g_PcLoadScreenPaceVblanks < 0)  g_PcLoadScreenPaceVblanks = 0;
+        if (g_PcLoadScreenPaceVblanks > 12) g_PcLoadScreenPaceVblanks = 12;
+        if (g_PcLoadScreenPaceVblanks <= 1)
+            cprintf("loading screen pace: every frame, full speed");
+        else
+            cprintf("loading screen pace: a step every %d vblanks (%.0f fps), Harry at %.0f%% speed",
+                    (int)g_PcLoadScreenPaceVblanks, 60.0 / g_PcLoadScreenPaceVblanks,
+                    100.0 * (g_PcLoadScreenPaceVblanks > 2 ? 2.0 : (double)g_PcLoadScreenPaceVblanks) / g_PcLoadScreenPaceVblanks);
+    } else if (strcmp(cmd, "LOADMIN") == 0) {
+        /* Minimum time the Harry-running loading screen stays up, in seconds.
+         * The load finishes underneath; the new area waits before its music
+         * starts. 0 = no minimum. Persists to config.cfg. */
+        extern s32 g_PcLoadScreenMinVblanks;
+        if (arg[0]) {
+            float v = (float)atof(arg);
+            if (v < 0.0f)  v = 0.0f;
+            if (v > 10.0f) v = 10.0f;
+            g_PcConfig.loadScreenMin = v;
+            g_PcLoadScreenMinVblanks = (s32)(v * 60.0f + 0.5f);
+            {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%.1f", v);
+                PcConfig_SaveKeyValue("load_screen_min", buf);
+            }
+        }
+        cprintf("loading screen minimum: %.1f s", g_PcLoadScreenMinVblanks / 60.0);
+    } else if (strcmp(cmd, "FBEXACT") == 0) {
+        /* Loading-screen trail and door fade: 1 = pixel-exact store (lossless,
+         * sharp store, persistence set by FBDAMP), 0 = the old filtered loop
+         * whose gain is FBDAMP's first number. Bare toggles. */
+        extern int g_PsxFeedbackExact;
+        if (arg[0] == '0' || arg[0] == '1')
+            g_PsxFeedbackExact = (arg[0] == '1');
+        else
+            g_PsxFeedbackExact = !g_PsxFeedbackExact;
+        cprintf("loading trail: %s", g_PsxFeedbackExact ? "sharp (pixel-exact store)" : "soft (old filtered store)");
     } else if (strcmp(cmd, "FBDAMP") == 0) {
         /* Gain of the framebuffer-feedback loop that produces the door out-fade
-         * and the loading-screen trail. 0.5 = shipped; ~0.996 (255/256) is
+         * and the loading-screen trail. 0.65 = shipped; ~0.996 (255/256) is
          * retail-length decay but diverged to a grey field last time it was
          * tried, so it is tunable here rather than baked in. */
+        /* Second argument is the gain for a BLENDING reader (the dream
+         * overlays), which is unity by default because the overlay's own 50/50
+         * composite is already the decay hardware relies on. */
         extern float g_PsxFeedbackDamp;
+        extern float g_PsxFeedbackDampBlend;
         if (arg[0]) g_PsxFeedbackDamp = (float)atof(arg);
-        cprintf("framebuffer feedback damp: %.4f (0.5=shipped, 0.996=retail-length fade)",
-                g_PsxFeedbackDamp);
+        {
+            const char* second = arg;
+            while (*second && *second != ' ') second++;
+            while (*second == ' ') second++;
+            if (*second) g_PsxFeedbackDampBlend = (float)atof(second);
+        }
+        cprintf("framebuffer feedback damp: %.4f opaque (loading trail), %.4f blended (dream overlays)",
+                g_PsxFeedbackDamp, g_PsxFeedbackDampBlend);
     } else if (strcmp(cmd, "CULL") == 0) {
         /* Retail gates each chunk's model buffers on a baked per-subcell PVS
          * slice plus a frustum test; disable_culling skips both (exterior maps).
@@ -1309,6 +2121,29 @@ void Pc_ConsoleExec(const char* line)
         g_PcConfig.usePgxp = g_PsxUsePgxp ? 1 : 0;
         PcConfig_SaveKeyValue("use_pgxp", g_PsxUsePgxp ? "1" : "0");
         cprintf("PGXP %s (perspective-correct, WIP)", g_PsxUsePgxp ? "ON" : "OFF");
+    } else if (strcmp(cmd, "PGXPDBG") == 0) {
+        /* Diagnostic: switch off one PGXP subsystem at a time with PGXP still on. */
+        extern int g_PsxPgxpDbg;
+        if (arg[0]) g_PsxPgxpDbg = atoi(arg);
+        cprintf("pgxpdbg %d: 1=no precise verts 2=legacy depth 4=opaque alpha 8=no world split 16=no exact twin 32=precise from MAC 64=W=1 128=integer xy", g_PsxPgxpDbg);
+    } else if (strcmp(cmd, "WORLDDEPTH") == 0) {
+        /* worlddepth 0|1 -- depth function for static opaque world under PGXP.
+         * 1 = GL_ALWAYS (paint order alone decides), 0 = GL_LEQUAL (a nearer
+         * coplanar face wins whatever order it was drawn in). Live toggle for the
+         * central Silent Hill road flicker. */
+        extern int g_PsxWorldDepthAlways;
+        if (arg[0] == '1') g_PsxWorldDepthAlways = 1;
+        else if (arg[0] == '0') g_PsxWorldDepthAlways = 0;
+        else g_PsxWorldDepthAlways = !g_PsxWorldDepthAlways;
+        cprintf("world depth: %s", g_PsxWorldDepthAlways ? "ALWAYS (paint order)" : "LEQUAL (nearer wins)");
+    } else if (strcmp(cmd, "MIXSHADER") == 0) {
+        /* mixshader 0|1 -- A/B for the all-format PSX program, which lets
+         * prims of different texture formats share one draw call. */
+        extern int g_PsxMixedShader;
+        if (arg[0] == '1') g_PsxMixedShader = 1;
+        else if (arg[0] == '0') g_PsxMixedShader = 0;
+        else g_PsxMixedShader = !g_PsxMixedShader;
+        cprintf("mixed-format shader: %s", g_PsxMixedShader ? "ON (fewer draw calls)" : "OFF (one program per format)");
     } else if (strcmp(cmd, "FLMODE") == 0) {
         /* flmode 0..3 | classic | classicshadows | modern | modernshadows */
         int mode = g_PcConfig.flashlightMode;
@@ -1429,6 +2264,37 @@ void Pc_ConsoleExec(const char* line)
         cprintf("speaker layout: %s active (requested %s)%s", kSpkUi[PsyX_SPUAL_GetOutputMode()],
                 kSpkUi[g_PcConfig.audioOutput],
                 PsyX_SPUAL_GetSurroundActive() ? " [surround routing ON]" : "");
+    } else if (strcmp(cmd, "MINIMAPNOMAP") == 0) {
+        /* Config-only minimap_show_without_map: with minimap_require_map on,
+         * 1 draws an empty panel with Harry's arrow before the area map is
+         * found (the old behaviour), 0 hides the minimap. Bare toggles.
+         * Persists to config.cfg. */
+        if (arg[0] == '0' || arg[0] == '1')
+            g_PcConfig.minimapShowWithoutMap = (arg[0] == '1');
+        else
+            g_PcConfig.minimapShowWithoutMap = !g_PcConfig.minimapShowWithoutMap;
+        PcConfig_SaveKeyValue("minimap_show_without_map",
+                              g_PcConfig.minimapShowWithoutMap ? "1" : "0");
+        cprintf("minimap before the map is found: %s",
+                g_PcConfig.minimapShowWithoutMap ? "empty panel + arrow" : "hidden");
+    } else if (strcmp(cmd, "DREAMBLUR") == 0) {
+        /* The dream/ghosting screen blur (Lisa, after Split Head, the
+         * otherworld rooms): full-screen prims sampling the previous frame out
+         * of the PSX display buffers. 0 leaves only the loading-screen trail,
+         * which uses the same store and has always been on. Bare toggles.
+         * Persists to config.cfg. */
+        {
+            extern int g_cfg_dreamFeedback;
+
+            if (arg[0] == '0' || arg[0] == '1')
+                g_PcConfig.dreamBlur = (arg[0] == '1');
+            else
+                g_PcConfig.dreamBlur = !g_PcConfig.dreamBlur;
+
+            g_cfg_dreamFeedback = g_PcConfig.dreamBlur;
+            PcConfig_SaveKeyValue("dream_blur", g_PcConfig.dreamBlur ? "1" : "0");
+            cprintf("dream screen blur: %s", g_PcConfig.dreamBlur ? "on" : "off");
+        }
     } else if (strcmp(cmd, "FOV") == 0) {
         /* First-person FOV (degrees, horizontal on the 4:3 frame). Same value
          * as the launcher slider / PC options row; persists to config.cfg.
@@ -1520,10 +2386,11 @@ void Pc_ConsoleExec(const char* line)
             if (v < 0) v = 0;
             g_DebugAnimKf     = v;
             g_DebugAnimKfView = 1; /* setting a frame implies viewing it */
-            cprintf("keyframe %d (max %d) - K toggles, , . step", g_DebugAnimKf, maxKf);
+            cprintf("keyframe %d (max %d) - kf toggles, , . step", g_DebugAnimKf, maxKf);
         } else {
-            cprintf("keyframe %d / %d (view %s)", g_DebugAnimKf, maxKf,
-                    g_DebugAnimKfView ? "ON" : "OFF");
+            g_DebugAnimKfView = !g_DebugAnimKfView;
+            cprintf("keyframe viewer %s (keyframe %d / %d)",
+                    g_DebugAnimKfView ? "ON" : "OFF", g_DebugAnimKf, maxKf);
         }
     } else if (strcmp(cmd, "PLAYAS") == 0) {
         extern int         Pc_PlayAs_SetByName(const char* name, int save);
@@ -1599,7 +2466,15 @@ void Pc_ConsoleExec(const char* line)
             PcConfig_ApplyXaVolume(pct / 100.0f);
         }
         cprintf("xa (fmv/voice) volume: %.0f%% (0..100)", g_PcXaVolume * 100.0f);
+    } else if (Pc_ModConsole_Dispatch(cmd, arg)) {
+        /* handled by a mod-registered command */
     } else {
         DbgOverlay_PushLine("Command not found!");
     }
+}
+
+/* Exported for mod command handlers (pc_mod_registry.h). */
+void Pc_Console_Print(const char* text)
+{
+    if (text) DbgOverlay_PushLine(text);
 }

@@ -446,7 +446,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EBEE0
     Collision_FlagBitsClear(CollisionTriggerFlag_All);
     Collision_FlagBitsSet(collFlags);
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -2, -1, -2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[0].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -2, -1, -2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M6S00_HealthDrink))
         {
@@ -454,7 +458,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EBEE0
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -2, -1, -2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[1].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -2, -1, -2) && PLAYER_IN_MAP_CHUNK(vz, 1, 4, -1, 4))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M6S00_ShotgunShells))
         {

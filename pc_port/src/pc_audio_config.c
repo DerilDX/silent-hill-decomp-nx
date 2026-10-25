@@ -6,8 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* AUTHENTIC by default: the bit-exact software SPU, which is the only path
+ * that runs the real PSX reverb -- the delay lines and registers the game
+ * itself writes -- rather than approximating it with an OpenAL EFX send. It
+ * became shippable once the XA zigzag coefficients were corrected; that table
+ * error was what made voices tinny on this path and it is the only reason
+ * legacy was still the default. `spu_renderer = legacy` restores it. */
 PcAudioConfig g_PcAudioConfig = {
-    PC_SPU_RENDERER_LEGACY, 0, 0, 0, 0, 1, 0, 0
+    PC_SPU_RENDERER_AUTHENTIC, 0, 0, 0, 0, 1, 0, 0, 0, 0
 };
 
 static char* Trim(char* text)
@@ -89,6 +95,11 @@ void PcAudioConfig_Load(const char* path)
             g_PcAudioConfig.rate =
                 rate == 44100 || rate == 88200 || rate == 176400 ||
                 rate == 352800 ? rate : 0;
+        }
+        else if (strcmp(key, "audio_spatial") == 0)
+        {
+            g_PcAudioConfig.spatial        = atoi(value) != 0;
+            g_PcAudioConfig.spatialUserSet = 1;
         }
         else if (strcmp(key, "audio_bit_perfect") == 0)
             g_PcAudioConfig.bitPerfect = atoi(value) != 0;

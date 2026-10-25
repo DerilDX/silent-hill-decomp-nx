@@ -1,19 +1,30 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "font_region.h"
 #include "lang_pack.h"
 
+#include <dirent.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "lang_ru.h"   /* Pc_RuPackByte: Cyrillic -> the pack atlas's bytes */
 #include "sh_log.h"
 
-#define PACK_PATH_FMT "gamedata/lang/%s.lang"
+#define PACK_DIR      "gamedata/lang"
+/* Where the Mod Manager deploys a Library mod's files. A language shipped as
+ * a mod lands here, not in PACK_DIR, so this is scanned too -- and first, so
+ * a mod's file wins a code by the first-wins rule below, the same way every
+ * other loose override in the port beats the shipped file. */
+#define PACK_OVERLAY_DIR "gamedata/load/lang"
+#define PACK_PATH_FMT PACK_DIR "/%s.lang"
 #define PACK_MAX_SIZE (4 * 1024 * 1024)
 #define COMMON_MSG_COUNT 15 /* map message indices 0-14 come from the shared header */
 
 typedef struct {
     const char* key;
     const char* val;
+    char*       utf8; /* MENU./QUICK. only: the value before transcoding, for the TrueType overlays */
 } s_PackEntry;
 
 static char*        s_Data;
@@ -21,6 +32,7 @@ static s_PackEntry* s_Table;
 static int          s_Mask;
 static int          s_Count;
 static int          s_Active;
+static int          s_Font;    /* LANG_PACK_FONT_* -- the glyph set the pack needs */
 static char         s_MenuName[32];
 
 /* Map-message keys are named after the map, and e_MapIdx is dense, so a table
@@ -62,14 +74,14 @@ static unsigned int FallbackAscii(unsigned int cp)
         case 0x2018: case 0x2019: return '\''; /* curly quotes */
         case 0x201C: case 0x201D: return '"';
         case 0x2026: return '.';               /* ellipsis */
-        case 0x0104: case 0x0105: return 'a';
-        case 0x0106: case 0x0107: return 'c';
-        case 0x0118: case 0x0119: return 'e';
-        case 0x0141: case 0x0142: return 'l';
-        case 0x0143: case 0x0144: return 'n';
-        case 0x015A: case 0x015B: return 's';
-        case 0x0179: case 0x017A:
-        case 0x017B: case 0x017C: return 'z';
+        case 0x0104: return 'A'; case 0x0105: return 'a';
+        case 0x0106: return 'C'; case 0x0107: return 'c';
+        case 0x0118: return 'E'; case 0x0119: return 'e';
+        case 0x0141: return 'L'; case 0x0142: return 'l';
+        case 0x0143: return 'N'; case 0x0144: return 'n';
+        case 0x015A: return 'S'; case 0x015B: return 's';
+        case 0x0179: case 0x017B: return 'Z';
+        case 0x017A: case 0x017C: return 'z';
         default: return 0;
     }
 }
@@ -103,9 +115,15 @@ static unsigned int Utf8Next(const char** pp)
 /* Transcode a value in place (output is never longer than the input) and
  * resolve the '\n' / '\t' escapes the pack writer uses to keep one entry per
  * line. Returns the new length. */
-static size_t TranscodeValue(char* s)
+static size_t TranscodeValueFont(char* s, int font)
 {
     const char* in  = s;
+
+    /* Already the engine's bytes: nothing to convert, and converting would
+     * corrupt them (a Shift-JIS pair is not UTF-8). */
+    if (LangPackFontIsKanji(font))
+        return strlen(s);
+
     char*       out = s;
     int         i;
 
@@ -128,16 +146,46 @@ static size_t TranscodeValue(char* s)
             continue;
         }
 
-        for (i = 0; i < (int)(sizeof(s_PolishCodepoints) / sizeof(s_PolishCodepoints[0])); i++)
+        /* A Cyrillic pack draws through the consolgames atlas font_ru.inc
+         * embeds, so its letters encode to that atlas's own bytes. Only Ё/ё
+         * have no cell; those come back 0 and fall through to the
+         * substitutions below. */
+        if (font == LANG_PACK_FONT_CYRILLIC)
         {
-            if (s_PolishCodepoints[i] == cp)
+            unsigned char ru = Pc_RuPackByte(cp);
+
+            if (ru != 0)
             {
-                *out++ = (char)(POLISH_BYTE_BASE + i);
-                break;
+                *out++ = (char)ru;
+                continue;
             }
         }
-        if (i < (int)(sizeof(s_PolishCodepoints) / sizeof(s_PolishCodepoints[0])))
-            continue;
+
+        /* POLISH PACKS ONLY, and only where the PAL cell grid is readable.
+         *
+         * Polish only: two of these codepoints, o-acute and O-acute, are
+         * ordinary Latin-1 that Spanish, French, Italian and Portuguese all
+         * use, and the bytes this produces are decoded by the Polish branch
+         * of Font_MapChar, which runs for a Polish pack alone. Remapping them
+         * for every pack sent those four languages' o-acute to a byte nothing
+         * would draw. Unmapped, it reaches the Latin-1 passthrough below.
+         *
+         * Grid only: these bytes address cells 120-125 of that grid, so on a
+         * disc without it they draw nothing and Polish loses eight letters
+         * mid-word. FallbackAscii below turns them into base letters instead. */
+        if (font == LANG_PACK_FONT_POLISH && Font_EurGridBacked())
+        {
+            for (i = 0; i < (int)(sizeof(s_PolishCodepoints) / sizeof(s_PolishCodepoints[0])); i++)
+            {
+                if (s_PolishCodepoints[i] == cp)
+                {
+                    *out++ = (char)(POLISH_BYTE_BASE + i);
+                    break;
+                }
+            }
+            if (i < (int)(sizeof(s_PolishCodepoints) / sizeof(s_PolishCodepoints[0])))
+                continue;
+        }
 
         /* Latin-1 passes straight through -- the EUR atlas draws those. */
         if (cp >= 0xA0 && cp <= 0xFF)
@@ -153,6 +201,11 @@ static size_t TranscodeValue(char* s)
 
     *out = '\0';
     return (size_t)(out - s);
+}
+
+static size_t TranscodeValue(char* s)
+{
+    return TranscodeValueFont(s, s_Font);
 }
 
 /* ------------------------------------------------------------------ */
@@ -171,7 +224,7 @@ static unsigned int HashKey(const char* s)
     return h;
 }
 
-static void TableInsert(const char* key, const char* val)
+static void TableInsert(const char* key, const char* val, char* utf8)
 {
     unsigned int i = HashKey(key) & (unsigned int)s_Mask;
 
@@ -180,16 +233,19 @@ static void TableInsert(const char* key, const char* val)
         if (strcmp(s_Table[i].key, key) == 0)
         {
             s_Table[i].val = val; /* last definition wins */
+            free(s_Table[i].utf8);
+            s_Table[i].utf8 = utf8;
             return;
         }
         i = (i + 1) & (unsigned int)s_Mask;
     }
-    s_Table[i].key = key;
-    s_Table[i].val = val;
+    s_Table[i].key  = key;
+    s_Table[i].val  = val;
+    s_Table[i].utf8 = utf8;
     s_Count++;
 }
 
-const char* Pc_LangPackGet(const char* key)
+static const s_PackEntry* TableFind(const char* key)
 {
     unsigned int i;
 
@@ -200,10 +256,41 @@ const char* Pc_LangPackGet(const char* key)
     while (s_Table[i].key != NULL)
     {
         if (strcmp(s_Table[i].key, key) == 0)
-            return s_Table[i].val;
+            return &s_Table[i];
         i = (i + 1) & (unsigned int)s_Mask;
     }
     return NULL;
+}
+
+const char* Pc_LangPackGet(const char* key)
+{
+    const s_PackEntry* e = TableFind(key);
+    return e ? e->val : NULL;
+}
+
+const char* Pc_LangPackUtf8(const char* key)
+{
+    const s_PackEntry* e = TableFind(key);
+    return e ? e->utf8 : NULL;
+}
+
+/* Resolve the writer's "\n" / "\t" escapes in place. Keys need it as well as
+ * values: the two-line map prompts are keyed by their two-line literal. */
+static void Unescape(char* s)
+{
+    char* out = s;
+
+    for (; *s != '\0'; s++)
+    {
+        if (s[0] == '\\' && (s[1] == 'n' || s[1] == 't'))
+        {
+            *out++ = (s[1] == 'n') ? '\n' : '\t';
+            s++;
+            continue;
+        }
+        *out++ = *s;
+    }
+    *out = '\0';
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,6 +299,10 @@ const char* Pc_LangPackGet(const char* key)
 
 void Pc_LangPackFree(void)
 {
+    int i;
+
+    for (i = 0; s_Table != NULL && i <= s_Mask; i++)
+        free(s_Table[i].utf8);
     free(s_Data);
     free(s_Table);
     s_Data     = NULL;
@@ -220,6 +311,227 @@ void Pc_LangPackFree(void)
     s_Mask     = 0;
     s_Active   = 0;
     s_MenuName[0] = '\0';
+}
+
+/* ------------------------------------------------------------------ */
+/* Registry: which languages are installed                             */
+/* ------------------------------------------------------------------ */
+
+/* The selectable languages past the five PAL ones are whatever .lang files are
+ * sitting in gamedata/lang, so a language is a MOD: drop the file in (the Mod
+ * Manager extracts a zip's lang/ folder straight there) and it appears in
+ * Options > Language. Only each file's short header is read here -- the body is
+ * parsed by Pc_LangPackLoad when the language is actually chosen.
+ *
+ * Config stores the CODE, never the slot, so installing or removing a pack
+ * cannot silently switch anyone's language to a different one. */
+#define PACK_LIST_MAX 24
+
+typedef struct {
+    char code[16];
+    char menu[32];
+    int  font;
+    char dir[24];  /* which directory it was found in */
+} s_PackInfo;
+
+static s_PackInfo s_Packs[PACK_LIST_MAX];
+static int        s_PackListCount = -1;
+
+static int PackFontFromName(const char* v)
+{
+    if (strcmp(v, "cyrillic") == 0)
+        return LANG_PACK_FONT_CYRILLIC;
+    if (strcmp(v, "polish") == 0)
+        return LANG_PACK_FONT_POLISH;
+    if (strcmp(v, "sjis") == 0)
+        return LANG_PACK_FONT_SJIS;
+    if (strcmp(v, "chinese") == 0)
+        return LANG_PACK_FONT_CHINESE;
+    if (strcmp(v, "portuguese") == 0)
+        return LANG_PACK_FONT_PORTUGUESE;
+    return LANG_PACK_FONT_LATIN;
+}
+
+/* Read just the `!` header lines. Stops at the first ordinary entry: the header
+ * is written first, and a 4MB pack should not be walked to list it. */
+static int PackReadHeader(const char* path, s_PackInfo* out)
+{
+    FILE* f = fopen(path, "rb");
+    char  line[256];
+
+    if (f == NULL)
+        return 0;
+
+    out->menu[0] = '\0';
+    out->font    = LANG_PACK_FONT_LATIN;
+
+    while (fgets(line, (int)sizeof(line), f) != NULL)
+    {
+        char* eq;
+        char* end;
+
+        if (line[0] == '#' || line[0] == '\r' || line[0] == '\n')
+            continue;
+        if (line[0] != '!')
+            break;
+
+        eq = strchr(line, '=');
+        if (eq == NULL)
+            continue;
+        *eq++ = '\0';
+        for (end = eq + strlen(eq); end > eq && (end[-1] == '\r' || end[-1] == '\n'); end--)
+            end[-1] = '\0';
+
+        if (strcmp(line, "!code") == 0)
+            snprintf(out->code, sizeof(out->code), "%s", eq);
+        else if (strcmp(line, "!menu") == 0)
+            snprintf(out->menu, sizeof(out->menu), "%s", eq);
+        else if (strcmp(line, "!font") == 0)
+            out->font = PackFontFromName(eq);
+    }
+    fclose(f);
+    return out->code[0] != '\0';
+}
+
+/* One directory's worth of packs into the registry. Returns 0 only when the
+ * directory could not be opened at all. */
+static int PackListScanDir(const char* dir)
+{
+    DIR*           d;
+    struct dirent* e;
+    int            i;
+
+    d = opendir(dir);
+    if (d == NULL)
+        return 0;
+
+    while ((e = readdir(d)) != NULL && s_PackListCount < PACK_LIST_MAX)
+    {
+        size_t     len = strlen(e->d_name);
+        char       path[256];
+        s_PackInfo info;
+
+        if (len < 6 || strcmp(e->d_name + len - 5, ".lang") != 0)
+            continue;
+
+        memset(&info, 0, sizeof(info));
+        /* The file name is the fallback code, so a pack with no !code line
+         * still works and its file name is what config stores. */
+        snprintf(info.code, sizeof(info.code), "%.*s", (int)(len - 5), e->d_name);
+        snprintf(info.dir, sizeof(info.dir), "%s", dir);
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        if (!PackReadHeader(path, &info))
+            continue;
+        if (info.menu[0] == '\0')
+            snprintf(info.menu, sizeof(info.menu), "%s", info.code);
+        /* The Language row draws this with the GAME font, so it has to be in
+         * that pack's own byte encoding rather than the UTF-8 the file holds. */
+        TranscodeValueFont(info.menu, info.font);
+
+        for (i = 0; i < s_PackListCount; i++)
+            if (strcmp(s_Packs[i].code, info.code) == 0)
+                break;
+        if (i < s_PackListCount)
+            continue; /* two files claiming one code: first wins */
+
+        s_Packs[s_PackListCount++] = info;
+    }
+    closedir(d);
+    return 1;
+}
+
+static void PackListScan(void)
+{
+    int i;
+    int j;
+
+    s_PackListCount = 0;
+
+    /* The overlay may simply not exist; only the shipped directory is required. */
+    PackListScanDir(PACK_OVERLAY_DIR);
+
+    if (!PackListScanDir(PACK_DIR))
+    {
+        /* NOT "no packs installed": the directory is not reachable yet. Config
+         * parsing resolves `language` to a pack id (pc_config.c) before the
+         * working directory is the game directory, so this is the first call
+         * every run -- and caching its miss as a count of zero hid every
+         * installed pack for the rest of the session, on every disc. Leave the
+         * registry unscanned so the next caller tries again.
+         *
+         * Say where it looked. This failing silently is why "only some
+         * languages are listed" took several rounds to pin down: the registry
+         * came back empty and nothing anywhere said why. */
+        {
+            char cwd[512];
+
+            if (getcwd(cwd, sizeof(cwd)) == NULL)
+                cwd[0] = '\0';
+            SH_WARN("[LANGPACK] cannot open %s (working directory: %s) - "
+                    "no language packs will be listed", PACK_DIR, cwd);
+        }
+        s_PackListCount = -1;
+        return;
+    }
+
+    /* Alphabetical, so the Language row is in the same order every run
+     * whatever order the directory happens to hand back. */
+    for (i = 1; i < s_PackListCount; i++)
+    {
+        s_PackInfo key = s_Packs[i];
+
+        for (j = i - 1; j >= 0 && strcmp(s_Packs[j].code, key.code) > 0; j--)
+            s_Packs[j + 1] = s_Packs[j];
+        s_Packs[j + 1] = key;
+    }
+
+    SH_LOG("[LANGPACK] %d language pack(s) installed", s_PackListCount);
+}
+
+static void PackListEnsure(void)
+{
+    if (s_PackListCount < 0)
+        PackListScan();
+}
+
+int Pc_LangPackListCount(void)
+{
+    PackListEnsure();
+    return s_PackListCount;
+}
+
+const char* Pc_LangPackListCode(int idx)
+{
+    PackListEnsure();
+    return (idx >= 0 && idx < s_PackListCount) ? s_Packs[idx].code : "";
+}
+
+const char* Pc_LangPackListName(int idx)
+{
+    PackListEnsure();
+    return (idx >= 0 && idx < s_PackListCount) ? s_Packs[idx].menu : "";
+}
+
+int Pc_LangPackListFont(int idx)
+{
+    PackListEnsure();
+    return (idx >= 0 && idx < s_PackListCount) ? s_Packs[idx].font : LANG_PACK_FONT_LATIN;
+}
+
+int Pc_LangPackListFind(const char* code)
+{
+    int i;
+
+    PackListEnsure();
+    for (i = 0; code != NULL && i < s_PackListCount; i++)
+        if (strcmp(s_Packs[i].code, code) == 0)
+            return i;
+    return -1;
+}
+
+void Pc_LangPackListRescan(void)
+{
+    s_PackListCount = -1;
 }
 
 int Pc_LangPackLoad(const char* code)
@@ -236,7 +548,16 @@ int Pc_LangPackLoad(const char* code)
     if (code == NULL || code[0] == '\0')
         return 0;
 
-    snprintf(path, sizeof(path), PACK_PATH_FMT, code);
+    /* From the directory the registry found it in; a code the registry does
+     * not know (asked for before any scan) still tries the shipped place. */
+    {
+        int idx = Pc_LangPackListFind(code);
+
+        if (idx >= 0)
+            snprintf(path, sizeof(path), "%s/%s.lang", s_Packs[idx].dir, code);
+        else
+            snprintf(path, sizeof(path), PACK_PATH_FMT, code);
+    }
     f = fopen(path, "rb");
     if (f == NULL)
     {
@@ -302,8 +623,14 @@ int Pc_LangPackLoad(const char* code)
 
         if (line[0] == '!')
         {
-            /* Pack metadata: !code, !name, !menu. */
-            if (strcmp(line, "!menu") == 0)
+            /* Pack metadata: !code, !name, !menu, !font. */
+            if (strcmp(line, "!font") == 0)
+            {
+                /* Read BEFORE any value is transcoded, since it decides how.
+                 * The writer puts it in the header for that reason. */
+                s_Font = PackFontFromName(eq);
+            }
+            else if (strcmp(line, "!menu") == 0)
             {
                 TranscodeValue(eq);
                 snprintf(s_MenuName, sizeof(s_MenuName), "%s", eq);
@@ -311,8 +638,15 @@ int Pc_LangPackLoad(const char* code)
             continue;
         }
 
-        TranscodeValue(eq);
-        TableInsert(line, eq);
+        Unescape(line);
+        Unescape(eq);
+        {
+            char* utf8 = NULL;
+            if (strncmp(line, "MENU.", 5) == 0 || strncmp(line, "QUICK.", 6) == 0)
+                utf8 = strdup(eq);
+            TranscodeValue(eq);
+            TableInsert(line, eq, utf8);
+        }
     }
 
     if (s_Count == 0)
@@ -335,6 +669,11 @@ int Pc_LangPackActive(void)
     return s_Active;
 }
 
+int Pc_LangPackFont(void)
+{
+    return s_Font;
+}
+
 const char* Pc_LangPackName(void)
 {
     return s_MenuName;
@@ -344,24 +683,32 @@ const char* Pc_LangPackName(void)
 /* Typed lookups                                                       */
 /* ------------------------------------------------------------------ */
 
-const char* Pc_LangPackMapMsg(int mapIdx, int msgIdx)
+int Pc_LangPackMsgKey(int mapIdx, int msgIdx, char* out, size_t outSize)
 {
-    char key[32];
-
-    if (!s_Active || msgIdx < 0)
-        return NULL;
+    if (msgIdx < 0)
+        return 0;
 
     /* Indices 0-14 are the shared map_msg_common.h block, extracted once. */
     if (msgIdx < COMMON_MSG_COUNT)
     {
-        snprintf(key, sizeof(key), "COMMON.%d", msgIdx);
-        return Pc_LangPackGet(key);
+        snprintf(out, outSize, "COMMON.%d", msgIdx);
+        return 1;
     }
 
     if (mapIdx < 0 || mapIdx >= MAP_NAME_COUNT)
+        return 0;
+
+    snprintf(out, outSize, "%s.%d", s_MapNames[mapIdx], msgIdx);
+    return 1;
+}
+
+const char* Pc_LangPackMapMsg(int mapIdx, int msgIdx)
+{
+    char key[32];
+
+    if (!s_Active || !Pc_LangPackMsgKey(mapIdx, msgIdx, key, sizeof(key)))
         return NULL;
 
-    snprintf(key, sizeof(key), "%s.%d", s_MapNames[mapIdx], msgIdx);
     return Pc_LangPackGet(key);
 }
 
@@ -387,31 +734,25 @@ const char* Pc_LangPackItemDesc(int itemIdx)
     return Pc_LangPackGet(key);
 }
 
-const char* Pc_LangPackMenu(const char* us)
+/* The extractor built these keys by dropping the \x01 kerning bytes, trimming
+ * the outer padding and writing '=' as '-' (a .lang line ends its key at the
+ * first '='); \x07 colour prefixes stay part of the key. */
+static int MenuKey(const char* us, char* key, size_t keySize)
 {
-    char   key[160];
-    size_t n = 0;
-    size_t i;
+    size_t n = 5;
+    size_t i = 0;
 
-    if (!s_Active || us == NULL)
-        return NULL;
+    if (us == NULL)
+        return 0;
 
-    /* The extractor built these keys by dropping the \x01 kerning bytes and
-     * trimming the outer padding; \x07 colour prefixes stay part of the key. */
-    key[n++] = 'M';
-    key[n++] = 'E';
-    key[n++] = 'N';
-    key[n++] = 'U';
-    key[n++] = '.';
-
-    i = 0;
+    memcpy(key, "MENU.", 5);
     while (us[i] == '_' || us[i] == ' ' || us[i] == '\t' || us[i] == '\n' || us[i] == '\r')
         i++;
 
-    for (; us[i] != '\0' && n < sizeof(key) - 1; i++)
+    for (; us[i] != '\0' && n < keySize - 1; i++)
     {
         if (us[i] != '\x01')
-            key[n++] = us[i];
+            key[n++] = (us[i] == '=') ? '-' : us[i];
     }
     while (n > 5 && (key[n - 1] == '_' || key[n - 1] == ' ' ||
                      key[n - 1] == '\t' || key[n - 1] == '\n' || key[n - 1] == '\r'))
@@ -419,6 +760,23 @@ const char* Pc_LangPackMenu(const char* us)
         n--;
     }
     key[n] = '\0';
+    return 1;
+}
 
+const char* Pc_LangPackMenu(const char* us)
+{
+    char key[160];
+
+    if (!s_Active || !MenuKey(us, key, sizeof(key)))
+        return NULL;
     return Pc_LangPackGet(key);
+}
+
+const char* Pc_LangPackMenuUtf8(const char* us)
+{
+    char key[160];
+
+    if (!s_Active || !MenuKey(us, key, sizeof(key)))
+        return NULL;
+    return Pc_LangPackUtf8(key);
 }

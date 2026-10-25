@@ -63,6 +63,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="DisplayModes.cs" />
+    <Compile Include="DllWarningDialog.cs" />
+    <Compile Include="PeImports.cs" />
     <Compile Include="Form1.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -84,6 +86,12 @@
     <Compile Include="TmdPageDialog.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UsHdFontDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="PgxpFogDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ResidentTexturesDialog.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -93,6 +101,19 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="VabFile.cs" />
+    <Compile Include="VabDuplicates.cs" />
+    <Compile Include="DuplicateSoundsDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="MsgTable.cs" />
+    <Compile Include="DiscText.cs" />
+    <Compile Include="JpnMsgMap.cs" />
+    <Compile Include="RuCharsets.cs" />
+    <Compile Include="XaSubtitles.cs" />
+    <Compile Include="XaTable.cs" />
+    <Compile Include="XaToolForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="SfxTable.cs" />
     <Compile Include="VagEncoder.cs" />
     <Compile Include="AudioToolForm.cs">
@@ -106,6 +127,15 @@
     </Compile>
     <Compile Include="Program.cs" />
     <Compile Include="UpdateChecker.cs" />
+    <Compile Include="FlagIcon.cs" />
+    <Compile Include="LanguageDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Loc.cs" />
+    <Compile Include="Loc.Strings.cs" />
+    <Compile Include="Loc.Strings.ModManager.cs" />
+    <Compile Include="Loc.Strings.Dialogs.cs" />
+    <Compile Include="Loc.Strings.Tools.cs" />
     <Compile Include="LauncherSettings.cs" />
     <Compile Include="ChangelogViewer.cs" />
     <Compile Include="BuildSettingsForm.cs">
