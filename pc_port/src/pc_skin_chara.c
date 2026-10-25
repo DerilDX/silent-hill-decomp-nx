@@ -246,6 +246,7 @@ typedef struct
     float       mouth;
     float       grip[2];
     float       gunOff[3]; /* right-hand bone frame */
+    int         gunRaise, gunOut, gunTwist; /* ini: mm, mm, degrees */
     int         female;
     int         brightness; /* percent of the lit vertex colour */
     int         fogPct;     /* percent of the game's fog amount */
@@ -1620,6 +1621,7 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
     ch->fogPct = 100;
     ch->beamPct = 100;
     memset(ch->lightOff, 0, sizeof(ch->lightOff));
+    ch->gunRaise = ch->gunOut = ch->gunTwist = 0;
     snprintf(path, sizeof(path), "%s.ini", base);
     f = fopen(path, "r");
     if (f == NULL)
@@ -1644,6 +1646,12 @@ static void Skin_LoadSettings(PcSkinChara* ch, const char* base)
             ch->lightOff[1] = val;
         else if (strcmp(key, "flashlight_z") == 0)
             ch->lightOff[2] = val;
+        else if (strcmp(key, "gun_raise") == 0)
+            ch->gunRaise = val;
+        else if (strcmp(key, "gun_out") == 0)
+            ch->gunOut = val;
+        else if (strcmp(key, "gun_twist") == 0)
+            ch->gunTwist = val;
     }
     fclose(f);
     SH_DBG("[SKIN] %s: female=%d brightness=%d fog=%d flashlight=%d at (%d %d %d)", path, ch->female,
@@ -1681,16 +1689,38 @@ int Pc_SkinChara_HeroLightOffset(s32 offQ12[3])
     return hero->lightOff[0] | hero->lightOff[1] | hero->lightOff[2];
 }
 
-int Pc_SkinChara_HeroGunOffset(s32 off[3])
+int Pc_SkinChara_HeroGunAdjust(MATRIX* adj)
 {
+    /* The twist turns about the middle of the handgun's grip, so the weapon
+     * stays in the fist. In the hand frame +z runs down the forearm and +x
+     * away from the body; 2.55 units to the centimetre at Harry's height. */
+    static const float pivot[3] = { 3.5f, 4.0f, 29.0f };
     const PcSkinChara* hero = g_PcConfig.allowLooseFiles ? Skin_CurrentHero() : NULL;
-    int k;
+    float a, c, sn, o[3], r[3][3] = { { 0 } };
+    int i, k;
 
     if (hero == NULL)
         return 0;
-    for (k = 0; k < 3; k++)
-        off[k] = (s32)(hero->gunOff[k] + (hero->gunOff[k] < 0.0f ? -0.5f : 0.5f));
-    return off[0] | off[1] | off[2];
+    a = (float)hero->gunTwist * 3.14159265f / 180.0f;
+    c = cosf(a);
+    sn = sinf(a);
+    r[0][0] = c;  r[0][1] = -sn;
+    r[1][0] = sn; r[1][1] = c;
+    r[2][2] = 1.0f;
+    o[0] = hero->gunOff[0] + (float)hero->gunOut * 0.255f;
+    o[1] = hero->gunOff[1];
+    o[2] = hero->gunOff[2] - (float)hero->gunRaise * 0.255f;
+    for (i = 0; i < 3; i++)
+    {
+        float t = pivot[i] + o[i];
+        for (k = 0; k < 3; k++)
+        {
+            t -= r[i][k] * pivot[k];
+            adj->m[i][k] = (short)(r[i][k] * 4096.0f + (r[i][k] < 0.0f ? -0.5f : 0.5f));
+        }
+        adj->t[i] = (s32)(t + (t < 0.0f ? -0.5f : 0.5f));
+    }
+    return hero->gunTwist != 0 || adj->t[0] != 0 || adj->t[1] != 0 || adj->t[2] != 0;
 }
 
 int Pc_SkinChara_HeroFemale(void)

@@ -1131,14 +1131,20 @@ void WorldGfx_HeldItemDraw(void) // 0x8003D058
 #ifdef SH_PC_PORT
         if (heldItem->itemId != InvItemId_CutscenePhone)
         {
-            s32 off[3];
-            if (Pc_SkinChara_HeroGunOffset(off))
+            MATRIX adj;
+            if (Pc_SkinChara_HeroGunAdjust(&adj))
             {
-                s32 r;
-                for (r = 0; r < 3; r++)
+                MATRIX* mats[2] = { &worldMat, &viewMat };
+                s32 n, r, c;
+                for (n = 0; n < 2; n++)
                 {
-                    worldMat.t[r] += (worldMat.m[r][0] * off[0] + worldMat.m[r][1] * off[1] + worldMat.m[r][2] * off[2]) >> 12;
-                    viewMat.t[r] += (viewMat.m[r][0] * off[0] + viewMat.m[r][1] * off[1] + viewMat.m[r][2] * off[2]) >> 12;
+                    MATRIX src = *mats[n];
+                    for (r = 0; r < 3; r++)
+                    {
+                        for (c = 0; c < 3; c++)
+                            mats[n]->m[r][c] = (src.m[r][0] * adj.m[0][c] + src.m[r][1] * adj.m[1][c] + src.m[r][2] * adj.m[2][c]) >> 12;
+                        mats[n]->t[r] += (src.m[r][0] * adj.t[0] + src.m[r][1] * adj.t[1] + src.m[r][2] * adj.t[2]) >> 12;
+                    }
                 }
             }
         }

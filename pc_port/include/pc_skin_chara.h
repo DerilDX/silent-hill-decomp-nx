@@ -56,9 +56,10 @@ int   Pc_SkinChara_HeroFemale(void);
 int   Pc_SkinChara_HeroLightOffset(s32 offQ12[3]);
 
 /* HERO's replacement fist sits elsewhere in the right hand than Harry's, which
- * the held weapons are modelled round: the shift in that bone's frame, model
- * units. Returns 0 when there is none. */
-int   Pc_SkinChara_HeroGunOffset(s32 off[3]);
+ * the held weapons are modelled round: the transform (Q12 rotation, model-unit
+ * shift) from the weapon's frame into that bone's, measured at load plus the
+ * ini's gun_raise/gun_out/gun_twist. Returns 0 when it is the identity. */
+int   Pc_SkinChara_HeroGunAdjust(MATRIX* adj);
 
 #ifdef __cplusplus
 }

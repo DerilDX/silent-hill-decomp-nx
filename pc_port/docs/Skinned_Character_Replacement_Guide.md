@@ -292,6 +292,12 @@ flashlight_x=16
 | `flashlight_x` | Moves the beam origin across the chest, in cm. Positive is toward the character's right; 16 mirrors Harry's spot onto the right side. |
 | `flashlight_y` | Moves it up or down, in cm. Negative is up. |
 | `flashlight_z` | Moves it forward or back, in cm. Positive is forward. |
+| `gun_raise` | Moves a held weapon along the forearm, in mm. Positive is up toward the wrist. |
+| `gun_out` | Moves it sideways, in mm. Positive is away from the leg. |
+| `gun_twist` | Turns it about the forearm, in degrees, round the middle of the grip. Positive is clockwise seen from the shoulder. |
+
+The game already moves weapons into the model's own closed fist (the log's
+`right fist offset` line); these settings fine-tune that.
 
 The game reads `HERO.ini` when it loads the model, so restart after changing it.
 
