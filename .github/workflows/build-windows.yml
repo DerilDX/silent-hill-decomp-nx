@@ -52,20 +52,37 @@ jobs:
             mingw-w64-x86_64-openal
             mingw-w64-x86_64-libjpeg-turbo
 
-      # Headers only: ffmpeg is loaded at runtime and the DLLs ship from the
-      # official release (see realtime_publish.py carry-forward). Without them the
-      # build still succeeds, just with the FMV fallback compiled out, so this step
-      # never decides whether the job runs.
-      - name: ffmpeg headers (optional)
-        timeout-minutes: 8
+      # Headers only, pinned: ffmpeg is loaded at runtime and its DLLs are carried
+      # from the official release (realtime_publish.py), which ships FFmpeg 8
+      # (avcodec-62). The runner's current MSYS2 ffmpeg is a newer major than the
+      # loader's 6/7/8 table, so build against the 8.0.1 headers that match the
+      # shipped DLLs instead. Unpacked, never installed. If the pinned package
+      # has left the repo the build still succeeds with the fallback compiled
+      # out, so this step never decides whether the job runs.
+      - name: ffmpeg 8 headers (optional, pinned)
+        timeout-minutes: 5
         continue-on-error: true
-        run: pacman -S --noconfirm --needed mingw-w64-x86_64-ffmpeg
+        run: |
+          set -euo pipefail
+          PKG=mingw-w64-x86_64-ffmpeg-8.0.1-7-any.pkg.tar.zst
+          FF="$(cygpath -u "$RUNNER_TEMP")/ffmpeg8"
+          mkdir -p "$FF"
+          curl -fsSL --retry 3 -o "$FF/$PKG" "https://repo.msys2.org/mingw/mingw64/$PKG"
+          tar --zstd -xf "$FF/$PKG" -C "$FF" --wildcards 'mingw64/include/libav*' 'mingw64/include/libsw*'
+          grep -m1 LIBAVCODEC_VERSION_MAJOR "$FF/mingw64/include/libavcodec/version_major.h"
+          echo "FFMPEG_PREFIX=$(cygpath -m "$FF")/mingw64" >> "$GITHUB_ENV"
 
       # Same configure as build.sh, but -k 0 keeps going past the first failure,
       # so one CI run reports every file a newer MSYS2 toolchain rejects.
       - name: Build (Ninja + map DLLs)
         run: |
-          cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=ON
+          FFARG=()
+          if [ -n "${FFMPEG_PREFIX:-}" ]; then
+            FFARG=(-DSH_FFMPEG_PREFIX="$FFMPEG_PREFIX")
+          else
+            echo "::warning::Pinned ffmpeg headers unavailable; this build has the FMV fallback compiled out."
+          fi
+          cmake -S pc_port -B pc_port/build -G Ninja -DSH_BUILD_MAP_DLLS=ON "${FFARG[@]}"
           cmake --build pc_port/build -- -k 0
 
       - name: Stage release files
