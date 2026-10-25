@@ -209,6 +209,9 @@ typedef struct GrModernVertex
 	u_char r, g, b, a;
 	char tcx, tcy, fog, reserved;
 	float ppx, ppy, ppw, nx, ny, nz, vsx, vsy, vsz;
+	/* Skinned characters lit per pixel: view-space normal (w unused) and
+	 * tangent (w = bitangent sign). Zero on every other modern mesh. */
+	float snx, sny, snz, snw, stx, sty, stz, stw;
 } GrModernVertex;
 #pragma pack(pop)
 
@@ -226,6 +229,8 @@ typedef enum
 	a_uvlim,
 	a_farP0,
 	a_farP1,
+	a_skinNormal,
+	a_skinTangent,
 } ShaderAttrib;
 
 typedef enum
