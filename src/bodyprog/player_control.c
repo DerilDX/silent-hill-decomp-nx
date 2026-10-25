@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <math.h>
 #include "sh_log.h"
 
 static jmp_buf s_PlayerCrashJmp;
@@ -1205,6 +1206,208 @@ static inline void func_80071968_Switch1(void)
 /* Time spent in the walk<->run transition blend, for the deadlock bound at the
  * bottom of Player_AnimUpdate. */
 static q19_12 s_walkRunBlendTime = 0;
+
+/* Alternate-camera diagonal legs. The TPS shim moves Harry 45 degrees off his
+ * facing while the forward or backward clip plays, so his feet stepped straight
+ * ahead of the direction he actually travelled. The matching strafe clip is
+ * overlaid on the leg bones, phase-locked to the playing cycle. Pose only:
+ * position, speed, footsteps and the anim state machine never see it, and it
+ * works on the bone coords, so replacement characters inherit it. */
+typedef struct
+{
+    u8  baseStatus;
+    u8  leftAnim;
+    u8  rightAnim;
+    s16 leftPhase;
+    s16 rightPhase;
+} s_PcDiagLegClip;
+
+/* Phase offsets (fraction of a cycle) line each foot's swing in the strafe clip
+ * up with the same foot's swing in the base clip, measured from HB_BASE.ANM foot
+ * positions. The sidesteps lead with the outside foot, hence the half-cycle
+ * difference between left and right; the run-strafes are a forward run with the
+ * legs turned and already line up. */
+static const s_PcDiagLegClip PC_DIAG_LEG_CLIPS[] = {
+    { ANIM_STATUS(HarryAnim_WalkForward,  true), HarryAnim_SidestepLeft, HarryAnim_SidestepRight, -Q12(0.17f),  Q12(0.34f) },
+    { ANIM_STATUS(HarryAnim_WalkBackward, true), HarryAnim_SidestepLeft, HarryAnim_SidestepRight,  Q12(0.28f), -Q12(0.21f) },
+    { ANIM_STATUS(HarryAnim_RunForward,   true), HarryAnim_RunLeft,      HarryAnim_RunRight,       Q12(0.0f),  -Q12(0.06f) },
+};
+
+static q19_12        s_DiagLegWeight;
+static q19_12        s_DiagLegFade;
+static s32           s_DiagLegSide;
+static GsCOORDINATE2 s_DiagLegStrafe[HarryBone_Count];
+static MATRIX        s_DiagLegLast[HarryBone_Count];
+
+static void Pc_DiagLegMix(MATRIX* dst, const MATRIX* src, q19_12 w)
+{
+    float fw = w / 4096.0f;
+    float m[3][3];
+    float len[3];
+    float d;
+    s32   i;
+    s32   j;
+    s32   k;
+
+    for (i = 0; i < 3; i++)
+    {
+        float la = 0.0f;
+        float lb = 0.0f;
+
+        for (j = 0; j < 3; j++)
+        {
+            la     += (float)dst->m[i][j] * dst->m[i][j];
+            lb     += (float)src->m[i][j] * src->m[i][j];
+            m[i][j] = dst->m[i][j] + (src->m[i][j] - dst->m[i][j]) * fw;
+        }
+        len[i]     = sqrtf(la) + (sqrtf(lb) - sqrtf(la)) * fw;
+        dst->t[i] += ((src->t[i] - dst->t[i]) * w) >> Q12_SHIFT;
+    }
+
+    /* A component lerp between clips whose hips sit up to ~60 degrees apart
+     * shrinks the rows toward the chord and visibly thins the legs. Restore an
+     * orthogonal basis at the source clips' own row length (retail keyframes
+     * top out at 4064, not 4096). */
+    for (i = 0; i < 3; i++)
+    {
+        for (k = 0; k < i; k++)
+        {
+            d = m[i][0] * m[k][0] + m[i][1] * m[k][1] + m[i][2] * m[k][2];
+            for (j = 0; j < 3; j++)
+            {
+                m[i][j] -= d * m[k][j];
+            }
+        }
+        d = sqrtf(m[i][0] * m[i][0] + m[i][1] * m[i][1] + m[i][2] * m[i][2]);
+        if (d < 1e-3f)
+        {
+            return;
+        }
+        for (j = 0; j < 3; j++)
+        {
+            m[i][j] /= d;
+        }
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        for (j = 0; j < 3; j++)
+        {
+            dst->m[i][j] = (s16)lrintf(m[i][j] * len[i]);
+        }
+    }
+}
+
+static void Pc_DiagonalLegsApply(s_SubCharacter* player, s_AnmHeader* anmHdr, GsCOORDINATE2* coords)
+{
+    const s_PcDiagLegClip* clip = NULL;
+    q19_12                 target;
+    q19_12                 step;
+    s32                    mZ;
+    s32                    mX;
+    s32                    i;
+
+    if (coords != g_SysWork.playerBoneCoords || anmHdr == NULL || anmHdr->boneCount != HarryBone_Count ||
+        anmHdr->keyframeCount <= HARRY_BASE_ANIM_INFOS[ANIM_STATUS(HarryAnim_RunRight, true)].endKeyframeIdx)
+    {
+        s_DiagLegWeight = Q12(0.0f);
+        s_DiagLegFade   = Q12(0.0f);
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(PC_DIAG_LEG_CLIPS); i++)
+    {
+        if (player->model.anim.status == PC_DIAG_LEG_CLIPS[i].baseStatus)
+        {
+            clip = &PC_DIAG_LEG_CLIPS[i];
+            break;
+        }
+    }
+
+    step = Q12_MULT(g_DeltaTime, Q12(4.0f));
+    if (clip != NULL)
+    {
+        /* 2D control zeroes the stepping holds, and only the TPS shim's diagonal
+         * branch sets a non-zero heading, so this is exactly "moving diagonally
+         * under an alternate camera". */
+        mZ     = ((g_Player_IsMovingForward & 1) ? 1 : 0) - (g_Player_IsMovingBackward ? 1 : 0);
+        mX     = (g_Player_IsSteppingRightHold ? 1 : 0) - (g_Player_IsSteppingLeftHold ? 1 : 0);
+        target = (g_DebugThirdPersonCam && mZ != 0 && mX != 0 && g_Player_HeadingAngle != Q12_ANGLE(0.0f)) ? Q12(0.5f) : Q12(0.0f);
+
+        // Swapping sides drains to the base clip first instead of snapping to the other strafe.
+        if (target != Q12(0.0f) && mX != s_DiagLegSide)
+        {
+            if (s_DiagLegWeight == Q12(0.0f))
+            {
+                s_DiagLegSide = mX;
+            }
+            else
+            {
+                target = Q12(0.0f);
+            }
+        }
+
+        if (s_DiagLegWeight < target)
+        {
+            s_DiagLegWeight = MIN(s_DiagLegWeight + step, target);
+        }
+        else
+        {
+            s_DiagLegWeight = MAX(s_DiagLegWeight - step, target);
+        }
+    }
+    else if (s_DiagLegWeight > Q12(0.0f))
+    {
+        /* The next clip's own blend-in starts from the base clip's keyframe, not
+         * from the bones, so ease off the last blended pose instead of dropping it. */
+        s_DiagLegWeight = Q12(0.0f);
+        s_DiagLegFade   = Q12(1.0f);
+    }
+
+    if (s_DiagLegWeight > Q12(0.0f))
+    {
+        s_AnimInfo* base = &HARRY_BASE_ANIM_INFOS[clip->baseStatus];
+        s_AnimInfo* side = &HARRY_BASE_ANIM_INFOS[ANIM_STATUS((s_DiagLegSide > 0) ? clip->rightAnim : clip->leftAnim, true)];
+        s32         baseLen = base->endKeyframeIdx + 1 - base->startKeyframeIdx;
+        s32         sideLen = side->endKeyframeIdx + 1 - side->startKeyframeIdx;
+        q19_12      phase;
+        s32         kf0;
+        s32         kf1;
+
+        phase  = (player->model.anim.time - Q12(base->startKeyframeIdx)) / baseLen;
+        phase += (s_DiagLegSide > 0) ? clip->rightPhase : clip->leftPhase;
+        phase  = Q12_FRACT(phase) * sideLen;
+
+        kf0 = side->startKeyframeIdx + FP_FROM(phase, Q12_SHIFT);
+        kf1 = kf0 + 1;
+        if (kf1 > side->endKeyframeIdx)
+        {
+            kf1 = side->startKeyframeIdx;
+        }
+
+        Anim_BoneUpdate(anmHdr, s_DiagLegStrafe, kf0, kf1, Q12_FRACT(phase));
+        for (i = HarryBone_Hips; i < HarryBone_Count; i++)
+        {
+            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegStrafe[i].coord, s_DiagLegWeight);
+        }
+    }
+
+    if (s_DiagLegFade > Q12(0.0f))
+    {
+        for (i = HarryBone_Hips; i < HarryBone_Count; i++)
+        {
+            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegLast[i], s_DiagLegFade);
+        }
+        s_DiagLegFade = MAX(s_DiagLegFade - (step * 2), Q12(0.0f));
+    }
+    else if (s_DiagLegWeight > Q12(0.0f))
+    {
+        for (i = HarryBone_Hips; i < HarryBone_Count; i++)
+        {
+            s_DiagLegLast[i] = coords[i].coord;
+        }
+    }
+}
 #endif
 
 void Player_AnimUpdate(s_SubCharacter* player, s_PlayerExtra* extra, s_AnmHeader* anmHdr, GsCOORDINATE2* coords) // 0x80071968
@@ -1410,6 +1613,9 @@ void Player_AnimUpdate(s_SubCharacter* player, s_PlayerExtra* extra, s_AnmHeader
 
         animInfo = &HARRY_BASE_ANIM_INFOS[player->model.anim.status];
         animInfo->playbackFunc(&player->model, anmHdr, coords, animInfo);
+#ifdef SH_PC_PORT
+        Pc_DiagonalLegsApply(player, anmHdr, coords);
+#endif
 
         // Re-enable upper body bones, disable lower body bones.
         g_SysWork.playerWork.extra.disabledAnimBones = HARRY_LOWER_BODY_BONE_MASK;
@@ -1425,6 +1631,9 @@ void Player_AnimUpdate(s_SubCharacter* player, s_PlayerExtra* extra, s_AnmHeader
 
     animInfo = &HARRY_BASE_ANIM_INFOS[ANIM_STATUS(HarryAnim_Still, false)];
     animInfo->playbackFunc(&player->model, anmHdr, coords, animInfo);
+#ifdef SH_PC_PORT
+    Pc_DiagonalLegsApply(player, anmHdr, coords);
+#endif
 
     // Re-enable upper body bones, disable lower body bones.
     g_SysWork.playerWork.extra.disabledAnimBones = HARRY_LOWER_BODY_BONE_MASK;
