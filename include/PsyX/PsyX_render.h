@@ -133,7 +133,11 @@
  * driver every frame. RG8 is the same 8-bit-normalised value to the shader, at
  * 1 MB and a straight copy. Costs a few ms on fast drivers; on weak GL 3.1
  * iGPUs the converting path is the difference between playable and ~3 FPS. */
-#if defined(RENDERER_OGL)
+#if defined(RENDERER_OGL) || (defined(RENDERER_OGLES) && OGLES_VERSION == 3)
+/* ES 3 too: RG8 is colour-renderable there, and the offscreen/framebuffer blit
+ * paths (enabled for OGLES_VERSION == 3) draw into the VRAM texture. Luminance-
+ * alpha cannot be a render target, so every such draw failed with
+ * GL_INVALID_FRAMEBUFFER_OPERATION and the 3D world never appeared. */
 #	define VRAM_FORMAT            GL_RG
 #	define VRAM_INTERNAL_FORMAT   GL_RG8
 #elif defined(RENDERER_OGLES)
