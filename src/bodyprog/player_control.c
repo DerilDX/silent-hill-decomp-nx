@@ -1239,7 +1239,11 @@ static s32           s_DiagLegSide;
 static GsCOORDINATE2 s_DiagLegStrafe[HarryBone_Count];
 static MATRIX        s_DiagLegLast[HarryBone_Count];
 
-static void Pc_DiagLegMix(MATRIX* dst, const MATRIX* src, q19_12 w)
+/* Only channels the clip keys are mixed. Bones without keyed translation (thighs,
+ * shins, feet) keep the offset Anim_BoneInit wrote once and the anim never
+ * rewrites it, so pulling it toward the scratch pose compounded frame over frame
+ * and folded the legs into the hips. */
+static void Pc_DiagLegMix(MATRIX* dst, const MATRIX* src, q19_12 w, const s_AnmBindPose* bind)
 {
     float fw = w / 4096.0f;
     float m[3][3];
@@ -1260,8 +1264,16 @@ static void Pc_DiagLegMix(MATRIX* dst, const MATRIX* src, q19_12 w)
             lb     += (float)src->m[i][j] * src->m[i][j];
             m[i][j] = dst->m[i][j] + (src->m[i][j] - dst->m[i][j]) * fw;
         }
-        len[i]     = sqrtf(la) + (sqrtf(lb) - sqrtf(la)) * fw;
-        dst->t[i] += ((src->t[i] - dst->t[i]) * w) >> Q12_SHIFT;
+        len[i] = sqrtf(la) + (sqrtf(lb) - sqrtf(la)) * fw;
+        if (bind->translationDataIdx >= 0)
+        {
+            dst->t[i] += ((src->t[i] - dst->t[i]) * w) >> Q12_SHIFT;
+        }
+    }
+
+    if (bind->rotationDataIdx < 0)
+    {
+        return;
     }
 
     /* A component lerp between clips whose hips sit up to ~60 degrees apart
@@ -1388,7 +1400,7 @@ static void Pc_DiagonalLegsApply(s_SubCharacter* player, s_AnmHeader* anmHdr, Gs
         Anim_BoneUpdate(anmHdr, s_DiagLegStrafe, kf0, kf1, Q12_FRACT(phase));
         for (i = HarryBone_Hips; i < HarryBone_Count; i++)
         {
-            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegStrafe[i].coord, s_DiagLegWeight);
+            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegStrafe[i].coord, s_DiagLegWeight, &anmHdr->bindPoses[i]);
         }
     }
 
@@ -1396,7 +1408,7 @@ static void Pc_DiagonalLegsApply(s_SubCharacter* player, s_AnmHeader* anmHdr, Gs
     {
         for (i = HarryBone_Hips; i < HarryBone_Count; i++)
         {
-            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegLast[i], s_DiagLegFade);
+            Pc_DiagLegMix(&coords[i].coord, &s_DiagLegLast[i], s_DiagLegFade, &anmHdr->bindPoses[i]);
         }
         s_DiagLegFade = MAX(s_DiagLegFade - (step * 2), Q12(0.0f));
     }
