@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -113,9 +113,10 @@ public partial class Form1 : Form
     // One-time offer of realtime updates, the first time a launcher that has the
     // setting starts after updating from one that did not. The flag is set before
     // asking and never cleared, so the question is asked once ever, not once per
-    // update. Only launchers that ran before write launcher_seen_* (from their
-    // update checks), and the shipped config.cfg has no launcher keys at all, so a
-    // fresh install is never asked; it just records the flag.
+    // update. The shipped config.cfg has no launcher_* keys, and older launchers
+    // always left some behind (launcher_repo_url, launcher_build, launcher_language),
+    // so their presence means an update. launcher_seen_* is not enough: it is only
+    // written once an update has been installed through the launcher.
     private void OfferRealtimeUpdatesOnce()
     {
         try
@@ -124,7 +125,7 @@ public partial class Form1 : Form
             var settings = LauncherSettings.Load(config);
             if (!settings.IsDefaultRepo) return;
 
-            bool updatedFromOlder = config.HasKeyWithPrefix("launcher_seen_");
+            bool updatedFromOlder = config.HasKeyWithPrefix("launcher_", "launcher_realtime_offered");
             config.EnsureLauncherSection();
             config.Set("launcher_realtime_offered", "1");
             config.Save();
