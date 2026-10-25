@@ -51,7 +51,7 @@
 48 = SIBYL  # MAP0_S01.24: Uh-huh?
 49 = SIBYL  # MAP0_S01.56: Got it?
 50 = HERO  # MAP0_S01.42: Hmph.
-51 = HERO  # MAP0_S01.28: Sorry.
+51 = SIBYL  # MAP0_S01.28: Sorry.
 52 = HERO  # MAP0_S01.36: Harry...
 57 = DARIA  # MAP2_S01.16: I've been expecting you. It was foretold by Gyromancy.
 58 = DARIA  # MAP2_S01.33: Make haste to the hospital before it's too late.

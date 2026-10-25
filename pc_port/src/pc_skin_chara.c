@@ -1219,6 +1219,60 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
             goto fail;
         }
 
+    /* Harry's chest and hips turn independently about one waist point, and a
+     * game rig weights the belly almost wholly to the spine above a single
+     * blended ring, so every chest lean sheared the torso off the belt. The
+     * chest's share now fades in over the lowest part of the torso instead.
+     * Weight shared by both thighs (a seat plate or crotch split evenly)
+     * landed halfway between two legs that move apart and crumpled, so that
+     * share rides the hips. */
+    {
+        float y0 = anchor[1][1], span = (anchor[1][1] - anchor[2][1]) * 0.35f;
+
+        for (j = 0; j < (size_t)ch->vertCount; j++)
+        {
+            PcSkinVert* sv = &ch->verts[j];
+            float t = span > 1e-3f ? (y0 - gpos[j * 3 + 1]) / span : 1.0f, toHips = 0.0f;
+            int qc = -1, qh = -1, ql = -1, qr = -1, q;
+
+            for (q = 0; q < sv->n; q++)
+            {
+                if (sv->bone[q] == 1) qc = q;
+                if (sv->bone[q] == 11) qh = q;
+                if (sv->bone[q] == 12) qr = q;
+                if (sv->bone[q] == 15) ql = q;
+            }
+            if (qc >= 0 && t < 1.0f)
+            {
+                t = t < 0.0f ? 0.0f : t;
+                toHips = sv->w[qc] * (1.0f - t * t * (3.0f - 2.0f * t));
+            }
+            if ((toHips <= 0.0f && (ql < 0 || qr < 0)) || (qh < 0 && sv->n >= PC_SKIN_INFL))
+                continue;
+            if (qh < 0)
+            {
+                qh = sv->n++;
+                sv->bone[qh] = 11;
+                sv->w[qh] = 0.0f;
+            }
+            if (qc >= 0)
+                sv->w[qc] -= toHips;
+            sv->w[qh] += toHips;
+            if (ql >= 0 && qr >= 0)
+            {
+                float shared = sv->w[ql] < sv->w[qr] ? sv->w[ql] : sv->w[qr];
+                sv->w[ql] -= shared;
+                sv->w[qr] -= shared;
+                sv->w[qh] += 2.0f * shared;
+            }
+            qc = 0;
+            for (q = 1; q < sv->n; q++)
+                if (sv->w[q] > sv->w[qc])
+                    qc = q;
+            sv->dom = sv->bone[qc];
+        }
+    }
+
     /* Model-side direction of end bones: centroid of the geometry they own. */
     memset(dirSum, 0, sizeof(dirSum));
     memset(dirCount, 0, sizeof(dirCount));
@@ -1280,9 +1334,13 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
          * about the chest centre, a hump on whichever side the clavicle
          * owns more of the shoulder. Neither end is pinned, so the turn
          * bought nothing. */
+        /* The hips keep Harry's frame too: a rig's pelvis joint sits wherever
+         * its author put it (level with the thighs on the Halo rig, behind
+         * them on GTA's), so the turn onto his thigh midpoint was 41 degrees
+         * or noise, and every hip rotation then ran about the wrong axes. */
         lg = V3_Len(gd);
         lm = V3_Len(md);
-        if (b == 3 || b == 7)
+        if (b == 3 || b == 7 || b == 11)
             memcpy(R[b], restR, sizeof(restR));
         /* Legs keep the game's rotation unless the model's leg points well
          * away from it. Harry's rest is a step, so his left shin and both
