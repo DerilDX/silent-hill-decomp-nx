@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""Publish one Windows CI build to the rolling "realtime" release.
+"""Publish one Windows CI build to the realtime releases.
 
-The realtime stream is opt-in from the launcher's Build Settings. It lives as ONE
-pre-release on the source repo (tag `realtime`), never in silent-hill-pc-nightly,
-so launchers that predate the feature cannot see it at all: they only ever read
-the nightly repo.
+The realtime stream is opt-in from the launcher's Build Settings. It lives on
+the source repo, never in silent-hill-pc-nightly, so launchers that predate the
+feature cannot see it at all: they only ever read the nightly repo.
 
-The release holds:
-  SHPC_rt-<version>.zip    one complete Windows build per push, the same layout
-                           as a scripted zip release, so it can be downloaded
-                           and played directly as well as installed by the
-                           launcher (which extracts only the files that changed)
-  realtime.json            index of the newest KEEP builds, newest first; each
-                           entry is a zip-mode manifest (zip_url plus per-file
-                           path/sha256) in the launcher's format
-  CHANGELOG_REALTIME.md    every commit since the last official release, grouped
-                           by day, newest first (rebuilt from git each publish)
-  SHPC-linux-x64.tar.gz, SHPC-macos-arm64.zip, SilentHill-ios-unsigned.ipa,
-  SilentHill-android.apk   newest Linux/macOS/iOS/Android CI builds, replaced
-                           in place by those workflows and left alone here
+Two pre-releases, because a GitHub asset list cannot hold folders:
+
+  `realtime` - the newest build of everything, for people browsing by hand
+    SHPC_rt-<version>.zip    newest Windows build, same layout as a scripted zip
+                             release: download and play, or let the launcher
+                             install it (extracting only the files that changed)
+    realtime.json            index of the newest KEEP Windows builds, newest first;
+                             each entry is a zip-mode manifest (zip_url plus per-file
+                             path/sha256). The launcher reads it from HERE.
+    CHANGELOG_REALTIME.md    every commit since the last official release, grouped
+                             by day, newest first (rebuilt from git each publish)
+    SHPC-linux-x64.tar.gz, SHPC-macos-arm64.zip, SilentHill-ios-unsigned.ipa,
+    SilentHill-android.apk   newest Linux/macOS/iOS/Android builds, replaced in
+                             place by those workflows and left alone here
+
+  `realtime-history` - older builds
+    SHPC_rt-<version>.zip    every Windows build the index lists. Index zip_urls
+                             point here, so a rollback target keeps its URL after
+                             it leaves `realtime`.
+    <stem>_<date>-<commit>.* the newest 15 builds of each other platform, added and
+                             pruned by those workflows and left alone here
 
 Files the Windows CI cannot produce (ANGLE, the ffmpeg runtime, UnRAR.dll, and
 the launcher for anyone downloading directly) are carried from the newest
@@ -49,6 +56,8 @@ LAUNCHER_NAME = "SilentHillPC_Launcher.exe"
 # pc-port, build-ios on ios-port, build-android on android-port). Never pruned.
 FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos-arm64.zip",
                 "SilentHill-ios-unsigned.ipa", "SilentHill-android.apk"}
+HISTORY_TAG = "realtime-history"
+WIN_ZIP_PREFIX = "SHPC_rt-"
 
 # Never carried: the official changelog belongs to the scripted stream and
 # config.cfg comes from source. The launcher is carried into the zip for direct
@@ -57,17 +66,24 @@ FIXED_ASSETS = {INDEX_NAME, CHANGELOG_NAME, "SHPC-linux-x64.tar.gz", "SHPC-macos
 CARRY_EXCLUDE = {"CHANGELOG.md", "config.cfg"}
 ZIP_ONLY = {LAUNCHER_NAME}
 
-RELEASE_NOTES = """Automatic builds of every push to `pc-port`, for players who want changes as soon as they land instead of waiting for a release.
+RELEASE_NOTES = """Automatic builds of every push, for players who want changes as soon as they land instead of waiting for a release. This page always has just the newest build of each platform; older ones are under [Realtime history]({history_url}).
 
 **Most players should use the normal releases.** These builds are not tested before they go up.
 
-**Newest build: {version}** (`{commit}`, {date} UTC)
+**Newest Windows build: {version}** (`{commit}`, {date} UTC)
 - Windows: [{zip_name}]({zip_url}): unzip into a folder and run `SilentHillPC_Launcher.exe` or `SilentHillPC.exe`. Put your `Silent Hill (USA).bin` in `gamedata/`.
-- Linux: `SHPC-linux-x64.tar.gz` · macOS: `SHPC-macos-arm64.zip` (newest `pc-port` CI builds, below)
+- Linux: `SHPC-linux-x64.tar.gz` · macOS: `SHPC-macos-arm64.zip` (newest `pc-port` builds)
 - iOS: `SilentHill-ios-unsigned.ipa` (newest `ios-port` build; sideload with Sideloadly or AltStore, which sign it for your device)
-- Android: `SilentHill-android.apk` (newest `android-port` build, debug-signed for sideloading)
+- Android: `SilentHill-android.apk` (newest `android-port` build; installs over the released APK)
 
-To follow these builds from the launcher instead: **Build Settings → Realtime updates**. It installs only the files that changed, and you can roll back to any of the last {keep} builds from the same menu. `CHANGELOG_REALTIME.md` lists what each build changed."""
+To follow these builds from the launcher instead: **Build Settings → Realtime updates**. It installs only the files that changed, and you can roll back to any of the last {keep} Windows builds from the same menu. `CHANGELOG_REALTIME.md` lists what changed."""
+
+HISTORY_NOTES = """Older automatic builds. The newest build of each platform is on [Realtime builds]({realtime_url}).
+
+- Windows: the last {keep} builds, `SHPC_rt-<version>.zip`. The launcher's **Build Settings → Realtime updates** can roll back to any of them for you.
+- Linux, macOS, iOS, Android: the last 15 builds of each, named `<platform>_<date>-<commit>`.
+
+These are untested builds. Back up `gamedata/save` before going back to an older one."""
 
 
 def log(msg):
@@ -311,7 +327,7 @@ def main():
     zip_name = f"SHPC_{build_id}.zip"
     zip_path = os.path.join(work, zip_name)
     write_zip(zip_path, files)
-    base_url = f"https://github.com/{a.repo}/releases/download/{a.tag}/"
+    base_url = f"https://github.com/{a.repo}/releases/download/{HISTORY_TAG}/"
 
     build = {
         "id": build_id,
@@ -332,18 +348,42 @@ def main():
     with open(idx_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(index, f, indent=1)
 
+    history = release_assets(a.repo, HISTORY_TAG)
     referenced = {b["zip_name"] for b in index["builds"]}
-    stale = sorted(x for x in (assets or set()) if x not in referenced and x not in FIXED_ASSETS)
+    # Builds published before the history release existed live only in `realtime`
+    # and their index URLs say so; copy them across so rollback survives the prune.
+    migrate = [b for b in index["builds"][1:]
+               if b["zip_name"] not in (history or set()) and b["zip_name"] in (assets or set())]
+    stale_main = sorted(x for x in (assets or set()) if x not in FIXED_ASSETS and x != zip_name)
+    stale_hist = sorted(x for x in (history or set()) if x.startswith(WIN_ZIP_PREFIX) and x not in referenced)
+    realtime_url = f"https://github.com/{a.repo}/releases/tag/{a.tag}"
+    history_url = f"https://github.com/{a.repo}/releases/tag/{HISTORY_TAG}"
     notes = RELEASE_NOTES.format(keep=a.keep, version=version, commit=a.commit[:9], date=date,
-                                 zip_name=zip_name, zip_url=base_url + zip_name)
+                                 zip_name=zip_name, zip_url=base_url + zip_name, history_url=history_url)
+    hist_notes = HISTORY_NOTES.format(keep=a.keep, realtime_url=realtime_url)
 
     log(f"Build {version} from {a.commit[:9]}: {zip_name} ({os.path.getsize(zip_path) // (1 << 20)} MB, "
-        f"{len(files)} files), {len(stale)} asset(s) to prune, {len(subjects)} commit(s)")
+        f"{len(files)} files); {len(migrate)} older zip(s) to copy into history; prune "
+        f"{len(stale_main)} from realtime, {len(stale_hist)} from history; {len(subjects)} commit(s)")
     for _, s in subjects:
         log(f"  - {s}")
     if a.dry_run:
         log(f"Dry run: zip at {zip_path}, index at {idx_path}. Nothing published.")
         return 0
+
+    if history is None:
+        gh("release", "create", HISTORY_TAG, "--repo", a.repo, "--prerelease", "--latest=false",
+           "--target", a.commit, "--title", "Realtime history (older builds)", "--notes", hist_notes)
+    for b in migrate:
+        p = download_asset(a.repo, a.tag, b["zip_name"], work)
+        if p:
+            gh("release", "upload", HISTORY_TAG, "--repo", a.repo, "--clobber", p)
+            os.remove(p)
+            b["zip_url"] = base_url + b["zip_name"]
+    if migrate:
+        with open(idx_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(index, f, indent=1)
+    gh("release", "upload", HISTORY_TAG, "--repo", a.repo, "--clobber", zip_path)
 
     if assets is None:
         gh("release", "create", a.tag, "--repo", a.repo, "--prerelease", "--latest=false",
@@ -351,8 +391,11 @@ def main():
     gh("release", "upload", a.tag, "--repo", a.repo, "--clobber", zip_path)
     gh("release", "upload", a.tag, "--repo", a.repo, "--clobber", idx_path, cl_path)
     gh("release", "edit", a.tag, "--repo", a.repo, "--prerelease", "--latest=false", "--notes", notes)
-    for name in stale:
+    gh("release", "edit", HISTORY_TAG, "--repo", a.repo, "--prerelease", "--latest=false", "--notes", hist_notes)
+    for name in stale_main:
         gh("release", "delete-asset", a.tag, name, "--repo", a.repo, "--yes", check=False)
+    for name in stale_hist:
+        gh("release", "delete-asset", HISTORY_TAG, name, "--repo", a.repo, "--yes", check=False)
     log("Published.")
     return 0
 
