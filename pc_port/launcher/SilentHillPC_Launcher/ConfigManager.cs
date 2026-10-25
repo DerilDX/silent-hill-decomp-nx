@@ -39,6 +39,11 @@ public class ConfigManager
         return _values.ContainsKey(key) ? _values[key] : defaultValue;
     }
 
+    public bool HasKeyWithPrefix(string prefix)
+    {
+        return _values.Keys.Any(k => k.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
     public void Set(string key, string value)
     {
         // An unchanged value is not an edit. Forms push every field they show on

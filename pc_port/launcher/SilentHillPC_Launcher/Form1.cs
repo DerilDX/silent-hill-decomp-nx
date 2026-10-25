@@ -105,8 +105,52 @@ public partial class Form1 : Form
             UpdateChecker.CleanupStaleTemp();
             CheckDiscImage();
             FfmpegCheck.WarnIfNeeded(this, AppDomain.CurrentDomain.BaseDirectory);
+            OfferRealtimeUpdatesOnce();
             SilentAutoCheckForUpdates();
         };
+    }
+
+    // One-time offer of realtime updates, the first time a launcher that has the
+    // setting starts after updating from one that did not. The flag is set before
+    // asking and never cleared, so the question is asked once ever, not once per
+    // update. Only launchers that ran before write launcher_seen_* (from their
+    // update checks), and the shipped config.cfg has no launcher keys at all, so a
+    // fresh install is never asked; it just records the flag.
+    private void OfferRealtimeUpdatesOnce()
+    {
+        try
+        {
+            if (config.Get("launcher_realtime_offered", "0").Trim() == "1") return;
+            var settings = LauncherSettings.Load(config);
+            if (!settings.IsDefaultRepo) return;
+
+            bool updatedFromOlder = config.HasKeyWithPrefix("launcher_seen_");
+            config.EnsureLauncherSection();
+            config.Set("launcher_realtime_offered", "1");
+            config.Save();
+            if (!updatedFromOlder || settings.Realtime) return;
+
+            var answer = MessageBox.Show(this,
+                Loc.T("New: realtime updates\n\n" +
+                      "The launcher can now keep you on the very latest build. With realtime updates on, it " +
+                      "offers a new build every time a change is made to the game instead of waiting for the " +
+                      "next release, and you can roll back to an earlier build at any time.\n\n" +
+                      "These builds are made automatically and are not tested first, so they can have new " +
+                      "bugs. Back up your gamedata\\save folder if you turn this on.\n\n" +
+                      "Turn on realtime updates now?\n\n" +
+                      "If you choose No, you can turn them on any time under Build Settings > Realtime " +
+                      "updates. This message will not be shown again."),
+                Loc.T("Realtime updates"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (answer != DialogResult.Yes) return;
+
+            settings.Realtime = true;
+            settings.Build    = "latest";
+            settings.Save(config);
+            // Same as ticking the box in Build Settings: the new stream's first
+            // check offers its newest build outright.
+            settings.ClearSeen(config);
+        }
+        catch { /* best effort: never block startup over this */ }
     }
 
 
