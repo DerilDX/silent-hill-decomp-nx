@@ -197,6 +197,16 @@ typedef struct
     unsigned char*  nrgba;    /* normal map, if the material has one */
     int             nw, nh;
     u32             ntexture;
+    /* Occlusion, roughness and metalness packed into R, G and B, the layout
+     * glTF's ORM convention already uses, so one sampler serves all three. */
+    unsigned char*  orgba;
+    int             ow, oh;
+    u32             otexture;
+    float           metal, rough, aoStrength;
+    unsigned char*  ergba;    /* emissive */
+    int             ew, eh;
+    u32             etexture;
+    float           emissive[3];
     GrModernVertex* out[PC_SKIN_INST][2];
     u32*            idx[PC_SKIN_INST][2];
     int             idxCount[PC_SKIN_INST][2];
@@ -683,14 +693,66 @@ static void Skin_FileRelease(const struct cgltf_memory_options* mem, const struc
 static void Skin_DecodeTexture(const cgltf_texture* tex, const char* gltfPath, unsigned char** rgba, int* w,
                                int* h, const char* what);
 
+/* metallicRoughness (G rough, B metal) and occlusion (R) are separate glTF
+ * textures that are often the same image; either may be missing, and they need
+ * not share a size, so the other is sampled nearest onto the first's grid. */
+static void Skin_PackOrm(PcSkinMat* mat, unsigned char* mr, int mw, int mh, unsigned char* ao, int aw, int ah)
+{
+    int w = mr ? mw : aw, h = mr ? mh : ah, x, y;
+
+    if ((mr == NULL && ao == NULL) || w <= 0 || h <= 0 || (mat->orgba = (unsigned char*)malloc((size_t)w * h * 4)) == NULL)
+        return;
+    for (y = 0; y < h; y++)
+    {
+        for (x = 0; x < w; x++)
+        {
+            unsigned char* o = &mat->orgba[((size_t)y * w + x) * 4];
+            o[0] = ao ? ao[(((size_t)(y * ah / h)) * aw + (x * aw / w)) * 4] : 255;
+            o[1] = mr ? mr[((size_t)y * w + x) * 4 + 1] : 255;
+            o[2] = mr ? mr[((size_t)y * w + x) * 4 + 2] : 255;
+            o[3] = 255;
+        }
+    }
+    mat->ow = w;
+    mat->oh = h;
+}
+
 static void Skin_LoadImage(PcSkinMat* mat, const cgltf_material* m, const char* gltfPath)
 {
+    unsigned char *mr = NULL, *ao = NULL;
+    int mw = 0, mh = 0, aw = 0, ah = 0, i;
+    float es;
+
+    /* Without a metallic-roughness block glTF means fully metallic and rough,
+     * which on a model that simply never set one reads as dull grey metal. */
+    mat->metal = 0.0f;
+    mat->rough = 0.6f;
+    mat->aoStrength = 1.0f;
     if (m == NULL)
         return;
     if (m->has_pbr_metallic_roughness)
+    {
         Skin_DecodeTexture(m->pbr_metallic_roughness.base_color_texture.texture, gltfPath, &mat->rgba, &mat->w,
                            &mat->h, m->name);
+        Skin_DecodeTexture(m->pbr_metallic_roughness.metallic_roughness_texture.texture, gltfPath, &mr, &mw, &mh,
+                           m->name);
+        mat->metal = m->pbr_metallic_roughness.metallic_factor;
+        mat->rough = m->pbr_metallic_roughness.roughness_factor;
+    }
     Skin_DecodeTexture(m->normal_texture.texture, gltfPath, &mat->nrgba, &mat->nw, &mat->nh, m->name);
+    if (m->occlusion_texture.texture != NULL)
+    {
+        Skin_DecodeTexture(m->occlusion_texture.texture, gltfPath, &ao, &aw, &ah, m->name);
+        mat->aoStrength = m->occlusion_texture.scale;
+    }
+    Skin_PackOrm(mat, mr, mw, mh, ao, aw, ah);
+    free(mr);
+    free(ao);
+    es = m->has_emissive_strength ? m->emissive_strength.emissive_strength : 1.0f;
+    for (i = 0; i < 3; i++)
+        mat->emissive[i] = m->emissive_factor[i] * es;
+    if (mat->emissive[0] > 0.0f || mat->emissive[1] > 0.0f || mat->emissive[2] > 0.0f)
+        Skin_DecodeTexture(m->emissive_texture.texture, gltfPath, &mat->ergba, &mat->ew, &mat->eh, m->name);
 }
 
 static void Skin_DecodeTexture(const cgltf_texture* tex, const char* gltfPath, unsigned char** rgba, int* w,
@@ -2712,6 +2774,28 @@ static void Skin_FrameLight(PcSkinChara* ch, int buf)
     /* Mode 1 aims row 1 at the point light from each bone's origin
      * (func_8005A478); its length is the distance falloff, kept as is. */
     lt->point = (g_WorldEnvWork.field_0 == 1);
+    if (lt->point)
+    {
+        int k = 0;
+        for (r = 1; r < 3; r++)
+            if (V3_Len(lt->L[r]) > V3_Len(lt->L[k]))
+                k = r;
+        /* func_8005A478 writes the point light into row 0 (CR8/CR9) and the
+         * shader re-aims row 1; the sum is the same with rows and colour
+         * columns swapped together. */
+        if (k != 1)
+        {
+            for (c = 0; c < 3; c++)
+            {
+                float t = lt->L[k][c];
+                lt->L[k][c] = lt->L[1][c];
+                lt->L[1][c] = t;
+                t = lt->LC[c][k];
+                lt->LC[c][k] = lt->LC[c][1];
+                lt->LC[c][1] = t;
+            }
+        }
+    }
     lt->l1Mag = V3_Len(lt->L[1]);
     d[0] = g_WorldEnvWork.field_60.vx / 16.0f - ch->tw[ref][0];
     d[1] = g_WorldEnvWork.field_60.vy / 16.0f - ch->tw[ref][1];
@@ -2893,6 +2977,10 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
     }
     if (mat->ntexture == 0 && mat->nrgba != NULL)
         mat->ntexture = HiresOverride_CreateTextureRGBA(mat->nrgba, mat->nw, mat->nh);
+    if (mat->otexture == 0 && mat->orgba != NULL)
+        mat->otexture = HiresOverride_CreateTextureRGBA(mat->orgba, mat->ow, mat->oh);
+    if (mat->etexture == 0 && mat->ergba != NULL)
+        mat->etexture = HiresOverride_CreateTextureRGBA(mat->ergba, mat->ew, mat->eh);
     /* Depth is normalized here, at draw time, as the stock prims are. With PGXP
      * off the divisor is the SZ maximum that each GsDrawOt swaps in; read at
      * sort time it came from the frame's last OT -- the 2D one, near zero --
@@ -2918,11 +3006,12 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
 void Pc_SkinChara_ApplyLighting(u32 handle, unsigned int program)
 {
     enum { U_LIT, U_NMAP, U_NTEX, U_POINT, U_L0, U_L1, U_L2, U_L1MAG, U_LPOS, U_LC0, U_LC1, U_LC2, U_BK, U_BRIGHT,
-           U_FLAT, U_COUNT };
+           U_FLAT, U_ORM, U_ORMTEX, U_MAT, U_EMIS, U_EMISON, U_EMISTEX, U_COUNT };
     static const char* const names[U_COUNT] = { "u_skinLit", "u_skinNormalMap", "u_skinNormalTex", "u_skinPoint",
                                                 "u_skinL0", "u_skinL1", "u_skinL2", "u_skinL1Mag", "u_skinLightPos",
                                                 "u_skinLC0", "u_skinLC1", "u_skinLC2", "u_skinBK", "u_skinBright",
-                                                "u_skinFlat" };
+                                                "u_skinFlat", "u_skinOrm", "u_skinOrmTex", "u_skinMat",
+                                                "u_skinEmissive", "u_skinEmissiveOn", "u_skinEmissiveTex" };
     static unsigned int s_program;
     static GLint loc[U_COUNT];
     int ci = (int)((handle >> 8) & 0xFF), inst = (int)((handle >> 6) & 3), buf = (int)((handle >> 5) & 1),
@@ -2941,14 +3030,32 @@ void Pc_SkinChara_ApplyLighting(u32 handle, unsigned int program)
     if (loc[U_LIT] < 0)
         return;
     if (!(handle & PC_SKIN_HANDLE_FLAG) || ci >= s_charaCount || s_chara[ci].state != 1 ||
-        m >= s_chara[ci].matCount || !s_chara[ci].light[inst][buf].on)
+        m >= s_chara[ci].matCount)
     {
         glUniform1i(loc[U_LIT], 0);
+        glUniform1i(loc[U_EMISON], 0);
         return;
     }
     ch = &s_chara[ci];
     lt = &ch->light[inst][buf];
     mat = &ch->mats[m];
+    /* Glow does not depend on the light, so it shows in per-vertex mode too.
+     * Units 0-2 are the scene texture, the shadow map and the decode table;
+     * 3 to 5 are this material's normal, ORM and emissive maps. */
+    glUniform1i(loc[U_EMISON], mat->etexture != 0);
+    if (mat->etexture != 0)
+    {
+        glUniform3fv(loc[U_EMIS], 1, mat->emissive);
+        glUniform1i(loc[U_EMISTEX], 5);
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_2D, mat->etexture);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    if (!lt->on)
+    {
+        glUniform1i(loc[U_LIT], 0);
+        return;
+    }
     glUniform1i(loc[U_LIT], 1);
     glUniform1i(loc[U_FLAT], lt->flat);
     glUniform1i(loc[U_POINT], lt->point);
@@ -2963,12 +3070,23 @@ void Pc_SkinChara_ApplyLighting(u32 handle, unsigned int program)
     glUniform3fv(loc[U_BK], 1, lt->BK);
     glUniform1f(loc[U_BRIGHT], lt->bright);
     glUniform1i(loc[U_NMAP], mat->ntexture != 0);
-    /* Units 0-2 are the scene texture, the shadow map and the decode table. */
     if (mat->ntexture != 0)
     {
         glUniform1i(loc[U_NTEX], 3);
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, mat->ntexture);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    {
+        const float pbr[3] = { mat->metal, mat->rough, mat->aoStrength };
+        glUniform3fv(loc[U_MAT], 1, pbr);
+    }
+    glUniform1i(loc[U_ORM], mat->otexture != 0);
+    if (mat->otexture != 0)
+    {
+        glUniform1i(loc[U_ORMTEX], 4);
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, mat->otexture);
         glActiveTexture(GL_TEXTURE0);
     }
 }

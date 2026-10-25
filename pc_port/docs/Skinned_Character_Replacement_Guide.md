@@ -221,7 +221,18 @@ pores, most visibly under the flashlight. In Blender, connect the normal map ima
 - The vertex normals still decide the overall shading. Check Shade Smooth and Auto
   Smooth before blaming the normal map.
 
-Metallic, roughness, occlusion and emissive textures are ignored.
+Per pixel, the rest of the glTF material is used too:
+
+- **Metallic and roughness** (the factors, and the metallic-roughness texture with
+  roughness in green and metal in blue) give the model highlights from the game's lights,
+  the flashlight beam and the hero light. Low roughness is glossy, high is matte. A
+  material that sets neither is treated as a matte non-metal.
+- **Occlusion** (red channel) darkens creases and folds in the ambient light.
+- **Emissive** (texture times factor, and `KHR_materials_emissive_strength`) glows at
+  its own brightness, even in the dark and in Per Vertex mode.
+
+In Blender these are the Principled BSDF's Metallic, Roughness and Emission inputs. For
+occlusion, use a glTF Material Output node group's Occlusion input.
 
 **Hero Light** (F10 quick menu, Graphics page 2; `hero_light` 0 to 3 in the config,
 default 2) adds a soft fill light from above the camera to characters lit per pixel. It
