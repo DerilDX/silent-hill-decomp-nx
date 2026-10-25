@@ -12,7 +12,7 @@
     url = https://github.com/mkst/maspsx.git
 [submodule "pc_port/PsyCross"]
 	path = pc_port/PsyCross
-	url = https://github.com/ChaykaDed/silent-hill-decomp-nx.git
+	url = https://github.com/DerilDX/silent-hill-decomp-nx.git
 	branch = psycross-switch
 [submodule "pc_port/third_party/rcheevos"]
 	path = pc_port/third_party/rcheevos
