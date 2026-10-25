@@ -223,6 +223,16 @@ pores, most visibly under the flashlight. In Blender, connect the normal map ima
 
 Metallic, roughness, occlusion and emissive textures are ignored.
 
+**Hero Light** (F10 quick menu, Graphics page 2; `hero_light` 0 to 3 in the config,
+default 2) adds a soft fill light from above the camera to characters lit per pixel. It
+gives a model shape in flat daylight, where the game lights a character with one colour,
+and lets its normal map show in dim rooms. Set it to Off for the game's own lighting
+only.
+
+**Per-Pixel Lighting** (same page; `per_pixel_lighting = 1`, off by default) does the
+same per-pixel lighting for the stock world and the stock characters, and the hero light
+then reaches the stock characters too.
+
 ## Blinking
 
 Add a shape key that closes both eyes and name it `blink`. `eyeBlink`, `eyesClosed`, or

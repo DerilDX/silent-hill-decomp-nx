@@ -528,6 +528,16 @@ typedef struct {
      * (config key: chara_per_pixel_light) */
     int  charaPerPixelLight;
 
+    /* Stock world and characters lit per pixel: the GTE light sum the PSX runs
+     * per vertex, run per fragment instead. Off by default; applies live.
+     * (config key: per_pixel_lighting) */
+    int  perPixelLighting;
+
+    /* Fill light on characters lit per pixel, so their shape and normal maps
+     * read in flat daylight and dim rooms: 0 off, 1 low, 2 medium, 3 high.
+     * (config key: hero_light) */
+    int  heroLight;
+
     /* Strength of that blur: the gain of its feedback loop, 0 to 1. 1.0 is
      * hardware, where the overlay's own 50/50 composite is the only decay.
      * Lower fades the ghost faster. (config key: dream_blur_strength) */

@@ -123,6 +123,8 @@ s_PcConfig g_PcConfig = {
     .minimapShowWithoutMap   = 0, /* no map found: no minimap (1 = empty panel + arrow) */
     .dreamBlur               = 1, /* dream/ghosting screen blur (0 = loading trail only) */
     .charaPerPixelLight      = 1,
+    .perPixelLighting        = 0,
+    .heroLight               = 2,
     .dreamBlurStrength       = 1.0f, /* feedback gain of that blur; 1.0 = hardware */
     .loadScreenMin           = 3.0f, /* seconds the Harry loading screen stays up at least */
     .minimapOpacity          = 100.0f,
@@ -1265,6 +1267,16 @@ else if (strcmp(key, "enable_plugins") == 0)
         else if (strcmp(key, "chara_per_pixel_light") == 0)
         {
             g_PcConfig.charaPerPixelLight = (atoi(value) != 0);
+        }
+        else if (strcmp(key, "per_pixel_lighting") == 0)
+        {
+            g_PcConfig.perPixelLighting = (atoi(value) != 0);
+        }
+        else if (strcmp(key, "hero_light") == 0)
+        {
+            g_PcConfig.heroLight = atoi(value);
+            if (g_PcConfig.heroLight < 0) g_PcConfig.heroLight = 0;
+            if (g_PcConfig.heroLight > 3) g_PcConfig.heroLight = 3;
         }
         else if (strcmp(key, "dream_blur_strength") == 0)
         {

@@ -38,6 +38,7 @@
 #include "hires_override.h"
 #include "pc_config.h"
 #include "pc_lipsync.h"
+#include "pc_pplit.h"
 #include "pc_modern_mesh.h"
 #include "pc_modern_shader.h"
 #include "pc_modern_vertex.h"
@@ -219,7 +220,7 @@ enum { PC_SKIN_MORPH_BLINK, PC_SKIN_MORPH_MOUTH, PC_SKIN_MORPH_GRIP_L, PC_SKIN_M
  * point light's position so its row can be aimed from each pixel. */
 typedef struct
 {
-    int   on, point;
+    int   on, point, flat;
     float L[3][3], l1Mag, lightPos[3];
     float LC[3][3], BK[3];
     float bright;
@@ -2676,7 +2677,11 @@ static void Skin_FrameLight(PcSkinChara* ch, int buf)
     int b, ref = -1, r, c;
 
     memset(lt, 0, sizeof(*lt));
-    if (!g_PcConfig.charaPerPixelLight || !Pc_ModernShader_SkinLit() || g_WorldEnvWork.field_0 == 0)
+    if (!g_PcConfig.charaPerPixelLight || !Pc_ModernShader_SkinLit())
+        return;
+    /* Mode 0 is one flat colour for the whole body; only the hero light has
+     * anything to add to it. */
+    if (g_WorldEnvWork.field_0 == 0 && g_PsyX_HeroLight[3] <= 0.0f)
         return;
     for (b = 0; b < PC_SKIN_BONES; b++)
         if (ch->have[b] && ch->lit[b] && (ref < 0 || ch->byBoneCount[b] > ch->byBoneCount[ref]))
@@ -2687,6 +2692,13 @@ static void Skin_FrameLight(PcSkinChara* ch, int buf)
     rw = ch->rw[ref];
     s_rvSign = (rv[0] * (rv[4] * rv[8] - rv[5] * rv[7]) - rv[1] * (rv[3] * rv[8] - rv[5] * rv[6]) +
                 rv[2] * (rv[3] * rv[7] - rv[4] * rv[6])) < 0.0f ? -1.0f : 1.0f;
+    lt->bright = ch->brightness / 100.0f;
+    if (g_WorldEnvWork.field_0 == 0)
+    {
+        lt->flat = 1;
+        lt->on = 1;
+        return;
+    }
     for (r = 0; r < 3; r++)
     {
         for (c = 0; c < 3; c++)
@@ -2906,10 +2918,11 @@ int Pc_SkinChara_PrepareDraw(u32 handle, PcModernDrawBinding* binding)
 void Pc_SkinChara_ApplyLighting(u32 handle, unsigned int program)
 {
     enum { U_LIT, U_NMAP, U_NTEX, U_POINT, U_L0, U_L1, U_L2, U_L1MAG, U_LPOS, U_LC0, U_LC1, U_LC2, U_BK, U_BRIGHT,
-           U_COUNT };
+           U_FLAT, U_COUNT };
     static const char* const names[U_COUNT] = { "u_skinLit", "u_skinNormalMap", "u_skinNormalTex", "u_skinPoint",
                                                 "u_skinL0", "u_skinL1", "u_skinL2", "u_skinL1Mag", "u_skinLightPos",
-                                                "u_skinLC0", "u_skinLC1", "u_skinLC2", "u_skinBK", "u_skinBright" };
+                                                "u_skinLC0", "u_skinLC1", "u_skinLC2", "u_skinBK", "u_skinBright",
+                                                "u_skinFlat" };
     static unsigned int s_program;
     static GLint loc[U_COUNT];
     int ci = (int)((handle >> 8) & 0xFF), inst = (int)((handle >> 6) & 3), buf = (int)((handle >> 5) & 1),
@@ -2937,6 +2950,7 @@ void Pc_SkinChara_ApplyLighting(u32 handle, unsigned int program)
     lt = &ch->light[inst][buf];
     mat = &ch->mats[m];
     glUniform1i(loc[U_LIT], 1);
+    glUniform1i(loc[U_FLAT], lt->flat);
     glUniform1i(loc[U_POINT], lt->point);
     glUniform3fv(loc[U_L0], 1, lt->L[0]);
     glUniform3fv(loc[U_L1], 1, lt->L[1]);

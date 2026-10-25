@@ -55,6 +55,7 @@ int Pc_ModernShader_SkinLit(void)
 #define PC_SKIN_UNIFORMS \
     "\tuniform vec2 u_hiresHalf;\n" \
     "\tuniform int u_skinLit;\n" \
+    "\tuniform int u_skinFlat;\n" \
     "\tuniform int u_skinNormalMap;\n" \
     "\tuniform sampler2D u_skinNormalTex;\n" \
     "\tuniform int u_skinPoint;\n" \
@@ -68,7 +69,7 @@ int Pc_ModernShader_SkinLit(void)
     "\tuniform vec3 u_skinLC2;\n" \
     "\tuniform vec3 u_skinBK;\n" \
     "\tuniform float u_skinBright;\n"
-#define PC_SKIN_SHADE_AT "\t\tvec3 flAlbedo = fragColor.rgb;\n\t\tfragColor *= v_color;\n"
+#define PC_SKIN_SHADE_AT "\t\tvec3 flAlbedo = fragColor.rgb;\n\t\tfragColor *= PpLitColor();\n"
 #define PC_SKIN_SHADE \
     "\t\tvec3 flAlbedo = fragColor.rgb;\n" \
     "\t\tvec3 skN = vec3(0.0);\n" \
@@ -87,15 +88,20 @@ int Pc_ModernShader_SkinLit(void)
     "\t\t\t\t}\n" \
     "\t\t\t}\n" \
     "\t\t\tskN = N;\n" \
-    "\t\t\tvec3 r1 = u_skinL1;\n" \
-    "\t\t\tif (u_skinPoint > 0) {\n" \
-    "\t\t\t\tvec3 toL = u_skinLightPos - v_viewpos;\n" \
-    "\t\t\t\tfloat dL = length(toL);\n" \
-    "\t\t\t\tif (dL > 1e-4) r1 = -(toL / dL) * u_skinL1Mag;\n" \
+    "\t\t\tvec3 skBase = v_color.rgb;\n" \
+    "\t\t\tif (u_skinFlat == 0) {\n" \
+    "\t\t\t\tvec3 r1 = u_skinL1;\n" \
+    "\t\t\t\tif (u_skinPoint > 0) {\n" \
+    "\t\t\t\t\tvec3 toL = u_skinLightPos - v_viewpos;\n" \
+    "\t\t\t\t\tfloat dL = length(toL);\n" \
+    "\t\t\t\t\tif (dL > 1e-4) r1 = -(toL / dL) * u_skinL1Mag;\n" \
+    "\t\t\t\t}\n" \
+    "\t\t\t\tvec3 ir = clamp(vec3(dot(u_skinL0, -N), dot(r1, -N), dot(u_skinL2, -N)), 0.0, 8.0);\n" \
+    "\t\t\t\tvec3 lit = clamp(u_skinBK + vec3(dot(u_skinLC0, ir), dot(u_skinLC1, ir), dot(u_skinLC2, ir)), 0.0, 1.0);\n" \
+    "\t\t\t\tskBase = min(lit * u_skinBright, vec3(1.0)) * 2.0;\n" \
     "\t\t\t}\n" \
-    "\t\t\tvec3 ir = clamp(vec3(dot(u_skinL0, -N), dot(r1, -N), dot(u_skinL2, -N)), 0.0, 8.0);\n" \
-    "\t\t\tvec3 lit = clamp(u_skinBK + vec3(dot(u_skinLC0, ir), dot(u_skinLC1, ir), dot(u_skinLC2, ir)), 0.0, 1.0);\n" \
-    "\t\t\tfragColor *= vec4(min(lit * u_skinBright, vec3(1.0)) * 2.0, v_color.a);\n" \
+    "\t\t\tif (u_ppHeroOn > 0) skBase = PpHero(skBase, N);\n" \
+    "\t\t\tfragColor *= vec4(skBase, v_color.a);\n" \
     "\t\t} else {\n" \
     "\t\t\tfragColor *= v_color;\n" \
     "\t\t}\n"
