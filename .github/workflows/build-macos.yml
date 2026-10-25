@@ -25,6 +25,8 @@ on:
 jobs:
   build:
     if: github.repository == 'SlickAmogus/silent-hill-decomp'
+    permissions:
+      contents: write
     runs-on: macos-14
 
     steps:
@@ -112,6 +114,15 @@ jobs:
           path: ${{ runner.temp }}/SHPC-macos-arm64.zip
           if-no-files-found: error
           retention-days: 90
+
+      # Newest build for the rolling `realtime` pre-release (see build-windows.yml).
+      # Skipped quietly until the first Windows publish has created that release.
+      - name: Attach to the realtime release
+        if: github.ref == 'refs/heads/pc-port'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload realtime "$RUNNER_TEMP/SHPC-macos-arm64.zip" --clobber --repo "$GITHUB_REPOSITORY"
 
       # Self-contained "Silent Hill PC.app" (SwiftUI launcher + game + bundled
       # Homebrew libs) on a drag-to-Applications disk image.

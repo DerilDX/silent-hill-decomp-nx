@@ -25,6 +25,8 @@ jobs:
   build:
     # Only on our fork — never on Vatuu upstream (which has no PC port branch).
     if: github.repository == 'SlickAmogus/silent-hill-decomp'
+    permissions:
+      contents: write
     # 22.04 links against an older glibc than ubuntu-latest (24.04), so the binary
     # runs on a wider range of distros.
     runs-on: ubuntu-22.04
@@ -143,3 +145,12 @@ jobs:
           path: ${{ runner.temp }}/SHPC-linux-x64.tar.gz
           if-no-files-found: error
           retention-days: 90
+
+      # Newest build for the rolling `realtime` pre-release (see build-windows.yml).
+      # Skipped quietly until the first Windows publish has created that release.
+      - name: Attach to the realtime release
+        if: github.ref == 'refs/heads/pc-port'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload realtime "$RUNNER_TEMP/SHPC-linux-x64.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
