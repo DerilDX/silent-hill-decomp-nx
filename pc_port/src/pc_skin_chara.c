@@ -245,6 +245,7 @@ typedef struct
     float       breathPhase, breathPeriod;
     float       mouth;
     float       grip[2];
+    float       gunOff[3]; /* right-hand bone frame */
     int         female;
     int         brightness; /* percent of the lit vertex colour */
     int         fogPct;     /* percent of the game's fog amount */
@@ -1489,6 +1490,42 @@ static int Skin_Load(PcSkinChara* ch, const char* path)
     }
 #undef TO_GAME
 
+    /* Held weapons are modelled round Harry's 10RHAND3 fist (box centre
+     * below, hand-bone frame); a shorter hand left the grip hanging below the
+     * fingers. The fist measured is the closed one the weapon is shown with. */
+    {
+        static const float harryFist[3] = { 0.8f, -2.4f, 22.1f };
+        const PcSkinMorph* gm = &ch->morph[PC_SKIN_MORPH_GRIP_R];
+        float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+        int q = 0, i, n = 0;
+
+        for (j = 0; j < (size_t)ch->vertCount; j++)
+        {
+            float d[3], l[3], s;
+            if (ch->verts[j].dom != 10)
+                continue;
+            for (i = 0; i < 3; i++)
+                d[i] = gpos[j * 3 + i] - anchor[10][i];
+            while (q < gm->count && gm->v[q] < (u32)j)
+                q++;
+            if (q < gm->count && gm->v[q] == (u32)j)
+                for (i = 0; i < 3; i++)
+                    d[i] += gm->d[q][i];
+            M3_MulTV(R[10], d, l);
+            s = (k[10] - 1.0f) * (l[0] * axis[10][0] + l[1] * axis[10][1] + l[2] * axis[10][2]);
+            for (i = 0; i < 3; i++)
+            {
+                l[i] += s * axis[10][i];
+                if (l[i] < lo[i]) lo[i] = l[i];
+                if (l[i] > hi[i]) hi[i] = l[i];
+            }
+            n++;
+        }
+        for (i = 0; i < 3; i++)
+            ch->gunOff[i] = n ? 0.5f * (lo[i] + hi[i]) - harryFist[i] : 0.0f;
+        SH_DBG("[SKIN] right fist offset (%.1f %.1f %.1f)", ch->gunOff[0], ch->gunOff[1], ch->gunOff[2]);
+    }
+
     for (b = 0; b < PC_SKIN_BONES; b++)
     {
         int i;
@@ -1642,6 +1679,18 @@ int Pc_SkinChara_HeroLightOffset(s32 offQ12[3])
     for (k = 0; k < 3; k++)
         offQ12[k] = hero->lightOff[k] * 4096 / 100;
     return hero->lightOff[0] | hero->lightOff[1] | hero->lightOff[2];
+}
+
+int Pc_SkinChara_HeroGunOffset(s32 off[3])
+{
+    const PcSkinChara* hero = g_PcConfig.allowLooseFiles ? Skin_CurrentHero() : NULL;
+    int k;
+
+    if (hero == NULL)
+        return 0;
+    for (k = 0; k < 3; k++)
+        off[k] = (s32)(hero->gunOff[k] + (hero->gunOff[k] < 0.0f ? -0.5f : 0.5f));
+    return off[0] | off[1] | off[2];
 }
 
 int Pc_SkinChara_HeroFemale(void)
@@ -2374,8 +2423,8 @@ static float Skin_MouthWeight(PcSkinChara* ch)
 }
 
 /* Fingers close round whatever the game puts in that hand (the phone goes in
- * the left, everything else in the right) and open again when it is put away
- * or the ragdoll takes over. */
+ * the left, everything else in the right) and open again when it is put away,
+ * a cutscene hides it, or the ragdoll takes over. */
 static void Skin_GripWeights(PcSkinChara* ch, float* w)
 {
     float dt = g_DeltaTime / 4096.0f;
@@ -2384,6 +2433,7 @@ static void Skin_GripWeights(PcSkinChara* ch, float* w)
     for (side = 0; side < 2; side++)
     {
         int held = g_WorldGfxWork.heldItem.itemId != NO_VALUE &&
+                   g_WorldGfxWork.heldItem.bone.modelInfo.field_0 >= 0 &&
                    (g_WorldGfxWork.heldItem.itemId == InvItemId_CutscenePhone) == (side == 0);
         float target = (ch->isPlayer && held && !s_rd.active) ? 1.0f : 0.0f;
         float step = dt / 0.15f;

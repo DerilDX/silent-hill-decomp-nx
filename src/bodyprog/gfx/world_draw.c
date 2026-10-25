@@ -6,6 +6,7 @@
 #include "pc_config.h"
 #include "pc_big_lm.h"
 #include "pc_playas.h"
+#include "pc_skin_chara.h"
 #ifdef SH_PC_PORT
 #include "main/fileinfo.h" /* g_GameRegion — PAL BG_ETC material-UV relocation */
 #endif
@@ -1127,6 +1128,21 @@ void WorldGfx_HeldItemDraw(void) // 0x8003D058
         }
 
         Vw_CoordToWorldAndViewMatrices(coord, &worldMat, &viewMat);
+#ifdef SH_PC_PORT
+        if (heldItem->itemId != InvItemId_CutscenePhone)
+        {
+            s32 off[3];
+            if (Pc_SkinChara_HeroGunOffset(off))
+            {
+                s32 r;
+                for (r = 0; r < 3; r++)
+                {
+                    worldMat.t[r] += (worldMat.m[r][0] * off[0] + worldMat.m[r][1] * off[1] + worldMat.m[r][2] * off[2]) >> 12;
+                    viewMat.t[r] += (viewMat.m[r][0] * off[0] + viewMat.m[r][1] * off[1] + viewMat.m[r][2] * off[2]) >> 12;
+                }
+            }
+        }
+#endif
 #ifdef SH_PC_PORT
         /* Depth-tested like the hand holding it: as world geometry the weapon
          * took the world's far-push and lost to a leg passing in front. */

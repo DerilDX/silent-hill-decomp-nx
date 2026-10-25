@@ -55,6 +55,11 @@ int   Pc_SkinChara_HeroFemale(void);
  * torso space, Q12 metres. Returns 0 when there is none. */
 int   Pc_SkinChara_HeroLightOffset(s32 offQ12[3]);
 
+/* HERO's replacement fist sits elsewhere in the right hand than Harry's, which
+ * the held weapons are modelled round: the shift in that bone's frame, model
+ * units. Returns 0 when there is none. */
+int   Pc_SkinChara_HeroGunOffset(s32 off[3]);
+
 #ifdef __cplusplus
 }
 #endif
