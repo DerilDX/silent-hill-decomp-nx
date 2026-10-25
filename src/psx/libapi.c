@@ -1,3 +1,9 @@
+#if defined(_WIN32)
+/* This file implements the PSX open/read/write/lseek/close. Newer mingw-w64
+ * headers reach <io.h> through <wchar.h> (via SDL), whose legacy POSIX
+ * aliases then conflict with them; NO_OLDNAMES withholds those aliases. */
+#define NO_OLDNAMES
+#endif
 #include "psx/libapi.h"
 #include "psx/libmcrd.h"
 #include "psx/kernel.h"
