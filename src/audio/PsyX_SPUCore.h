@@ -155,6 +155,16 @@ struct SPUVoiceState
     int      blockSamplePos;   // index of the NEXT undelivered sample in blockSamples (0..28)
     bool     blockValid;       // false until the first block has been decoded
 
+    // -- Loose per-sound replacement (pc_sfx_override.c, via g_PsyX_SfxOverride) --
+    // Latched at Key On for a voice whose start address has a replacement
+    // registered. While set, blocks are filled from this PC-owned PCM instead of
+    // decoding the ADPCM at curAddr; everything downstream (pitch counter,
+    // interpolation, ADSR, volumes, ENDX) is unaware of the substitution.
+    const int16_t* ovrPcm;     // borrowed; owned by the game side. null = not replaced
+    uint32_t ovrCount;         // samples available in ovrPcm
+    uint64_t ovrPos;           // 16.16 cursor into ovrPcm
+    uint32_t ovrStep;          // 16.16 source samples per emitted sample (rate latch)
+
     // 4-tap history window consumed by the Gaussian interpolator, in the
     // order the documented formula expects: [0]=new,[1]=old,[2]=older,[3]=oldest.
     int16_t  interpTaps[4];
@@ -401,7 +411,32 @@ public:
     // register writes/CD ingress between calls, output is bit-exact
     // regardless of platform/compiler (integer-only decode/interpolation/
     // envelope math; only the final per-frame sum->int16 step saturates).
-    void RenderFrames(int16_t* outInterleavedLR, int frameCount);
+    // ---- Split (spatialised) rendering -------------------------------------
+    // Optional per-voice taps for the OpenAL spatialiser. When a SplitOutput is
+    // supplied, RenderFrames ALSO writes each voice's post-ADSR, PRE-PAN mono
+    // sample, the reverb return on its own bus, and the CD/XA stereo bed, so the
+    // caller can place each of them in a speaker field instead of taking this
+    // core's stereo downmix.
+    //
+    // The mix itself is untouched: the same loop still pans, sums and feeds the
+    // reverb exactly as before, so the accurate stereo output and the split taps
+    // can never drift apart. Only the reverb OUTPUT is separated out -- its
+    // INPUT is still the panned voice sum, which is what the hardware does and
+    // what makes the reverb sound right.
+    //
+    // pan[] carries each voice's live L/R volume so the caller can derive an
+    // azimuth; it is the value at the LAST frame of the block.
+    struct SplitOutput
+    {
+        int16_t* voiceMono[kNumVoices]; // per voice, frameCount samples (may be null)
+        int16_t* wetLR;                 // reverb return, interleaved (may be null)
+        int16_t* cdLR;                  // CD/XA post-volume, interleaved (may be null)
+        int32_t  panL[kNumVoices];      // out: live voice volume, end of block
+        int32_t  panR[kNumVoices];      // out: live voice volume, end of block
+        int32_t  masterL;               // out: live master volume, end of block
+        int32_t  masterR;               // out: live master volume, end of block
+    };
+    void RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutput* split = nullptr);
     bool SetRenderer(RendererMode renderer, ClipMode clipMode = ClipMode::None);
     RendererMode GetRenderer() const { return m_renderer; }
     ClipMode GetClipMode() const { return m_clipMode; }

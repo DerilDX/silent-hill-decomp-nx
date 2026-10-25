@@ -51,6 +51,7 @@ void PsyX_SPUSoftware_GetReverbModeParam(SpuReverbAttr*);
 int PsyX_SPUSoftware_ClearReverbWorkArea();
 void PsyX_SPUSoftware_ConfigureOutput(int, int, int, int);
 int PsyX_SPUSoftware_ConfigureRenderer(int, int, int, int);
+void PsyX_SPUSoftware_ConfigureSpatial(int, int);
 int PsyX_SPUSoftware_PushXaFrames(const short*, u_int, int, int);
 void PsyX_SPUSoftware_ResetXa();
 void PsyX_SPUSoftware_FinishXa();
@@ -84,6 +85,13 @@ extern "C"
 void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, int bitPerfect)
 {
 	PsyX_SPUSoftware_ConfigureOutput(backend, mode, rate, bitPerfect);
+}
+
+/* Spatial output is a software-backend capability: the legacy OpenAL backend
+ * already has its own layout handling, so this is simply ignored there. */
+void PsyX_SPUAL_ConfigureSpatial(int enable, int speakers)
+{
+	PsyX_SPUSoftware_ConfigureSpatial(enable, speakers);
 }
 
 int PsyX_SPUAL_ConfigureRenderer(

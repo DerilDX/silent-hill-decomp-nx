@@ -158,4 +158,6 @@ if(BUILD_TESTING)
     psycross_add_audio_test(psycross_reference_xa_test
         tests/audio/PsyX_ReferenceXA_test.cpp
         src/audio/PsyX_ReferenceXA.cpp src/audio/PsyX_ReferenceResampler.cpp)
+    psycross_add_audio_test(psycross_xastream_fidelity_test
+        tests/audio/PsyX_XAStream_fidelity_test.cpp src/audio/PsyX_XAStream.cpp)
 endif()

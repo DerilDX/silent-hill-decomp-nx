@@ -47,6 +47,10 @@ int strcasecmp(const char* _l, const char* _r)
 #endif // _WIN32
 
 SDL_Window* g_window = NULL;
+extern int  g_presentWidth, g_presentHeight;
+extern int  g_cfgRenderWidth, g_cfgRenderHeight, g_cfgFullscreenMode;
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+
 
 /* PC port: mouse confinement. Default on; the launcher/config can clear it. */
 int g_cfg_confineCursor = 1;
@@ -141,6 +145,7 @@ extern void GR_ResetDevice();
 extern void GR_Shutdown();
 extern void GR_BeginScene();
 extern void GR_EndScene();
+extern "C" void GR_VoidProbeScene(void);
 extern void GR_UpdateSwapIntervalState(int swapInterval);
 
 /* Default NTSC: the USA disc never calls SetVideoMode, so g_vmode stayed -1
@@ -216,57 +221,140 @@ int PsyX_Sys_GetVBlankCount()
 	return g_psxSysCounters[PsxCounter_VBLANK];
 }
 
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+#elif defined(__linux__) || defined(__APPLE__)
+#include <time.h>
+#endif
+
+/* Sleeps for about `seconds`. Returns 0 where no sub-millisecond sleep exists
+ * (Windows before 10 1803, consoles), and the caller keeps spinning instead:
+ * a coarse 15 ms Sleep would drop vblanks and slow the RCnt2 music clock. */
+static int IntrPreciseSleep(double seconds)
+{
+#ifdef _WIN32
+	static HANDLE s_timer = NULL;
+	static int    s_tried = 0;
+	LARGE_INTEGER due;
+
+	if (!s_tried)
+	{
+		s_tried = 1;
+		s_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+	}
+	if (s_timer == NULL)
+		return 0;
+	due.QuadPart = -(LONGLONG)(seconds * 1e7);
+	if (!SetWaitableTimer(s_timer, &due, 0, NULL, NULL, FALSE))
+		return 0;
+	WaitForSingleObject(s_timer, INFINITE);
+	return 1;
+#elif defined(__linux__) || defined(__APPLE__)
+	struct timespec ts;
+	ts.tv_sec  = 0;
+	ts.tv_nsec = (long)(seconds * 1e9);
+	nanosleep(&ts, NULL);
+	return 1;
+#else
+	(void)seconds;
+	return 0;
+#endif
+}
+
+static inline void IntrCpuRelax(void)
+{
+#ifdef _WIN32
+	YieldProcessor();
+#endif
+}
+
+/* Events run on absolute deadlines and the thread sleeps between them. It used
+ * to spin flat out and re-arm each timer at its fire time, holding a whole core
+ * for the session, which weak dual/quad-core machines feel as frame time. A
+ * deadline that has fallen more than a period behind (a stall) re-arms from
+ * now, so a stall still yields one event, not a burst. */
 int intrThreadMain(void* data)
 {
-	timerCtx_t rcnt2Timer;
-	Util_InitHPCTimer(&g_vblTimer);
-	Util_InitHPCTimer(&rcnt2Timer);
-
 	/* PSX RCnt2 = system clock / 8 = 4233600 Hz.
 	 * Target 7328 → fires at 4233600/7328 ≈ 577.8 Hz → ~1.73ms period */
 	const double rcnt2Period = 1.0 / 577.8;
+	const double freq        = (double)SDL_GetPerformanceFrequency();
+	const Uint64 t0          = SDL_GetPerformanceCounter();
+	double       nextVbl     = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
+	double       nextRcnt2   = 0.0;
+	int          rcnt2Armed  = 0;
+
+	Util_InitHPCTimer(&g_vblTimer);
 
 	while (!g_stopIntrThread)
 	{
-		// step counters
-		{
-			const double timestep = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
-			const double vblDelta = Util_GetHPCTime(&g_vblTimer, 0);
+		const double timestep = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
+		double       now      = (double)(SDL_GetPerformanceCounter() - t0) / freq;
+		double       wake;
 
-			if (vblDelta > timestep)
+		if (now >= nextVbl)
+		{
+			SDL_LockMutex(g_intrMutex);
+
+			if (vsync_callback)
+				vsync_callback();
+
+			SDL_UnlockMutex(g_intrMutex);
+
+			// do vblank events
+			g_psxSysCounters[PsxCounter_VBLANK]++;
+
+			nextVbl += timestep;
+			if (nextVbl <= now)
+				nextVbl = now + timestep;
+		}
+
+		/* Pump RCnt2 timer for BGM/MIDI sequencer */
+		if (g_rcnt2_timer_active)
+		{
+			if (!rcnt2Armed)
+			{
+				rcnt2Armed = 1;
+				nextRcnt2  = now;
+			}
+			if (now >= nextRcnt2)
 			{
 				SDL_LockMutex(g_intrMutex);
-
-				if (vsync_callback)
-					vsync_callback();
-
+				PsyX_PumpRCnt2Timer();
 				SDL_UnlockMutex(g_intrMutex);
 
-				// do vblank events
-				g_psxSysCounters[PsxCounter_VBLANK]++;
-
-				Util_GetHPCTime(&g_vblTimer, 1);
-			}
-
-			/* Pump RCnt2 timer for BGM/MIDI sequencer */
-			if (g_rcnt2_timer_active)
-			{
-				const double rcnt2Delta = Util_GetHPCTime(&rcnt2Timer, 0);
-				if (rcnt2Delta > rcnt2Period)
-				{
-					SDL_LockMutex(g_intrMutex);
-					PsyX_PumpRCnt2Timer();
-					SDL_UnlockMutex(g_intrMutex);
-					Util_GetHPCTime(&rcnt2Timer, 1);
-				}
+				nextRcnt2 += rcnt2Period;
+				if (nextRcnt2 <= now)
+					nextRcnt2 = now + rcnt2Period;
 			}
 		}
+		else
+			rcnt2Armed = 0;
 
 		/* Advance SPU ADSR envelopes on the audio-timing thread, NOT from the
 		 * render thread (PsyX_EndScene) — that placement deadlocked. Takes only
 		 * g_SpuMutex (never nested under g_intrMutex), throttles on the
 		 * SDL_GetTicks ms delta, no-op unless `adsr 1`. */
 		PsyX_SPUAL_Update();
+
+		/* Wake at least every 2 ms so the ms-throttled SPU update keeps its
+		 * cadence while RCnt2 is idle. Sleep short of the deadline and spin the
+		 * last half millisecond: the high-resolution timer can overshoot that. */
+		wake = nextVbl;
+		if (rcnt2Armed && nextRcnt2 < wake)
+			wake = nextRcnt2;
+		if (now + 0.002 < wake)
+			wake = now + 0.002;
+		now = (double)(SDL_GetPerformanceCounter() - t0) / freq;
+		if (wake - now > 0.0007)
+		{
+			if (!IntrPreciseSleep(wake - now - 0.0005))
+				IntrCpuRelax();
+		}
+		else
+			IntrCpuRelax();
 	}
 
 	return 0;
@@ -826,6 +914,15 @@ int g_activeKeyboardControllers = 0x1;
  * bound to a PSX button then acts as a tap. Consumed in PsyX_Pad_BuildMouseWord. */
 int g_PsyX_WheelUpFrames   = 0;
 int g_PsyX_WheelDownFrames = 0;
+/* Net notches since the last reader cleared it: the free camera's speed wheel
+ * needs every notch, which the 2-frame latch above merges. */
+int g_PsyX_WheelNotches    = 0;
+/* Never cleared: readers diff it against their own last sample, so no reader
+ * can steal another's notches. */
+int g_PsyX_WheelTotal      = 0;
+/* 1 once a controller button or a deliberate stick/trigger push arrives, 0
+ * again on real mouse use; the host hides its UI cursor while it is 1. */
+int g_PsyX_PadInputLast    = 0;
 
 void PsyX_Sys_DoPollEvent()
 {
@@ -847,8 +944,10 @@ void PsyX_Sys_DoPollEvent()
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
-					g_windowWidth = event.window.data1;
-					g_windowHeight = event.window.data2;
+					/* This used to assign the render size directly, which is how
+					 * borderless lost the chosen resolution: a fullscreen-desktop
+					 * window reports the DESKTOP size here right after creation. */
+					GR_ApplyPresentSize(event.window.data1, event.window.data2);
 					GR_ResetDevice();
 					break;
 				case SDL_WINDOWEVENT_CLOSE:
@@ -862,7 +961,26 @@ void PsyX_Sys_DoPollEvent()
 					break;
 				}
 				break;
+			case SDL_CONTROLLERBUTTONDOWN:
+				g_PsyX_PadInputLast = 1;
+				break;
+			case SDL_CONTROLLERAXISMOTION:
+				/* Past the resting noise of a worn stick, so an idle pad on the
+				 * desk never hides the cursor from under the mouse. */
+				if (event.caxis.value > 12000 || event.caxis.value < -12000)
+					g_PsyX_PadInputLast = 1;
+				break;
+			case SDL_MOUSEBUTTONDOWN:
+				if (event.button.which != SDL_TOUCH_MOUSEID)
+					g_PsyX_PadInputLast = 0;
+				break;
 			case SDL_MOUSEMOTION:
+				/* A one-pixel nudge is the pointer settling or a warp, not the
+				 * player reaching for the mouse. */
+				if (event.motion.which != SDL_TOUCH_MOUSEID &&
+				    (event.motion.xrel > 1 || event.motion.xrel < -1 ||
+				     event.motion.yrel > 1 || event.motion.yrel < -1))
+					g_PsyX_PadInputLast = 0;
 
 				PsyX_Sys_DoDebugMouseMotion(event.motion.x, event.motion.y);
 				break;
@@ -875,6 +993,9 @@ void PsyX_Sys_DoPollEvent()
 				 * frame in PsyX_EndScene (NOT consumed by any one reader) so BOTH
 				 * the pad word AND the graphics-tuning keys (dbg_overlay) can see
 				 * the same scroll without racing to consume it. */
+				g_PsyX_WheelNotches += wy;
+				g_PsyX_WheelTotal   += wy;
+				g_PsyX_PadInputLast  = 0;
 				if (wy > 0)      g_PsyX_WheelUpFrames   = 2;
 				else if (wy < 0) g_PsyX_WheelDownFrames = 2;
 				break;
@@ -896,11 +1017,10 @@ void PsyX_Sys_DoPollEvent()
 					{
 						int fullscreen = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) > 0;
 
-						SDL_SetWindowFullscreen(g_window, fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-
-						SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
-						GR_ResetDevice();
-						PsyX_UpdateMouseConfinement();
+						/* The menu's path, not a bare SetWindowFullscreen: writing the
+						 * window size into g_windowWidth made the render size disagree
+						 * with the internal target, which stayed at the old size. */
+						PsyX_ApplyWindowState(g_cfgRenderWidth, g_cfgRenderHeight, fullscreen ? 0 : 2);
 					}
 					break;
 				}
@@ -1053,13 +1173,21 @@ void PsyX_EndScene()
 	{
 		extern void GR_CaptureLastFrame(void);
 		GR_CaptureLastFrame();
+		GR_VoidProbeScene();
 	}
 
 	/* PC port: draw overlays that must NOT be baked into the freeze-frame (the dev
 	 * console) — AFTER the capture, BEFORE the swap, so the console is a true live
 	 * overlay and never doubles against a frozen copy on pause / "no map" screens. */
-	if (g_PsyX_PostCaptureHook)
-		g_PsyX_PostCaptureHook();
+	/* Native resolution draws these after the present instead, at window size
+	 * (GR_SwapWindow). */
+	{
+		extern int          g_PcNativeRender;
+		extern unsigned int g_internalFBO;
+
+		if (g_PsyX_PostCaptureHook && !(g_PcNativeRender && g_internalFBO != 0))
+			g_PsyX_PostCaptureHook();
+	}
 
 	/* PC port: apply the selected full-screen post-process look (color grade,
 	 * CRT, scanlines, vignette, grain, sharpen, PSX downsample, ...) to the
@@ -1103,14 +1231,55 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 	if (g_dbg_gameDebugKeys)
 		g_dbg_gameDebugKeys(nKey, down);
 
-	/* Backspace fast-forward (g_skipSwapInterval) removed — it was unguarded and
-	 * trivially hit by accident, silently running the game at uncapped speed. */
+	/* Fast-forward, held on CTRL+F5. This was on bare Backspace once and was
+	 * removed for being trivially hit by accident, which silently ran the game
+	 * at uncapped speed. Behind Ctrl it cannot be tripped by a stray press, and
+	 * it clears on key-up so it can never latch on. */
+	if (nKey == SDL_SCANCODE_F5)
+	{
+		/* TOGGLE, matching the quick options row -- press once for fast
+		 * forward, again for normal. s_f5Down filters SDL's key repeats,
+		 * which would otherwise flip it many times per second while held.
+		 * g_PcFastForward is the single source of truth; the game mirrors
+		 * it into g_skipSwapInterval so pacing and the clock agree. */
+		static int s_f5Down = 0;
+		if (down)
+		{
+			if (!s_f5Down && (SDL_GetModState() & KMOD_CTRL))
+			{
+				extern int g_PcFastForward;
+				g_PcFastForward = !g_PcFastForward;
+			}
+			s_f5Down = 1;
+		}
+		else
+		{
+			s_f5Down = 0;
+		}
+		return;
+	}
 
 	if (!down)
 	{
+		/* EVERY bind below requires CTRL.
+		 *
+		 * These share the keyboard with the game and with the launcher's own
+		 * bindings, and an unmodified function key is far too easy to hit by
+		 * accident: F10 alone collided with the quick options overlay and made
+		 * every open and close dump the whole VRAM to disk (a 2+ second freeze),
+		 * and the old bare F5/F6 flipped PGXP settings silently, with nothing on
+		 * screen and nothing in the log to say why the picture changed.
+		 *
+		 * The PGXP toggles are gone entirely rather than gated: they did nothing
+		 * visible in game, and F6 is the quick-save key. */
+		if (!(SDL_GetModState() & KMOD_CTRL))
+			return;
+
 		switch (nKey)
 		{
-#ifdef _DEBUG
+		/* Shipped in release builds, not just _DEBUG: with Ctrl required these
+		 * are safe to expose, and they are genuinely useful to players poking at
+		 * the renderer. */
 		case SDL_SCANCODE_F1:
 			g_dbg_wireframeMode ^= 1;
 			eprintwarn("wireframe mode: %d\n", g_dbg_wireframeMode);
@@ -1120,6 +1289,9 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			g_dbg_texturelessMode ^= 1;
 			eprintwarn("textureless mode: %d\n", g_dbg_texturelessMode);
 			break;
+#ifdef _DEBUG
+		/* Debug-only: inert unless g_dbg_emulatorPaused is set, and nothing
+		 * binds that, so shipping it would only risk the arrow keys. */
 		case SDL_SCANCODE_UP:
 		case SDL_SCANCODE_DOWN:
 			if (g_dbg_emulatorPaused)
@@ -1130,9 +1302,8 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 #endif
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 		case SDL_SCANCODE_F10:
-			/* PC port: moved out of #ifdef _DEBUG so the VRAM dump works in normal
-			 * (debug-enabled) builds too — it's the key diagnostic for the texture/
-			 * VRAM bugs (boss-FX ghost textures etc.). Writes VRAM.TGA to the cwd. */
+			/* The key diagnostic for texture/VRAM bugs (boss-FX ghost textures
+			 * and friends). Writes VRAM.TGA to the cwd. */
 			eprintwarn("saving VRAM.TGA\n");
 			GR_SaveVRAM("VRAM.TGA", 0, 0, VRAM_WIDTH, VRAM_HEIGHT, 1);
 			break;
@@ -1141,18 +1312,9 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			PsyX_TakeScreenshot();
 			break;
 #endif
-		/* F3 freed for the game-side tone-map cycle (dbg_overlay.c). The old
-		 * bilinear-filtering toggle here was redundant — filtering is set via the
-		 * launcher (psx_dither/Filtering option -> main_pc.c). */
-		/* F4 keyboard-controller-slot cycle removed — a stray tap moved keyboard +
-		 * mouse input off player 1, silently killing fire/aim (read as a gameplay
-		 * bug). g_activeKeyboardControllers stays at its 0x1 default. */
-		case SDL_SCANCODE_F5:
-			g_cfg_pgxpTextureCorrection ^= 1;
-			break;
-		case SDL_SCANCODE_F6:
-			g_cfg_pgxpZBuffer ^= 1;
-			break;
+		/* F3 is the game-side tone-map cycle (dbg_overlay.c). F4 was a keyboard
+		 * controller-slot cycle: a stray tap moved keyboard + mouse off player 1
+		 * and silently killed fire/aim, so it stays removed. */
 		}
 	}
 }
@@ -1242,7 +1404,7 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 		SDL_SetWindowSize(g_window, width, height);
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN);
 	}
-	else if (fullscreen == 2) /* borderless = desktop mode, resolution ignored */
+	else if (fullscreen == 2) /* borderless: desktop-sized window, scene rendered at the chosen size */
 	{
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	}
@@ -1253,6 +1415,25 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	}
 
 	SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
+
+	/* The window is now the PRESENT size. Borderless used to stop here, which is
+	 * why it ignored the chosen resolution and simply ran at desktop size.
+	 *
+	 * Instead, keep the desktop-sized window and render the scene into an
+	 * internal target at the chosen resolution, stretched to the window at
+	 * present. g_windowWidth/Height stay the RENDER size, so every viewport,
+	 * scissor and aspect calculation keeps working untouched.
+	 *
+	 * Skipped when the request matches the desktop (nothing to gain) or when
+	 * MSAA is on: the multisampling lives on the window's own buffer, so
+	 * redirecting the scene into a single-sampled target would silently throw
+	 * antialiasing away. If the target cannot be allocated the helper returns 0
+	 * and the stock desktop-resolution path runs exactly as before. */
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
+	GR_ApplyPresentSize(g_windowWidth, g_windowHeight);
+
 	GR_ResetDevice();
 	PsyX_UpdateMouseConfinement();
 }
@@ -1274,7 +1455,15 @@ void PsyX_WaitForTimestep(int count)
 #ifdef __EMSCRIPTEN__
 			emscripten_sleep(0);
 #endif
+			IntrCpuRelax();
 			vbl = PsyX_Sys_GetVBlankCount();
+#if defined(__linux__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+			/* IntrCpuRelax is a no-op here, so this loop held a full core. The
+			 * interrupt thread owns the vblank count; a 1 ms nap only delays
+			 * noticing it, never the count itself or the RCnt2 music clock. */
+			if (vbl - swapLastVbl < count)
+				SDL_Delay(1);
+#endif
 		}
 		while (vbl - swapLastVbl < count);
 

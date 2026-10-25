@@ -336,8 +336,25 @@ CdlLOC* CdIntToPos(int i, CdlLOC* p)
 	return p;
 }
 
+/* Where a real drive's head would be, for the PC port's per-line voice seek
+ * delay (xa_seek_model.c): every Setloc/Seek moves it, every data read
+ * carries it forward. The epoch tells the model a move happened since it
+ * last looked. */
+int      g_PsxCdHeadLba   = 0;
+unsigned g_PsxCdHeadEpoch = 0;
+
+static void CdHeadTrack(u_char com, const u_char* param)
+{
+	if ((com == CdlSetloc || com == CdlSeekL || com == CdlSeekP) && param != NULL)
+	{
+		g_PsxCdHeadLba = CdPosToInt((CdlLOC*)param);
+		g_PsxCdHeadEpoch++;
+	}
+}
+
 int CdControl(u_char com, u_char * param, u_char * result)
 {
+	CdHeadTrack(com, param);
 	CdlLOC* cd = (CdlLOC*)param;
 
 	g_CD_com = com;
@@ -410,6 +427,7 @@ int CdControl(u_char com, u_char * param, u_char * result)
 
 int CdControlB(u_char com, u_char* param, u_char* result)
 {
+	CdHeadTrack(com, param);
 	int ret;
 
 	if (!PsyX_CD_CheckImageAvailable())
@@ -457,6 +475,7 @@ int CdControlB(u_char com, u_char* param, u_char* result)
 
 int CdControlF(u_char com, u_char * param)
 {
+	CdHeadTrack(com, param);
 	// TODO: CdControlF() waits for the previous command to complete execution before issuing the new command
 	
 	g_CD_com = com;
@@ -519,6 +538,8 @@ int CdRead(int sectors, u_long* buf, int mode)
 	int ret;
 
 	ret = 0;
+	g_PsxCdHeadLba += sectors;
+	g_PsxCdHeadEpoch++;
 
 	for (int i = 0; i < COMMAND_QUEUE_SIZE; i++)
 	{

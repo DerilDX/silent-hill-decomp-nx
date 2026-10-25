@@ -9,8 +9,14 @@
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+#include <SDL_timer.h>
+#include <algorithm>
 
 #include "psx/gtereg.h"
+
+extern "C" int GR_NeedViewSpaceData(void);
+/* 1 = this frame draws the 3D world in perspective; see PsyX_render.cpp. */
+extern "C" int g_PsxFrame3dClass;
 
 #define GET_TPAGE_FORMAT(tpage) ((TexFormat)((tpage >> 7) & 0x3))
 #define GET_TPAGE_BLEND(tpage)  ((BlendMode)(((tpage >> 5) & 3) + 1))
@@ -22,8 +28,29 @@
 
 OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
 
+extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h);
 int g_currentOTBucketCount = 0;
 float g_otBucketDepth = 0.0f;
+
+/* The OT bucket the game fills with 2D screen-space strings, or -1.
+ *
+ * The frame-class 3D marker below assumes a POLY on a 3D frame is world
+ * geometry, because the 2D content the game orders is SPRT and TILE. Scaled
+ * text breaks that assumption on purpose: a SPRT draws texels 1:1 and cannot be
+ * resized, so enlarged glyphs are emitted as POLY_FT4 instead -- and were then
+ * filtered as if they were a wall, which is what made big subtitles look soft
+ * and swollen in the world while the same text stayed crisp on a menu frame.
+ * The port names that bucket while the text is scaled; -1 means business as
+ * usual. Absolute index, i.e. the port's own OT tag index. */
+extern "C" { int g_PsxUi2dBucket = -1; }
+
+/* Absolute index of the bucket being walked (the walk runs far->near). */
+static int s_otBucketAbs = -1;
+
+static int OtBucketIsUi2d(void)
+{
+	return g_PsxUi2dBucket >= 0 && s_otBucketAbs == g_PsxUi2dBucket;
+}
 
 /* ----------------------------------------------------------------------------
  * PGXP (perspective-correct rendering) — shadow-memory model, DuckStation-faithful.
@@ -63,32 +90,66 @@ struct ShadowEntry { uintptr_t key; unsigned gen; unsigned value; float x, y, w;
 #define SHADOW_MASK (SHADOW_SIZE - 1u)
 static ShadowEntry s_shadow[SHADOW_SIZE];
 
-static inline unsigned ShadowHash(uintptr_t k) {
-	return (unsigned)((k >> 2) * 2654435761u) & SHADOW_MASK;
+/* Blocked scatter. A fully address-ordered slot (k >> 2) streamed through
+ * cache, but the scratch area and the packet arenas alias modulo the table
+ * span: whole runs of consecutive words piled onto the same slots, the 16-step
+ * linear probe overflowed, live entries were evicted, and those vertices fell
+ * to integer coordinates (sidewalk and wall strips splitting while the camera
+ * moved). A plain per-word scatter is correct but puts every access on a
+ * random page, which made the whole-map OT parse CPU-bound.
+ *
+ * So: each 64-byte block of addresses (16 words) owns one 16-slot bucket at a
+ * scattered position, and its words sit in that bucket in address order. A
+ * probe steps a whole bucket, so two blocks either share a bucket or never
+ * touch -- runs cannot overlap part-way. Neighbouring words stay on one or two
+ * cache lines; distinct blocks still scatter like the per-word hash. */
+#define SHADOW_BLOCK_SHIFT 4
+#define SHADOW_BUCKETS_BITS (SHADOW_BITS - SHADOW_BLOCK_SHIFT)
+static inline unsigned ShadowBucket(uintptr_t k) {
+	unsigned b = (unsigned)((k >> 6) ^ ((uint64_t)k >> 38));
+	return ((b * 2654435761u) >> (32 - SHADOW_BUCKETS_BITS)) << SHADOW_BLOCK_SHIFT;
+}
+static inline unsigned ShadowSlot(uintptr_t k, unsigned bucket, int probe) {
+	return (bucket + ((unsigned)probe << SHADOW_BLOCK_SHIFT) + (unsigned)((k >> 2) & 15u)) & SHADOW_MASK;
+}
+
+/* One-shot: a full probe means an entry was evicted, i.e. a vertex lost its
+ * precise position. Should never print; if it does, seams are back. */
+static int s_shadowOverflowWarned = 0;
+static void Shadow_WarnOverflow(const char* table) {
+	if (!s_shadowOverflowWarned) {
+		s_shadowOverflowWarned = 1;
+		eprintwarn("[PGXP] %s shadow table probe exhausted; precise vertices are being evicted\n", table);
+	}
 }
 
 static void Shadow_Put(void* addr, float x, float y, float w, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		ShadowEntry* e = &s_shadow[ShadowSlot(k, b, i)];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = k; e->gen = s_pgxpGen; e->value = value;
 			e->x = x; e->y = y; e->w = w; return;
 		}
 	}
-	ShadowEntry* e = &s_shadow[s];   /* probe exhausted: overwrite base */
+	Shadow_WarnOverflow("position");
+	ShadowEntry* e = &s_shadow[ShadowSlot(k, b, 0)];   /* probe exhausted: overwrite base */
 	e->key = k; e->gen = s_pgxpGen; e->value = value;
 	e->x = x; e->y = y; e->w = w;
 }
 
+/* A miss may stop at the first stale-gen slot, not only an empty one: Put takes
+ * the first slot that is empty, ours or stale, and a slot stamped this gen never
+ * goes stale within it, so every slot ahead of a live entry is live. The tables
+ * are never cleared, so stopping only at key 0 walked all 16 slots per miss. */
 static const ShadowEntry* Shadow_Get(const void* addr) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
 	for (int i = 0; i < 16; i++) {
-		const ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		const ShadowEntry* e = &s_shadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
 }
@@ -116,6 +177,7 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * off the object up close in first person — acceptable; shadows have their own
  * on/off, and it isn't noticeable at third-person camera distances.) */
 extern "C" int g_PsyX_NoShadowCast = 0;
+extern "C" float g_PsyX_CharaFade = 0.0f;
 
 /* Like the PGXP ShadowEntry, each entry records the packed integer `value` of the
  * vertex word it shadows. A lookup whose current word differs falls to "untracked":
@@ -131,32 +193,40 @@ extern "C" int g_PsyX_NoShadowCast = 0;
  * a lighting helper and restores only the GTE registers, and the various drawers
  * each push their own SetGeomScreen. A frame-global therefore reprojects clip
  * vertices with whichever values the LAST RTPS of the frame happened to leave. */
-struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float ofx, ofy, h; };
+struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float fade; float ofx, ofy, h; };
 static VsEntry s_vshadow[SHADOW_SIZE];
+/* With PGXP and the flashlight off nothing stores view-space data, yet texture
+ * filtering alone keeps GR_NeedViewSpaceData() true, so every vertex copy
+ * probed this 96 MB table for a hit that cannot exist this gen. */
+static unsigned s_vsPutGen = 0;
 
 static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value,
-                   float ofx, float ofy, float h) {
+                   float ofx, float ofy, float h, float fade = 0.0f) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
+	s_vsPutGen = s_pgxpGen;
 	for (int i = 0; i < 16; i++) {
-		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
+		VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
-			e->ofx = ofx; e->ofy = ofy; e->h = h; return;
+			e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h; return;
 		}
 	}
-	VsEntry* e = &s_vshadow[s];
+	Shadow_WarnOverflow("view-space");
+	VsEntry* e = &s_vshadow[ShadowSlot(k, b, 0)];
 	e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
-	e->ofx = ofx; e->ofy = ofy; e->h = h;
+	e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h;
 }
 
 static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
-	unsigned s = ShadowHash(k);
+	unsigned b = ShadowBucket(k);
+	if (s_vsPutGen != s_pgxpGen)
+		return nullptr;
 	for (int i = 0; i < 16; i++) {
-		const VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
+		const VsEntry* e = &s_vshadow[ShadowSlot(k, b, i)];
 		if (e->key == k) return (e->gen == s_pgxpGen && e->value == value) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
 }
@@ -165,7 +235,8 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz, float ofx, float ofy, float h) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h);
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h,
+	       g_PsyX_CharaFade);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -181,10 +252,10 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	}
 	/* View-space propagates whenever PGXP is on too — the near-plane clipper
 	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
+	if (GR_NeedViewSpaceData()) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
 		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst,
-		               ve->ofx, ve->ofy, ve->h);
+		               ve->ofx, ve->ofy, ve->h, ve->fade);
 	}
 }
 
@@ -335,6 +406,45 @@ extern "C" int PsyX_PGXP_TriBackface(const void* a0, const void* a1, const void*
 
 /* Quad = two triangles; the game culls only if BOTH are backfacing (n012<=0 AND
  * n312>=0, opposite winding on the 2nd). Same precise/integer fallback. */
+/* Console `wholemap depth 0|1`. Off by default: the town's streets are coplanar
+ * layers (asphalt over a lighter base) that only the painter order stacks
+ * correctly, and per-vertex depth interpolation picks a different winner per
+ * tile, which tiled the far road white. Painter order is right within a chunk,
+ * and the chunks themselves are submitted far-to-near. */
+extern "C" { int g_PsxWholeMapFarDepth = 0; }
+/* [WMPROBE] one-shot (console `wholemap probe`): counts one frame of far-band
+ * prims through backface, capture and parse, plus a few per-vertex samples.
+ * 2 = armed, counts during the next frame; 1 = dump at the following tick. */
+extern "C" { int g_PsxWholeMapProbe = 0; }
+static unsigned s_wmLastPrims, s_wmLastAffine, s_wmLastHit;
+static unsigned s_wmDevPrims, s_wmPrecPrims;
+/* Probe-frame CPU time (ms) by stage, and batch volume. */
+extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
+static Uint64 s_wmFrameStart = 0;
+/* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
+/* The rate is calibrated against SDL each probe frame, so any monotonic
+ * counter serves where there is no TSC (arm64 macOS). */
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#include <x86intrin.h>
+#define WM_TICKS() __rdtsc()
+#else
+#define WM_TICKS() SDL_GetPerformanceCounter()
+#endif
+static unsigned long long s_wmCyc[9];
+static unsigned s_wmGt4;
+/* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
+ * 17 = mid-parse vertex-buffer flushes. TSC rate is calibrated against the
+ * SDL counter over the probe frame to report milliseconds. */
+static unsigned long long s_wmClsCyc[18];
+static unsigned s_wmClsN[18];
+static unsigned long long s_wmTscStart;
+extern "C" { double g_wmTGpu = 0; unsigned g_wmFarQuads = 0, g_wmFarSplits = 0, g_wmFarFlushes = 0, g_wmFarMeshKeys = 0, g_wmFarMeshDraws = 0, g_wmFarMeshQueued = 0; }
+#define WM_CLS(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TICKS(); stmt; s_wmClsCyc[i] += WM_TICKS() - _c0; s_wmClsN[i]++; } else { stmt; } } while (0)
+#define WM_CYC(i, stmt) do { if (g_PsxWholeMapProbe == 1) { unsigned long long _c0 = WM_TICKS(); stmt; s_wmCyc[i] += WM_TICKS() - _c0; } else { stmt; } } while (0)
+static unsigned s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmAffineVerts, s_wmPreciseVerts;
+static float s_wmWMin, s_wmWMax;
+static unsigned char s_lastLookupFar;
+
 extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void* a2, const void* a3,
                                       int intN012, int intN312)
 {
@@ -344,9 +454,12 @@ extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void
 		    Pgxp_FetchXY(a2,&x2,&y2) && Pgxp_FetchXY(a3,&x3,&y3)) {
 			float n012 = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0);
 			float n312 = (x1-x3)*(y2-y3) - (x2-x3)*(y1-y3);
-			return (n012 <= 0.0f && n312 >= 0.0f) ? 1 : 0;
+			int cull = (n012 <= 0.0f && n312 >= 0.0f) ? 1 : 0;
+			if (g_PsxWholeMapProbe == 1) { s_wmBfCalls++; s_wmBfCull += cull; }
+			return cull;
 		}
 	}
+	if (g_PsxWholeMapProbe == 1) { s_wmBfCalls++; s_wmBfFallback++; s_wmBfCull += (intN012 <= 0 && intN312 >= 0); }
 	return (intN012 <= 0 && intN312 >= 0) ? 1 : 0;
 }
 
@@ -377,11 +490,53 @@ extern "C" { int g_PsxPgxpDepthStats = 0; }
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
+	if (g_PsxWholeMapProbe == 1)
+	{
+		eprintinfo("[WMPROBE] time: frame=%.2fms chunkSubmit=%.2fms parse=%.2fms drawSplits=%.2fms (of submit: transform=%.2fms meshEmit=%.2fms) | OT draws=%u splits=%u verts=%u\n",
+			(double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency(),
+			g_wmTChunks, g_wmTParse, g_wmTDraw, g_wmTXform, g_wmTMesh, g_wmOtDraws, g_wmSplits, g_wmVerts);
+		{
+			const double frameMs = (double)(SDL_GetPerformanceCounter() - s_wmFrameStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+			const double cycPerMs = (frameMs > 0.0) ? (double)(WM_TICKS() - s_wmTscStart) / frameMs : 1.0;
+			char buf[1024];
+			int len = 0;
+			for (int c = 0; c < 18; c++)
+			{
+				if (!s_wmClsN[c]) continue;
+				len += snprintf(buf + len, sizeof(buf) - len, " %s%X=%u/%.2fms",
+					c == 16 ? "far" : (c == 17 ? "flush" : "0x"), c >= 16 ? 0 : c * 16, s_wmClsN[c], (double)s_wmClsCyc[c] / cycPerMs);
+				if (len >= (int)sizeof(buf) - 64) break;
+			}
+			eprintinfo("[WMPROBE] parse by class (count/ms):%s | farQuads=%u farSplits=%u farFlushes=%u | gpuMeshes=%u keys=%u draws=%u | gpuFinish=%.2fms%c", buf, g_wmFarQuads, g_wmFarSplits, g_wmFarFlushes, g_wmFarMeshQueued, g_wmFarMeshKeys, g_wmFarMeshDraws, g_wmTGpu, 10);
+		}
+		if (s_wmGt4)
+			eprintinfo("[WMPROBE] GT4 cycles/prim over %u: begin=%llu drop=%llu hires=%llu split=%llu vert=%llu depth=%llu tex=%llu col=%llu emit=%llu\n",
+				s_wmGt4, s_wmCyc[0] / s_wmGt4, s_wmCyc[1] / s_wmGt4, s_wmCyc[2] / s_wmGt4, s_wmCyc[3] / s_wmGt4,
+				s_wmCyc[4] / s_wmGt4, s_wmCyc[5] / s_wmGt4, s_wmCyc[6] / s_wmGt4, s_wmCyc[7] / s_wmGt4, s_wmCyc[8] / s_wmGt4);
+		eprintinfo("[WMPROBE] frame: backface calls=%u intFallback=%u culled=%u | far captured=%u parsed=%u | verts precise=%u affine=%u W=%.0f..%.0f | farDepth=%d pgxp=%d | lastBucket prims=%u affine=%u szHit=%u | precise prims=%u offByOver2px=%u\n",
+			s_wmBfCalls, s_wmBfFallback, s_wmBfCull, s_wmCaptured, s_wmParsed, s_wmPreciseVerts, s_wmAffineVerts,
+			(double)s_wmWMin, (double)s_wmWMax, g_PsxWholeMapFarDepth, g_PsxUsePgxp,
+			s_wmLastPrims, s_wmLastAffine, s_wmLastHit, s_wmPrecPrims, s_wmDevPrims);
+		g_PsxWholeMapProbe = 0;
+	}
+	else if (g_PsxWholeMapProbe == 2)
+	{
+		s_wmBfCalls = s_wmBfFallback = s_wmBfCull = s_wmCaptured = s_wmParsed = s_wmAffineVerts = s_wmPreciseVerts = 0;
+		s_wmWMin = s_wmWMax = 0.0f;
+		s_wmLastPrims = s_wmLastAffine = s_wmLastHit = 0;
+		s_wmDevPrims = s_wmPrecPrims = 0;
+		memset(s_wmCyc, 0, sizeof(s_wmCyc)); s_wmGt4 = 0;
+		memset(s_wmClsCyc, 0, sizeof(s_wmClsCyc)); memset(s_wmClsN, 0, sizeof(s_wmClsN));
+		g_wmTGpu = 0; g_wmFarQuads = g_wmFarSplits = g_wmFarFlushes = g_wmFarMeshKeys = g_wmFarMeshDraws = g_wmFarMeshQueued = 0; s_wmTscStart = WM_TICKS();
+		g_wmTParse = g_wmTDraw = g_wmTChunks = g_wmTXform = g_wmTMesh = 0; g_wmSplits = g_wmVerts = g_wmOtDraws = 0;
+		s_wmFrameStart = SDL_GetPerformanceCounter();
+		g_PsxWholeMapProbe = 1;
+	}
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpMiss;
-		if (tot)
+		if (tot && g_PsxPgxpDepthStats)
 			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u spikeclamp=%u oversize=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
@@ -457,9 +612,86 @@ static const AffineEntry* AffineFind(const void* prim) {
 	for (int i = 0; i < 16; i++) {
 		const AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
 		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
-		if (e->key == 0) return nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
 	}
 	return nullptr;
+}
+
+/* ---- Per-pixel lighting side channel (PsyX_PpLitPrim) ----------------------
+ * Keyed by prim address and stamped with the PGXP frame gen, exactly like the
+ * affine table above: the game builds a prim, records its corner normals, and
+ * the parse finds them when it emits that prim's vertices. */
+extern "C" { int g_PsyX_PpLitActive = 0; float g_PsyX_HeroLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; }
+struct PpLitEntry { uintptr_t key; unsigned gen; int kind; float n[12]; };
+#define PPLIT_BITS 15
+#define PPLIT_SIZE (1u << PPLIT_BITS)
+#define PPLIT_MASK (PPLIT_SIZE - 1u)
+static PpLitEntry s_ppLit[PPLIT_SIZE];
+
+extern "C" void PsyX_PpLitPrim(const void* prim, int kind, const float* n)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	PpLitEntry* e = &s_ppLit[s];
+	for (int i = 0; i < 16; i++) {
+		PpLitEntry* c = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (c->key == key || c->key == 0 || c->gen != s_pgxpGen) { e = c; break; }
+	}
+	e->key = key; e->gen = s_pgxpGen; e->kind = kind;
+	memcpy(e->n, n, sizeof(e->n));
+}
+
+static const PpLitEntry* PpLitFind(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	for (int i = 0; i < 16; i++) {
+		const PpLitEntry* e = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
+	}
+	return nullptr;
+}
+
+/* Parallel to g_vertexBuffer, index for index. Vertices nothing lit are zero
+ * (w = 0 reads as "use the vertex colour"), written lazily up to the next lit
+ * prim so the cost stays with the prims that use it. */
+float g_ppLitBuffer[MAX_VERTEX_BUFFER_SIZE][4];
+static int s_ppLitCursor = 0;
+
+static void PpLitZeroTo(int end)
+{
+	if (end > s_ppLitCursor)
+		memset(g_ppLitBuffer[s_ppLitCursor], 0, (size_t)(end - s_ppLitCursor) * sizeof(g_ppLitBuffer[0]));
+	if (end > s_ppLitCursor)
+		s_ppLitCursor = end;
+}
+
+extern "C" const float* PsyX_PpLitBufferFinish(int count)
+{
+	PpLitZeroTo(count);
+	return g_ppLitBuffer[0];
+}
+
+/* map[i] = which prim corner buffer vertex i came from. Anything the near
+ * clipper or the size cull reshaped no longer lines up with the corners, so it
+ * stays on the vertex colour. */
+static void PpLitFill(const void* prim, int first, int emitted, int expected, bool reshaped, const int* map)
+{
+	const PpLitEntry* e = (emitted == expected && !reshaped) ? PpLitFind(prim) : nullptr;
+	PpLitZeroTo(first);
+	if (e == nullptr) {
+		PpLitZeroTo(first + emitted);
+		return;
+	}
+	for (int i = 0; i < emitted; i++) {
+		const float* n = &e->n[map[i] * 3];
+		g_ppLitBuffer[first + i][0] = n[0];
+		g_ppLitBuffer[first + i][1] = n[1];
+		g_ppLitBuffer[first + i][2] = n[2];
+		g_ppLitBuffer[first + i][3] = (float)e->kind;
+	}
+	s_ppLitCursor = first + emitted;
 }
 
 static bool s_curPgxpAffine = false;
@@ -523,15 +755,23 @@ static void WeldVertex(float* x, float* y, float* w)
  * vertex's prim-field address. ppw>0 selects the shader's perspective path;
  * ppw=0 is affine. addr = the field pointer (MakeVertex has it); rawX/rawY = the
  * integer coord in that field. */
+/* Console PGXPDBG bitmask (diagnostic, remove once the PGXP-only far ground
+ * holes are found): turns one PGXP subsystem off while PGXP itself stays on.
+ * 1 = no precise vertices (all affine), 2 = legacy depth instead of the PGXP
+ * depth channel, 4 = per-prim alpha forced opaque, 8 = no world split mode. */
+extern "C" { int g_PsxPgxpDbg = 0; }
+
 static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY)
 {
-	if (s_curPgxpAffine) {
+	if (s_curPgxpAffine || (g_PsxPgxpDbg & 1)) {
 		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++; return;
 	}
 	float ox, oy, ow;
 	if (GetPreciseVertex(addr, *(const unsigned*)addr, rawX, rawY, ofsX, ofsY, &ox, &oy, &ow)) {
 		WeldVertex(&ox, &oy, &ow);
 		v->ppx = ox; v->ppy = oy; v->ppw = ow; s_pgxpDet++;
+		if (g_PsxPgxpDbg & 64) v->ppw = 1.0f;
+		if (g_PsxPgxpDbg & 128) { v->ppx = (float)v->x; v->ppy = (float)v->y; }
 	} else {
 		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++;
 	}
@@ -559,6 +799,7 @@ static inline void VsFillVertex(GrVertex* v, const void* addr)
 	 * so presence can't be inferred from the position itself. No shader reads ny. */
 	if (e) {
 		v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f;
+		v->nz = e->fade;
 		/* Latch this vertex's projection registers for the near clipper: every
 		 * vertex of a poly was transformed under the same GTE state, and the
 		 * clip runs a few calls later in the same ParsePrimitive. */
@@ -646,9 +887,57 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
  * UVs restart at each tpage — without it every chunk showed the image
  * from x=0). On a miss the DR_PSYX_TEX packet state is restored, so that
  * path keeps its original semantics. */
+/* Semi-transparency flag of the primitive being parsed; set by ParsePrimitive
+ * for the feedback detector below. */
+static int s_curPrimSemiTrans = 0;
+
+/* Set by that detector for the primitive currently being built, so the rect
+ * builder can stretch it across a widened ortho (see g_PsxFeedbackWideScale).
+ * Cleared per primitive in ParsePrimitive. */
+static int s_curPrimIsFeedback = 0;
+
+/* The primitive samples the live scene-scratch rect: a soft-focus composite
+ * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
+static int s_curPrimIsScratch = 0;
+
+/* Host-supplied: does this tpage/CLUT pair address glyphs that must not be
+ * filtered (in this port, the kanji atlas: dense one-pixel strokes that a
+ * bilinear tap at four or five times their size runs together into blots)?
+ * Such a split is always point-sampled. NULL = none. */
+extern "C" int (*g_PsyX_TextGlyphTest)(int tpage, int clut);
+int (*g_PsyX_TextGlyphTest)(int tpage, int clut) = NULL;
+static int s_curPrimIsGlyph = 0;
+extern int g_PsxSplitIsGlyph;
+extern "C" int GR_SceneFbRedirectCovers(int x, int y);
+extern "C" float g_PsxFeedbackDampBlend;
+
+/* Red modulation of the primitive being parsed (the loading trail alternates
+ * 127/128, and 127 is a PS1 decay frame for its copy loop). */
+static int s_curPrimR0 = 128;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
+
+	s_curPrimIsGlyph = (g_PsyX_TextGlyphTest != NULL) ? g_PsyX_TextGlyphTest(tpage, clut) : 0;
+
+	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
+	 * addressing the left 320 VRAM columns is the display-buffer band, which is
+	 * the whole effect family's signature and nothing else's -- real 16bpp game
+	 * textures live at x >= 512. The store then knows it has a reader this frame,
+	 * which pass will redraw the capture, and whether that reader blends. Same
+	 * test hires_override.c uses to refuse an override for these prims. */
+	if (((tpage >> 7) & 0x3) >= 2 && ((tpage & 0xF) * 64) < 320)
+	{
+		s_curPrimIsFeedback = 1;
+		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans, s_curPrimR0);
+	}
+	else if (((tpage >> 7) & 0x3) >= 2 &&
+	         GR_SceneFbRedirectCovers((tpage & 0xF) * 64, ((tpage >> 4) & 1) * 256))
+	{
+		s_curPrimIsScratch = 1;
+	}
+
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
 	if (hi != 0) {
 		overrideTexture        = (TextureID)hi;
@@ -729,7 +1018,13 @@ int g_DrawPrimMode = 0;
 // valid immediately after RotTransPers calls), looked up during primitive parsing
 // to give GL per-vertex perspective depth.  Cleared each GsDrawOt call.
 // 4096 slots, linear probe ≤16; collision rate is negligible for typical scene sizes.
-#define SZ_TABLE_BITS 12
+/* 12 bits = 4096 entries, and a dense outdoor frame submits MORE prims than
+ * that, so the table saturated and the 16-probe insert force-evicted. A prim
+ * whose lookup then misses gets depthMode DISABLED while its neighbours get
+ * WORLD -- and depthMode is part of the split merge key, so every miss forces
+ * a NEW split. That is what exhausted MAX_DRAW_SPLITS. 15 bits = 32768 entries
+ * (~1 MB) puts the load factor back under 20%. */
+#define SZ_TABLE_BITS 18
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
@@ -741,8 +1036,23 @@ int g_DrawPrimMode = 0;
  * static faces — rugs on floors, paper on desks, distant road/wall panels — stop
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
-enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2 };
-enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
+enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 };
+/* ACTOR: a character prim armed with its own per-vertex SZ by the game's
+ * skeleton drawers (PsyX_SetNextPrimSzActor while g_PsxActorDepth is set).
+ * Unarmed, those drawers reach the capture with the GTE FIFO's SZ, which the
+ * lighting steps have clobbered: with PGXP off each prim took a stale flat
+ * depth, and with it on the flat bucket seed tied every prim of a bucket. Either
+ * way overlapping surfaces (Harry's belt under the jacket hem, a high-poly
+ * model's mouth behind its lips) flickered as the pose moved. Armed prims take
+ * per-vertex depth instead -- from the PGXP W when it exists (shader,
+ * a_extra.w == 2, without the world's far-push so they still win against the
+ * floor they stand on), else from the SZ. */
+extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
+/* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
+ * bucket shares that one bucket, so painter order cannot sort the distant town
+ * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
+ * on their true per-vertex depth instead. */
+enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2, SPLIT_DEPTH_WORLD_FAR = 3 };
 
 /* sz widened u16 -> u32: the whole-town far-depth substitution below feeds true
  * cell-center view depths that exceed the 0xFFFF SZ clamp. u16 values still fit
@@ -752,8 +1062,31 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
  * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
  * address from a previous frame must then read as a miss, exactly like the
  * s_shadow / s_affine tables already do). Inert while the memset still runs. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned wipe; unsigned char kind; unsigned char alpha; unsigned char far; };
+
+/* Per-prim ALPHA (0..255, default 255 = opaque semantics unchanged), armed like
+ * the SZ payload and carried in the same entry. BM_AVERAGE is real
+ * SRC_ALPHA blending on PC, so scaling a prim's alpha is a true transparency
+ * fade -- the one thing an average-blended DARK texture (the bullet decal)
+ * needs to dissolve into fog, since no vertex-colour arithmetic can lift a dark
+ * texture above the fog it darkens. */
+static int g_primAlphaNext = 255;
+/* Set per prim by ApplyGtePerVertexDepthImpl (which runs before the colour
+ * builders), consumed and reset by them. */
+static unsigned char s_primAlphaPending = 255;
+
+extern "C" void PsyX_SetNextPrimAlpha(int a)
+{
+	if (a < 0)   a = 0;
+	if (a > 255) a = 255;
+	g_primAlphaNext = a;
+}
 static SZEntry g_szTable[SZ_TABLE_SIZE];
+/* The PGXP-off GsDrawOt wipe bumps this instead of memsetting the 8 MB table
+ * (twice a frame, a few ms on a weak CPU). An entry stamped with an older wipe
+ * reads exactly as the zeroed entry the memset left. */
+static unsigned s_szWipe = 0;
+#define SZ_KEY(s) (g_szTable[s].wipe == s_szWipe ? g_szTable[s].key : (uintptr_t)0)
 
 /* --- Depth channel Step 3 (docs: PGXP_PR51_Vetting.md; live only when PGXP is
  * on and outside the inventory item pass) ---------------------------------
@@ -841,10 +1174,10 @@ extern "C" float PGXP_GetSzMax(void)
 static uint32_t g_primSzNext[4];
 static int g_primSzNextValid = 0;
 static unsigned char g_primSzNextKind = SZ_KIND_NONE; /* producer kind for the next captured prim */
+static unsigned char g_primSzNextFar = 0;
 
 extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
 {
-	(void)arg3;
 	uint32_t avg_q;
 	uint32_t mx;
 
@@ -873,6 +1206,8 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 		if (s3 > mx) mx = s3;
 	}
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
+	g_primSzNextFar = (g_PsxWholeMapFar && g_PsxWholeMapFarDepth && arg3 >= 0 && arg3 <= 3 &&
+	                   mx >= (2047u << (arg3 + 2))) ? 1 : 0;
 	if (g_PsxUsePgxp) s_dbgArmF++;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
@@ -895,6 +1230,18 @@ extern "C" void PsyX_NoteItemDepthSz(unsigned int sz)
 	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
 }
 
+/* Corners in prim order; a triangle passes n = 3 (the parse reads a triangle's
+ * corners from slots 1..3, the FIFO's SZ1..SZ3). */
+extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int n)
+{
+	if (n == 3) { s3 = s2; s2 = s1; s1 = s0; }
+	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
+	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
+	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_ACTOR;
+	g_primSzNextFar = 0;
+}
+
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
 {
 	uint32_t mx = s0 > s1 ? s0 : s1;
@@ -907,10 +1254,22 @@ extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, un
 	g_primSzNextKind = SZ_KIND_EXACT; /* decals / inventory authored Z — NOT world painter */
 }
 
+/* True depth past the u16 SZ clamp, for whole-map billboards: their prims carry
+ * no SZ of their own, so the auto-capture would hand them the last OT bucket's
+ * seed and every distant tree would paint in front of the depth-tested town. */
+extern "C" void PsyX_SetNextPrimDepthSz(unsigned int sz)
+{
+	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
+	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = sz;
+	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_EXACT;
+}
+
 extern "C" void PsyX_CancelNextPrimSz(void)
 {
 	g_primSzNextValid = 0;
 	g_primSzNextKind = SZ_KIND_NONE;
+	g_primSzNextFar = 0;
 }
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
@@ -928,13 +1287,17 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 
 	uint32_t s0, s1, s2, s3;
 	unsigned char kind;
+	unsigned char far = 0;
 	if (g_primSzNextValid) {
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
 		kind = g_primSzNextKind;
 		if (g_PsxUsePgxp && kind == SZ_KIND_FLAT) s_dbgCapF++;
+		far = g_primSzNextFar;
+		if (far && g_PsxWholeMapProbe == 1) s_wmCaptured++;
 		g_primSzNextValid = 0;
 		g_primSzNextKind = SZ_KIND_NONE;
+		g_primSzNextFar = 0;
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
@@ -952,22 +1315,30 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		/* Stale-gen slots are reclaimable (same probe rule as Shadow_Put/
 		 * AffineStore): identical placement while the memset wipes the table
 		 * (stale entries then never exist mid-probe). */
-		if (g_szTable[s].key == 0 || g_szTable[s].key == key || g_szTable[s].gen != s_pgxpGen) {
+		if (SZ_KEY(s) == 0 || SZ_KEY(s) == key || g_szTable[s].gen != s_pgxpGen) {
 			g_szTable[s].key = key;
+			g_szTable[s].wipe = s_szWipe;
 			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			g_szTable[s].gen = s_pgxpGen;
 			g_szTable[s].kind = kind;
+			g_szTable[s].far = far;
+			g_szTable[s].alpha = (unsigned char)g_primAlphaNext;
+			g_primAlphaNext = 255;
 			return;
 		}
 	}
 	// Probe exhausted — overwrite initial slot
 	if (g_PsxUsePgxp) s_dbgSzExhaust++;
 	g_szTable[slot].key = key;
+	g_szTable[slot].wipe = s_szWipe;
+	g_szTable[slot].alpha = (unsigned char)g_primAlphaNext;
+	g_primAlphaNext = 255;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 	g_szTable[slot].gen = s_pgxpGen;
 	g_szTable[slot].kind = kind;
+	g_szTable[slot].far = far;
 }
 
 /* Depth mode for a prim's split: WORLD only for static-world-mesh (FLAT) opaque
@@ -976,13 +1347,13 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
  * never consulted and split classification/batching is byte-identical to today. */
 static int SplitDepthForPrim(const void* prim)
 {
-	if (!g_PsxUsePgxp || !g_PsxPgxpWorldDepth)
+	if (!g_PsxUsePgxp || !g_PsxPgxpWorldDepth || (g_PsxPgxpDbg & 8))
 		return SPLIT_DEPTH_DISABLED;
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == key)
+		if (SZ_KEY(s) == key)
 		{
 			/* Stale-gen = captured a previous frame, not this one: a reused
 			 * packet address must not inherit last frame's kind. (Function is
@@ -992,10 +1363,10 @@ static int SplitDepthForPrim(const void* prim)
 				s_dbgStaleRej++;
 				return SPLIT_DEPTH_DISABLED;
 			}
-			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return SPLIT_DEPTH_WORLD; }
+			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return g_szTable[s].far ? SPLIT_DEPTH_WORLD_FAR : SPLIT_DEPTH_WORLD; }
 			return SPLIT_DEPTH_DISABLED;
 		}
-		if (g_szTable[s].key == 0)
+		if (SZ_KEY(s) == 0)
 			break;
 	}
 	return SPLIT_DEPTH_DISABLED;
@@ -1028,7 +1399,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 		 * wipes exactly as before (byte-identical); a runtime PGXP on->off
 		 * toggle self-heals here on the first off-frame GsDrawOt. */
 		if (!g_PsxUsePgxp)
-			memset(g_szTable, 0, sizeof(g_szTable));
+			s_szWipe++;
 	}
 	else if (g_PsxUsePgxp)
 		s_dbgWipeSkips++;
@@ -1042,13 +1413,32 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curNoFlashlight = false;
 }
 
+static unsigned char PsyX_LookupGteAlpha(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
+	for (int i = 0; i < 16; i++) {
+		int s = (slot + i) & SZ_TABLE_MASK;
+		if (SZ_KEY(s) == key)
+			/* Gen-validate ALWAYS (unlike the depths lookup's PGXP-gated
+			 * check): arm and consume are same-frame, so a match from an
+			 * earlier gen is a reused packet address, not this prim. Without
+			 * this, a decal's fade alpha from gameplay attached itself to
+			 * whatever landed on that address later -- the load screen drew
+			 * Harry semi-transparent, ghosting over the uncleared background. */
+			return (g_szTable[s].gen == s_pgxpGen) ? g_szTable[s].alpha : 255;
+		if (SZ_KEY(s) == 0) break;
+	}
+	return 255;
+}
+
 static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* kindOut = nullptr)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == key) {
+		if (SZ_KEY(s) == key) {
 			/* Gen-validate gated on PGXP: the legacy pgxpZBuffer path (PGXP
 			 * off) keeps its exact historical behavior; when PGXP is on a
 			 * reused packet address from a prior frame reads as a miss. */
@@ -1060,9 +1450,10 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
 			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
 			if (kindOut) *kindOut = g_szTable[s].kind;
+			s_lastLookupFar = g_szTable[s].far;
 			return true;
 		}
-		if (g_szTable[s].key == 0) break;
+		if (SZ_KEY(s) == 0) break;
 	}
 	return false;
 }
@@ -1078,10 +1469,38 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	/* Depth channel (PGXP on, outside the inventory item pass): flat per-prim
 	 * depth on the shared constant linear scale — no prev-frame normalizer
 	 * needed. Everything else keeps the legacy self-normalized behavior. */
-	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth;
+	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth && !(g_PsxPgxpDbg & 2);
 	if (g_PsxUsePgxp) s_dbgApplyCalls++;
 	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
+	if (g_PsxWholeMapProbe == 1)
+	{
+		const int n = isQuad ? 4 : 3;
+		float dev = 0.0f;
+		int prec = 0;
+		for (int i = 0; i < n; i++)
+		{
+			if (vertex[i].ppw <= 0.0f) continue;
+			float dx = vertex[i].ppx - vertex[i].x, dy = vertex[i].ppy - vertex[i].y;
+			if (dx < 0) dx = -dx;
+			if (dy < 0) dy = -dy;
+			if (dx > dev) dev = dx;
+			if (dy > dev) dev = dy;
+			prec = 1;
+		}
+		s_wmPrecPrims += prec;
+		s_wmDevPrims += (dev > 2.0f);
+	}
+	if (g_PsxWholeMapProbe == 1 && s_otBucketAbs == g_currentOTBucketCount - 1)
+	{
+		const int n = isQuad ? 4 : 3;
+		int aff = 0;
+		uint32_t tsz[4];
+		for (int i = 0; i < n; i++) if (vertex[i].ppw <= 0.0f) aff = 1;
+		s_wmLastPrims++;
+		s_wmLastAffine += aff;
+		if (PsyX_LookupGteDepths(polyTag, tsz)) s_wmLastHit++;
+	}
 	uint32_t sz[4];
 	unsigned char kind = SZ_KIND_NONE;
 	if (!PsyX_LookupGteDepths(polyTag, sz, &kind))
@@ -1097,6 +1516,14 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		else                             s_dbgParseHitNone++;
 	}
 
+	/* Per-prim alpha: 255 for everything that never armed it. NOT written to
+	 * the vertices here -- the parse calls the COLOUR builders after this
+	 * function, and every one of them writes a = 255, which silently stomped
+	 * the first version of this. Stashed instead; the colour builders consume
+	 * it (s_primAlphaPending) and reset it to 255. */
+	s_primAlphaPending = (g_PsxPgxpDbg & 4) ? 255 : PsyX_LookupGteAlpha(polyTag);
+
+
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
 		sv0 = (float)sz[0]; sv1 = (float)sz[1];
@@ -1108,6 +1535,29 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
+
+	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
+	{
+		const float sv[4] = { sv0, sv1, sv2, sv3 };
+		const int n = isQuad ? 4 : 3;
+		for (int i = 0; i < n; i++)
+		{
+			float z;
+			if (pgxpWorldPath)
+			{
+				z = PgxpNdcFromViewZ(sv[i]);
+				vertex[i]._p1 = 2;
+			}
+			else
+			{
+				z = 1.0f - 2.0f * sv[i] / (float)g_szMaxPrevFrame;
+				if (z < -1.0f) z = -1.0f;
+				if (z >  1.0f) z =  1.0f;
+			}
+			vertex[i].z = z;
+		}
+		return;
+	}
 
 	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
 	 * per-poly average cannot order a large foreshortened face against
@@ -1176,6 +1626,19 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		{
 			vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = 1;
 			if (isQuad) vertex[3]._p1 = 1;
+		}
+		if (g_PsxWholeMapProbe == 1 && kind == SZ_KIND_FLAT && s_lastLookupFar)
+		{
+			const int n = isQuad ? 4 : 3;
+			s_wmParsed++;
+			for (int i = 0; i < n; i++)
+			{
+				if (vertex[i].ppw > 0.0f) {
+					s_wmPreciseVerts++;
+					if (s_wmWMin == 0.0f || vertex[i].ppw < s_wmWMin) s_wmWMin = vertex[i].ppw;
+					if (vertex[i].ppw > s_wmWMax) s_wmWMax = vertex[i].ppw;
+				} else s_wmAffineVerts++;
+			}
 		}
 		return;
 	}
@@ -1552,7 +2015,7 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	ItemProbe_RecordDraw(vertex, polyTag, isQuad, zBefore);
 }
 
-enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN };
+enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN, GPU_SPLIT_FBCAPTURE, GPU_SPLIT_FARMESH };
 
 struct GPUDrawSplit
 {
@@ -1578,10 +2041,17 @@ struct GPUDrawSplit
 	int				overrideHiresW;
 	int				overrideHiresH;
 
+	int				isGlyph; /* see g_PsyX_TextGlyphTest */
+	int				mixed;   /* drawn with the all-format program (g_gte_shader_mix) */
+
 	const char*		debugText;
 };
 
-#define MAX_DRAW_SPLITS	 4096
+/* 4096 was reached in ordinary play on a dense outdoor map (a user capture hit
+ * it on 89% of its log lines). Every split past the cap is DROPPED geometry, so
+ * the frame renders partially -- the black/flickering frames and the "expect
+ * rendering errors" spam. ~180 bytes each, so 16384 costs ~3 MB. */
+#define MAX_DRAW_SPLITS	 16384
 
 GrVertex g_vertexBuffer[MAX_VERTEX_BUFFER_SIZE];
 GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
@@ -1589,10 +2059,18 @@ GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
 int g_vertexIndex = 0;
 int g_splitIndex = 0;
 
+/* Per-frame parsed-vertex tally for the grey-flash probe: a 1-frame grey flash
+ * is a fog-coloured clear presented with a near-empty world, and this is the
+ * cheap signal for "near-empty". Accumulated across ClearSplits calls (several
+ * per frame), published/zeroed at GR_SwapWindow. */
+extern "C" { int g_PsxFrameVerts = 0; int g_PsxLastFrameVerts = 0; }
+
 void ClearSplits()
 {
 	currentSplitDebugText = nullptr;
+	g_PsxFrameVerts += g_vertexIndex;
 	g_vertexIndex = 0;
+	s_ppLitCursor = 0;
 	g_splitIndex = 0;
 	g_splits[0].kind = GPU_SPLIT_LEGACY;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
@@ -1710,6 +2188,22 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
+/* View-space data feeds two consumers only: the per-pixel flashlight (a few
+ * metres of reach) and the near-plane clipper (vsz < g_PgxpNearZ). A prim whose
+ * every vertex projected precisely past 64u needs neither, and its four view-
+ * space lookups were half the per-prim parse cost of a whole-town frame -- the
+ * OT walk visits prims in depth order, so each is a cache miss. Callers fill
+ * PGXP first so ppw is known here. */
+static inline bool PgxpAllBeyondViewSpace(const GrVertex* v, int n)
+{
+	if (!g_PsxUsePgxp)
+		return false;
+	for (int i = 0; i < n; i++)
+		if (!(v[i].ppw > 16384.0f))
+			return false;
+	return true;
+}
+
 void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, ushort gteidx)
 {
 	assert(p0);
@@ -1732,22 +2226,47 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
 
-	/* Before the PGXP block: the near-clip eligibility test below reads the
-	 * view-space data these fill. Skipped for the isolated item model — it must
-	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
-	 * so losing near-clip eligibility is harmless). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
-	{
-		VsFillVertex(&vertex[0], p0);
-		VsFillVertex(&vertex[1], p1);
-		VsFillVertex(&vertex[2], p2);
-	}
+	/* On a frame that draws the 3D world, a POLY primitive IS world geometry.
+	 * The 2D content the game puts through the ordering table is SPRT and TILE,
+	 * neither of which reaches this function, and the fullscreen 2D screens that
+	 * do use POLY are exactly the frames g_PsxFrame3dClass excludes. Seeding the
+	 * marker here is what stops a primitive whose vertices all missed the shadow
+	 * lookup from rendering point-sampled beside filtered neighbours: walls and
+	 * tree quads coming out blocky at 16x anisotropic. The lookup below still
+	 * runs and still sets the marker; this only removes the dependency on it
+	 * resolving, which it does for ~82% of vertices. */
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth && !OtBucketIsUi2d())
+		vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
 
+	/* Precise projection first, so the view-space fill can be skipped for prims
+	 * wholly past its consumers' reach; the near-clip test after it reads that
+	 * data. The isolated item model skips view space: it must not join the
+	 * world's per-pixel flashlight (it doesn't cross the near plane, so losing
+	 * near-clip eligibility is harmless). */
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
+	}
+
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth && !PgxpAllBeyondViewSpace(vertex, 3))
+	{
+		VsFillVertex(&vertex[0], p0);
+		VsFillVertex(&vertex[1], p1);
+		VsFillVertex(&vertex[2], p2);
+
+		/* Per-PRIMITIVE 3D marker. The lookup resolves ~84% of vertices, and
+		 * geom3d reaches the fragment stage as a varying -- so a prim with a
+		 * mix of resolved and unresolved vertices would interpolate across 0.5
+		 * and split one surface into filtered and unfiltered halves. One
+		 * resolved vertex is proof the whole primitive came from the GTE. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
+			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
+	}
+
+	if (g_PsxUsePgxp)
+	{
 		/* Per-poly consistency: if ANY vertex fell to affine (ppw<=0 — at/behind the
 		 * near plane, where there's no valid perspective projection), drop the WHOLE
 		 * poly to affine. A poly with some verts perspective and some affine shears at
@@ -1788,23 +2307,43 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
-	/* Before the PGXP block: near-clip eligibility reads the view-space data.
-	 * Skipped for the isolated item model so it stays out of the world's per-pixel
-	 * flashlight (see MakeVertexTriangle). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
+	/* Frame-class 3D marker, same reasoning as MakeVertexTriangle. */
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth && !OtBucketIsUi2d())
 	{
-		VsFillVertex(&vertex[0], p0);
-		VsFillVertex(&vertex[1], p1);
-		VsFillVertex(&vertex[2], p2);
-		VsFillVertex(&vertex[3], p3);
+		vertex[0].geom3d = vertex[1].geom3d =
+		vertex[2].geom3d = vertex[3].geom3d = 1.0f;
 	}
 
+	/* Precise projection first, so the view-space fill can be skipped for prims
+	 * wholly past its consumers' reach; the near-clip test after it reads that
+	 * data. The isolated item model skips view space so it stays out of the
+	 * world's per-pixel flashlight (see MakeVertexTriangle). */
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
+	}
+
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth && !PgxpAllBeyondViewSpace(vertex, 4))
+	{
+		VsFillVertex(&vertex[0], p0);
+		VsFillVertex(&vertex[1], p1);
+		VsFillVertex(&vertex[2], p2);
+		VsFillVertex(&vertex[3], p3);
+
+		/* Per-primitive, same reasoning as MakeVertexTriangle. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f ||
+		    vertex[2].ny > 0.5f || vertex[3].ny > 0.5f)
+		{
+			vertex[0].geom3d = vertex[1].geom3d =
+			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
+		}
+	}
+
+	if (g_PsxUsePgxp)
+	{
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
 		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
@@ -1839,7 +2378,151 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
+	/* Widescreen feedback: the effect's strips are authored 320 wide and would
+	 * otherwise blur the 4:3 core and leave the margins sharp, with a hard seam
+	 * down each side. Stretch them across the widened ortho; the capture is
+	 * stretched to match, so the loop stays 1:1. No-op at 4:3.
+	 *
+	 * UI pass only. The scale is the UI ortho's, and the capture widens only for
+	 * a UI-pass reader. The loading trail draws in the WORLD pass and also runs
+	 * at room transitions, where the UI ortho is widened: stretching its strips
+	 * over an unstretched capture rescales the loop every frame, which is the
+	 * vertical-streak class this store has hit before. */
+	/* The scene-scratch soft focus (Alessa, Lisa) is the same idea in the WORLD
+	 * pass: its strips are 320 wide and would soften only the 4:3 core. Stretch
+	 * them across the world ortho; GR_CaptureFrameToVramRect captures the full
+	 * width to match, so the composite stays 1:1 with the scene under it. */
+	if (s_curPrimIsScratch && !g_PsxUIOrthoPass && g_PsxWorldOrthoValid && g_PsxWorldDisp[0] > 0.0f)
+	{
+		const float c = (g_PsxWorldOrtho[0] + g_PsxWorldOrtho[1]) * 0.5f;
+		const float k = (g_PsxWorldOrtho[1] - g_PsxWorldOrtho[0]) / g_PsxWorldDisp[0];
+		if (k > 1.001f)
+		{
+			int i;
+			for (i = 0; i < 4; i++)
+				vertex[i].x = (short)floorf(c + ((float)vertex[i].x - c) * k + 0.5f);
+		}
+	}
+
+	if (s_curPrimIsFeedback && g_PsxUIOrthoPass && g_PsxFeedbackWideScale > 1.001f)
+	{
+		int i;
+		for (i = 0; i < 4; i++)
+		{
+			const float fx = g_PsxFeedbackWideCenter +
+			                 ((float)vertex[i].x - g_PsxFeedbackWideCenter) * g_PsxFeedbackWideScale;
+			vertex[i].x = (short)floorf(fx + 0.5f);
+		}
+	}
+
+	/* [FBGEOM] one-shot: where a feedback strip actually lands, in PSX display
+	 * coordinates, against the ortho it is drawn under. Chasing the unblurred
+	 * sliver along the bottom edge -- the strips are authored 224 tall, so if
+	 * they stop short of the ortho's bottom this line says by how much and
+	 * whether the draw-env offset or the display height is responsible. */
+	/* One line per ortho pass, so the loading screen (world pass) cannot use up
+	 * the budget before an in-scene overlay (UI pass) is ever drawn. */
+	if (s_curPrimIsFeedback)
+	{
+		static int s_fbGeomLogged[2] = { 0, 0 };
+		const int  pass = g_PsxUIOrthoPass ? 1 : 0;
+		if (!s_fbGeomLogged[pass])
+		{
+			s_fbGeomLogged[pass] = 1;
+			eprintinfo("[FBGEOM] %s strip x %d..%d y %d..%d  ofs %.1f,%.1f  wide %.4f about %.1f\n",
+				pass ? "ui" : "world",
+				(int)vertex[0].x, (int)vertex[2].x, (int)vertex[0].y, (int)vertex[2].y,
+				ofsX, ofsY, g_PsxFeedbackWideScale, g_PsxFeedbackWideCenter);
+		}
+	}
+
 	ScreenCoordsToEmulator(vertex, 4);
+}
+
+
+/* A flat fill authored to cover the whole PSX frame -- a scene tint, a flash --
+ * drawn in the WORLD pass. That pass's ortho is widened for Hor+ and cropped
+ * vertically by g_PsxWorldVScale, both of which exist for 3D geometry, so the
+ * fill came out as a 4:3 box that stopped short of the bottom: the blue wash in
+ * the carousel's Flauros scene (map6_s04 func_800E74C4, a 320x224 TILE in OT0).
+ * Remap it onto the world ortho's own extent, which is exactly the picture.
+ *
+ * Untextured only, and only a rect that covers the entire display: a flat
+ * colour has no aspect to distort, whereas a full-frame TEXTURED sprite may be a
+ * picture authored for 4:3 and must not be stretched. Identity in 4:3, in the UI
+ * pass (whose ortho is already the picture) and on 2D screens. */
+static inline void StretchFullFrameFillToWorldOrtho(GrVertex* v)
+{
+	float x0, x1, y0, y1;
+	float L, R, T, B, W, H;
+	int   i;
+
+	if (g_PsxUIOrthoPass || !g_PsxWorldOrthoValid)
+		return;
+
+	L = g_PsxWorldOrtho[0]; R = g_PsxWorldOrtho[1];
+	T = g_PsxWorldOrtho[2]; B = g_PsxWorldOrtho[3];
+	W = g_PsxWorldDisp[0];  H = g_PsxWorldDisp[1];
+
+	if (W <= 0.0f || H <= 0.0f || R <= L || B <= T)
+		return;
+	if (fabsf(L) < 0.01f && fabsf(R - W) < 0.01f && fabsf(T) < 0.01f && fabsf(B - H) < 0.01f)
+		return;
+
+	x0 = x1 = (float)v[0].x;
+	y0 = y1 = (float)v[0].y;
+	for (i = 1; i < 4; i++)
+	{
+		if (v[i].x < x0) x0 = (float)v[i].x;
+		if (v[i].x > x1) x1 = (float)v[i].x;
+		if (v[i].y < y0) y0 = (float)v[i].y;
+		if (v[i].y > y1) y1 = (float)v[i].y;
+	}
+
+	if (!(x0 <= 0.0f && x1 >= W && y0 <= 0.0f && y1 >= H))
+		return;
+
+	/* Round OUTWARD: the ortho edges are fractional (-57.4 at 16:9), and rounding
+	 * a corner inward leaves a column of unfilled pixels down the frame edge. */
+	for (i = 0; i < 4; i++)
+	{
+		const float fx = L + (float)v[i].x * (R - L) / W;
+		const float fy = T + (float)v[i].y * (B - T) / H;
+		v[i].x = (short)(((float)v[i].x <= x0) ? floorf(fx) : ceilf(fx));
+		v[i].y = (short)(((float)v[i].y <= y0) ? floorf(fy) : ceilf(fy));
+	}
+}
+
+/* Stamp the polygon's UV bounding box on every vertex (see GrVertex.ulo). */
+static inline void SetUvLimits(GrVertex* vertex, int count)
+{
+	unsigned char ulo = vertex[0].u, uhi = vertex[0].u;
+	unsigned char vlo = vertex[0].v, vhi = vertex[0].v;
+	int i;
+
+	for (i = 1; i < count; i++)
+	{
+		if (vertex[i].u < ulo) ulo = vertex[i].u;
+		if (vertex[i].u > uhi) uhi = vertex[i].u;
+		if (vertex[i].v < vlo) vlo = vertex[i].v;
+		if (vertex[i].v > vhi) vhi = vertex[i].v;
+	}
+
+	for (i = 0; i < count; i++)
+	{
+		vertex[i].ulo = ulo; vertex[i].vlo = vlo;
+		vertex[i].uhi = uhi; vertex[i].vhi = vhi;
+	}
+}
+
+/* Vertex page: tpage X/Y (bits 0-4) plus the tpage format (bits 7-8) moved to
+ * bits 5-6, so the all-format program can pick its sampler per vertex. The
+ * per-format programs only read bits 0-4. Untextured prims use
+ * TEXCOORD_PAGE_UNTEXTURED. */
+#define TEXCOORD_PAGE_UNTEXTURED 0x80
+static inline short TexcoordPage(int tpage)
+{
+	return (short)((tpage & 0x1F) | (((tpage >> 7) & 0x3) << 5));
 }
 
 void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, unsigned char* uv3, short page, short clut, unsigned char dither)
@@ -1850,8 +2533,7 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv3);
 
 	const unsigned char bright = 2;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -1895,6 +2577,8 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 4);
 }
 
 void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, short page, short clut, unsigned char dither)
@@ -1904,8 +2588,7 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv2);
 
 	const unsigned char bright = 2;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -1942,20 +2625,40 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 3);
 }
 
 void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clut, short w, short h)
 {
 	assert(uv);
 
-	// sim overflow
-	if (int(uv[0]) + w > 255) w = 255 - uv[0];
-	if (int(uv[1]) + h > 255) h = 255 - uv[1];
+	/* A sprite whose far edge lands EXACTLY on the page edge (u+w or v+h == 256)
+	 * is not an overflow: its last texel is 255, and PSX reads 0..255 exactly.
+	 * Only the edge coordinate, one past the last texel, fails to fit in the u8
+	 * vertex field. Clamping w/h to 255-uv there kept the full screen size but
+	 * sampled one texel fewer, stretching the sprite by a texel -- and a
+	 * framebuffer-feedback strip (256 wide from u=0; 224 tall from v=32 on
+	 * buffer 0) then rescales the stored frame on EVERY pass: the smear and the
+	 * lost bottom line on the dream blur, the sideways stretch on the loading
+	 * trail. Store 255 and carry the missing texel in the per-vertex texcoord
+	 * offset instead (a_extra.xy * 0.5 in the vertex shader, so 2 = +1 texel).
+	 * Genuine overflows past 256 keep the old clamp. */
+	int extendU = 0, extendV = 0;
+	/* The sprite's own texels end one BEFORE u+w / v+h -- the far edge is
+	 * exclusive and the hardware never reads it. Only meaningful when the
+	 * size went through untouched. */
+	const int lastU = (int(uv[0]) + w <= 255 && w > 0) ? int(uv[0]) + w - 1 : -1;
+	const int lastV = (int(uv[1]) + h <= 255 && h > 0) ? int(uv[1]) + h - 1 : -1;
+
+	if (int(uv[0]) + w == 256)     { w = 255 - uv[0]; extendU = 1; }
+	else if (int(uv[0]) + w > 255) { w = 255 - uv[0]; }
+	if (int(uv[1]) + h == 256)     { h = 255 - uv[1]; extendV = 1; }
+	else if (int(uv[1]) + h > 255) { h = 255 - uv[1]; }
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
-	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
-	short pageCoord = page & 0x1F;
+	short pageCoord = TexcoordPage(page);
 
 	vertex[0].u = uv[0];
 	vertex[0].v = uv[1];
@@ -1985,19 +2688,48 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
 
-	if (g_cfg_bilinearFiltering)
+	/* Vertex order matches MakeVertexRect: 0 top-left, 1 bottom-left,
+	 * 2 bottom-right, 3 top-right. */
+	if (extendU)
 	{
-		vertex[0].tcx = -1;
-		vertex[0].tcy = -1;
+		vertex[2].tcx = 2;
+		vertex[3].tcx = 2;
+	}
+	if (extendV)
+	{
+		vertex[1].tcy = 2;
+		vertex[2].tcy = 2;
+	}
 
-		vertex[1].tcx = -1;
-		vertex[1].tcy = -1;
+	/* An upstream half-texel UV nudge used to sit here, applied to every RECT
+	 * whenever filtering was enabled: tcx/tcy reach the vertex shader as
+	 * a_extra.xy and it adds a_extra.xy * 0.5 to the texture coordinate.
+	 *
+	 * RECTs are how 2D sprites and TEXT GLYPHS are drawn, and font atlases pack
+	 * their cells edge to edge with no gutter -- so half a texel over lands
+	 * inside the neighbouring glyph and draws a slice of it beside the letter,
+	 * with the whole 2D layer shifted down and right. That is the reported
+	 * corruption, and it appeared for every mode except Off and Dithering
+	 * because those are the only two that leave this flag clear.
+	 *
+	 * It also could not have been doing any good: the gate reports 0 on menu
+	 * frames, so those glyphs are point-sampled anyway and were paying the
+	 * offset for filtering they never received. The two sibling call sites in
+	 * MakeTexcoordQuad/Triangle were already commented out for what looks like
+	 * the same reason; this one was missed. The sampler now brackets its taps
+	 * around P - 0.5 itself, so nothing needs compensating here. */
 
-		vertex[2].tcx = -1;
-		vertex[2].tcy = -1;
+	SetUvLimits(vertex, 4);
 
-		vertex[3].tcx = -1;
-		vertex[3].tcy = -1;
+	/* The filter's taps are clamped to this box, and a box ending at u+w / v+h
+	 * let them read the texel past the sprite: whatever VRAM held beside it,
+	 * drawn as a coloured line down the edge of the loading-screen picture
+	 * (and anything else built from abutting sprites). End it at the last
+	 * texel the sprite really shows. */
+	for (int i = 0; i < 4; i++)
+	{
+		if (lastU >= 0) vertex[i].uhi = (unsigned char)lastU;
+		if (lastV >= 0) vertex[i].vhi = (unsigned char)lastV;
 	}
 }
 
@@ -2009,28 +2741,28 @@ void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 
 	vertex[3].u = 0;
 	vertex[3].v = 0;
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = 0;
+	vertex[3].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[3].clut = 0;
 }
 
@@ -2042,21 +2774,21 @@ void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 }
 
@@ -2068,40 +2800,43 @@ void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 	vertex[0].v = 0;
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = 0;
+	vertex[0].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[0].clut = 0;
 
 	vertex[1].u = 0;
 	vertex[1].v = 0;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = 0;
+	vertex[1].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[1].clut = 0;
 
 	vertex[2].u = 0;
 	vertex[2].v = 0;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = 0;
+	vertex[2].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[2].clut = 0;
 
 	vertex[3].u = 0;
 	vertex[3].v = 0;
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = 0;
+	vertex[3].page = TEXCOORD_PAGE_UNTEXTURED;
 	vertex[3].clut = 0;
 }
 
 void MakeColourNoShade(GrVertex* vertex, int n)
 {
+	const unsigned char a = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
 	--n;
 	while (n >= 0)
 	{
 		vertex[n].r = 128;
 		vertex[n].g = 128;
 		vertex[n].b = 128;
-		vertex[n].a = 255;
+		vertex[n].a = a;
 		vertex[n]._p0 = 0;
 		--n;
 	}
@@ -2109,8 +2844,15 @@ void MakeColourNoShade(GrVertex* vertex, int n)
 
 void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2120,32 +2862,39 @@ void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col1[0];
 	vertex[2].g = col1[1];
 	vertex[2].b = col1[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col0[0];
 	vertex[3].g = col0[1];
 	vertex[3].b = col0[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 
 void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 3);
 		return;
 	}
@@ -2157,26 +2906,33 @@ void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, 
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 }
 
 void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2189,25 +2945,25 @@ void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col3[0];
 	vertex[3].g = col3[1];
 	vertex[3].b = col3[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 
@@ -2309,6 +3065,32 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 {
 	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
 		return count;
+
+	/* [PGXPCLIP]: the first dozen polys the clipper takes, per session, with
+	 * each vertex's screen position, view depth and W. A far quad losing one
+	 * corner (the mall screens) means one vertex carries a view depth that
+	 * says "behind the eye"; this names which. Event-capped, never per frame. */
+	{
+		static int s_clipLog = 0;
+		/* Only the suspicious kind: every vertex projects on-screen (a real
+		 * straddler's behind-eye vertex saturates the GTE screen box) yet one
+		 * still reads as behind the near plane. */
+		bool onScreen = s_clipLog < 24;
+		for (int j = 0; onScreen && j < count; j++)
+			if (v[j].x < -400.0f || v[j].x > 400.0f || v[j].y < -300.0f || v[j].y > 300.0f)
+				onScreen = false;
+		if (onScreen && s_clipLog < 24)
+		{
+			s_clipLog++;
+			eprintinfo("[PGXPCLIP] n=%d nearZ=%.1f | v0=(%.0f,%.0f z=%.0f w=%.3f) v1=(%.0f,%.0f z=%.0f w=%.3f) v2=(%.0f,%.0f z=%.0f w=%.3f) v3=(%.0f,%.0f z=%.0f w=%.3f)\n",
+				count, (double)g_PgxpNearZ,
+				(double)v[0].x, (double)v[0].y, (double)v[0].vsz, (double)v[0].ppw,
+				(double)v[1].x, (double)v[1].y, (double)v[1].vsz, (double)v[1].ppw,
+				(double)v[2].x, (double)v[2].y, (double)v[2].vsz, (double)v[2].ppw,
+				(double)(count > 3 ? v[3].x : 0.0f), (double)(count > 3 ? v[3].y : 0.0f),
+				(double)(count > 3 ? v[3].vsz : 0.0f), (double)(count > 3 ? v[3].ppw : 0.0f));
+		}
+	}
 
 	/* Growth headroom: never write past the vertex buffer; keeping the
 	 * unclipped poly stays within the pre-existing envelope. Force the whole
@@ -2437,12 +3219,17 @@ static int PgxpEmitPoly(GrVertex* v, int count)
 
 //------------------------------------------------------------------------------------------------------------------------
 
+/* Console `mixshader 0|1`. Ok is set at startup only if the program built. */
+extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
 
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
+	if (s_curPrimIsScratch && !semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+		blendMode = BM_CONSTANT_ALPHA;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
 
@@ -2457,6 +3244,16 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	 * global: an ungated read would key untextured/white splits on override
 	 * state they never sample, fragmenting them once normal maps exist. */
 	TextureID normalTextureId = (textured && overrideTexture != 0) ? overrideNormalTexture : 0;
+
+	/* Every VRAM format and untextured prims share one program, so only a
+	 * hi-res override (its own texture) still splits on texture. Tpage format
+	 * 3 is reserved and keeps its old path. */
+	const int mixed = (g_PsxMixedShader && g_PsxMixedShaderOk && (!textured || texFormat <= TF_16_BIT)) ? 1 : 0;
+	if (mixed)
+	{
+		texFormat = TF_16_BIT;
+		textureId = g_vramTexture;
+	}
 
 	// FIXME: compare drawing environment too?
 	if (curSplit.kind == GPU_SPLIT_LEGACY &&
@@ -2480,6 +3277,8 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		curSplit.drawenv.clip.w == activeDrawEnv.clip.w &&
 		curSplit.drawenv.clip.h == activeDrawEnv.clip.h &&
 		curSplit.drawenv.dfe == activeDrawEnv.dfe &&
+		curSplit.isGlyph == (textured ? s_curPrimIsGlyph : 0) &&
+		curSplit.mixed == mixed &&
 		curSplit.debugText == currentSplitDebugText)
 	{
 		return;
@@ -2489,7 +3288,16 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 
 	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
 	{
-		eprinterr("MAX_DRAW_SPLITS reached (too many blend modes, texture formats, drawEnv clip rects, dfe switches), expect rendering errors\n");
+		/* Bounded: this fires per DROPPED SPLIT, so an overflowing frame used to
+		 * emit thousands of lines. That alone cost hundreds of ms a frame -- the
+		 * reported "performance drops" were substantially this log write. */
+		static unsigned s_dropped = 0, s_logged = 0;
+		s_dropped++;
+		if (s_logged < 5 || (s_dropped & 0xFFFu) == 0) {
+			s_logged++;
+			eprinterr("MAX_DRAW_SPLITS (%d) reached -- geometry dropped this frame; "
+			          "%u splits dropped so far\n", MAX_DRAW_SPLITS, s_dropped);
+		}
 		return;
 	}
 
@@ -2504,6 +3312,8 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
+	split.isGlyph   = textured ? s_curPrimIsGlyph : 0;
+	split.mixed     = mixed;
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
@@ -2528,6 +3338,32 @@ static void AddModernSplit(unsigned int handle)
 	GPUDrawSplit& split = g_splits[++g_splitIndex];
 	split.kind = GPU_SPLIT_MODERN;
 	split.modernHandle = handle;
+	split.drawenv = activeDrawEnv;
+	split.startVertex = g_vertexIndex;
+	split.numVerts = 0;
+}
+
+/* A capture point in draw order (DR_PSYX_FBCAPTURE, 0xB4): everything drawn so
+ * far this frame is packed into the VRAM rect carried in drawenv.clip, so the
+ * prims after it sample it. The scene-scratch effects depend on exactly this
+ * ordering -- draw the scene, then composite it back -- and PC draws the scene
+ * on screen instead of into VRAM, so the capture has to sit where the game's
+ * DR_AREA switched back. See GR_CaptureFrameToVramRect. */
+static void AddFbCaptureSplit(int x, int y, int w, int h)
+{
+	GPUDrawSplit& current = g_splits[g_splitIndex];
+	current.numVerts = g_vertexIndex - current.startVertex;
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+	{
+		eprinterr("MAX_DRAW_SPLITS reached while appending fb capture\n");
+		return;
+	}
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_FBCAPTURE;
+	split.drawenv.clip.x = (short)x;
+	split.drawenv.clip.y = (short)y;
+	split.drawenv.clip.w = (short)w;
+	split.drawenv.clip.h = (short)h;
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
 }
@@ -2536,6 +3372,18 @@ static void AddModernSplit(unsigned int handle)
  * 0 = drop every additive split (confirm whether a fire/lightning effect is additive
  * geometry), 1 = normal, 2 = draw additive WITH the depth test that GR_SetBlendMode
  * normally disables (test the "additive draws through the floor" hypothesis). */
+/* World-opaque depth function under PGXP. 1 = GL_ALWAYS (the PS1-OT painter
+ * design: the painter winner leaves true per-pixel depth behind). 0 = GL_LEQUAL,
+ * which keeps painter order for an exact depth tie but lets a genuinely nearer
+ * coplanar face win regardless of the order it was drawn in.
+ *
+ * ALWAYS hands the whole decision to paint order, so two coplanar road quads
+ * whose GTE depth straddles an OT bucket boundary swap which one paints last as
+ * the camera moves, and the surface flickers between them. That is the road
+ * flicker in central Silent Hill, and it stops with PGXP off because the off
+ * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. */
+int g_PsxWorldDepthAlways = 1;
+
 int g_PsxDbgAddMode = 1;
 
 void DrawSplit(const GPUDrawSplit& split)
@@ -2565,7 +3413,11 @@ void DrawSplit(const GPUDrawSplit& split)
 
 	GR_SetStencilMode(split.drawPrimMode);	// draw with mask 0x16
 
-	GR_SetTexture(split.textureId, split.texFormat);
+	g_PsxSplitIsGlyph = split.isGlyph;
+	if (split.mixed)
+		GR_SetTextureMixed(split.textureId);
+	else
+		GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
@@ -2589,7 +3441,8 @@ void DrawSplit(const GPUDrawSplit& split)
 	 * off the cache is already 0 and GR_SetDepthFuncAlways early-returns without
 	 * touching glDepthFunc, so pixels stay byte-identical. (depthMode is always
 	 * DISABLED when off.) */
-	GR_SetDepthFuncAlways(g_PsxUsePgxp && split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE);
+	GR_SetDepthFuncAlways(g_PsxUsePgxp && g_PsxWorldDepthAlways &&
+	                      split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE);
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
 		GR_EnableDepth(1);
@@ -2639,7 +3492,12 @@ static bool ShadowTriangleCanCast(const GrVertex* vertex)
 	return true;
 }
 
-static void DrawShadowCasters(const GPUDrawSplit& split)
+/* The pass is opened lazily on the first caster so a batch with none (the
+ * UI OT, the water OT, 2D-only frames) neither clears the shadow map built by
+ * the world batch nor disturbs GL state. The map therefore always holds the
+ * last world batch, which is what the lit shader samples on frames that do
+ * not rebuild it. */
+static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 {
 	int runStart = -1;
 	for (int offset = 0; offset + 2 < split.numVerts; offset += 3)
@@ -2651,18 +3509,24 @@ static void DrawShadowCasters(const GPUDrawSplit& split)
 		}
 		else if (runStart >= 0)
 		{
+			if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
 			GR_ShadowPassDraw(split.startVertex + runStart, offset - runStart);
 			runStart = -1;
 		}
 	}
 
 	if (runStart >= 0)
+	{
+		if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
 		GR_ShadowPassDraw(split.startVertex + runStart, split.numVerts - runStart);
+	}
 }
 
 //
 // Draws all polygons after AggregatePTAG
 //
+static void DrawFarMeshSplit(const GPUDrawSplit& split);
+
 void DrawAllSplits()
 {
 #ifdef _DEBUG
@@ -2702,7 +3566,7 @@ void DrawAllSplits()
 	 * vertices into a false shadow. */
 	if (GR_FlashlightShadowActive())
 	{
-		GR_ShadowPassBegin();
+		bool passBegun = false;
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -2710,9 +3574,10 @@ void DrawAllSplits()
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
-			DrawShadowCasters(s);
+			DrawShadowCasters(s, passBegun);
 		}
-		GR_ShadowPassEnd();
+		if (passBegun)
+			GR_ShadowPassEnd();
 	}
 
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
@@ -2721,7 +3586,12 @@ void DrawAllSplits()
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
-			GR_DrawModernMesh(g_splits[i].modernHandle);
+			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
+		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
+			DrawFarMeshSplit(g_splits[i]);
+		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
+			GR_CaptureFrameToVramRect(g_splits[i].drawenv.clip.x, g_splits[i].drawenv.clip.y,
+			                          g_splits[i].drawenv.clip.w, g_splits[i].drawenv.clip.h);
 		else
 			DrawSplit(g_splits[i]);
 	}
@@ -2731,6 +3601,11 @@ void DrawAllSplits()
 
 // forward declarations
 int ParsePrimitive(P_TAG* polyTag);
+
+/* Nodes of a game-side sub-OT spliced into a bucket (whole-map far list):
+ * empty tags like real buckets, but not buckets of THIS OT, so counting them
+ * would shift every later bucket's depth seed and the UI-bucket test. */
+extern "C" { uintptr_t g_PsxOtNoBucketLo = 0, g_PsxOtNoBucketHi = 0; }
 
 void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 {
@@ -2754,6 +3629,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 		// one depth value — matching the PSX's painter's-algorithm intent.
 		// g_otBucketDepth advances only at tagLength==0 bucket-boundary entries.
 		int otBucketIdx = 0;
+		s_otBucketAbs = -1;
 		const float otBucketStep = (g_currentOTBucketCount > 1)
 			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
 		g_otBucketDepth = -1.0f;
@@ -2790,9 +3666,16 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					{
 						GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
 						flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
-						DrawAllSplits();
+						WM_CLS(17, DrawAllSplits());
 					}
-					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
+					if (g_PsxWholeMapProbe == 1)
+					{
+						const unsigned code = reinterpret_cast<P_TAG*>(currentPacket)->code;
+						const int cls = (code == 0xB5) ? 16 : (int)(code >> 4);
+						WM_CLS(cls, primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket)));
+					}
+					else
+						primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
@@ -2822,7 +3705,8 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					}
 				}
 			}
-			else if (tagLength == 0)
+			else if (tagLength == 0 &&
+			         !(basePacket >= g_PsxOtNoBucketLo && basePacket < g_PsxOtNoBucketHi))
 			{
 				// OT bucket boundary — advance to the next bucket's depth.
 				if (g_PsxUsePgxp && s_otViewZShift > 0)
@@ -2847,6 +3731,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 					if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
 				}
+				s_otBucketAbs = g_currentOTBucketCount - 1 - otBucketIdx;
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)
@@ -2888,8 +3773,11 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			//      VirtualQuery; rely on the 1<<20 node safety counter.
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
 			if (nextPtr < 0x10000 ||
-			    nextPtr == static_cast<uintptr_t>(-1) ||
-			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+			    nextPtr == static_cast<uintptr_t>(-1)
+#if defined(_WIN32)
+			    || nextPtr >= 0x7FFFFFFFFFFFULL
+#endif
+			) {
 				static int s_badNextLogged = 0;
 				if (s_badNextLogged < 16) {
 					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",
@@ -3237,7 +4125,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 {
 	/* PGXP hint (3D polygons only). 0xFFFF / ignored when PGXP off. */
 	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
-	if (g_PsxUsePgxp) PGXP_BeginPrim(polyTag);
+	if (g_PsxUsePgxp) WM_CYC(0, PGXP_BeginPrim(polyTag));
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
@@ -3286,12 +4174,30 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
 
-			// Copy per-vertex fog factor from pad bytes
-			firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+			/* Per-vertex fog. v1 and v2 ride their colour-word pad; v0's pad IS
+			 * the GPU command code, so its fog travels in the unused trailing
+			 * pad2 short, exactly as the GT4 case below already does. The game
+			 * marks that short with bit 15 so a triangle from a path that does
+			 * not carry v0's fog still falls back to the old behaviour instead
+			 * of reading whatever the reused prim buffer left there.
+			 *
+			 * Without v0's own value every textured triangle had one corner
+			 * fogged as if it were at its neighbour's distance, which is the
+			 * skewed fog gradient on large receding surfaces. The quad path was
+			 * fixed for this; triangles were missed. */
+			firstVertex[0]._p0 = (poly->pad2 & 0x8000u) ? (char)(poly->pad2 & 0x7F)
+			                                            : poly->p1;
 			firstVertex[1]._p0 = poly->p1;  // v1
 			firstVertex[2]._p0 = poly->p2;  // v2
 
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 3);
 			g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
+			if (g_PsyX_PpLitActive)
+			{
+				static const int s_triCorners[3] = { 0, 1, 2 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 3, ppReshaped, s_triCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -3329,18 +4235,21 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	case 0xC:
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
+		bool gt4Drop;
 		activeDrawEnv.tpage = poly->tpage;
-		if (!ShouldDropForClut("GT4", poly->tpage, poly->clut))
+		if (g_PsxWholeMapProbe == 1) s_wmGt4++;
+		WM_CYC(1, gt4Drop = ShouldDropForClut("GT4", poly->tpage, poly->clut));
+		if (!gt4Drop)
 		{
-			ApplyHiresOverride(poly->tpage, poly->clut);
+			WM_CYC(2, ApplyHiresOverride(poly->tpage, poly->clut));
 
-			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			WM_CYC(3, AddSplit(semiTrans, true, SplitDepthForPrim(polyTag)));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-			MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
-			ApplyGtePerVertexDepth(firstVertex, polyTag, true);
-			MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+			WM_CYC(4, MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex));
+			WM_CYC(5, ApplyGtePerVertexDepth(firstVertex, polyTag, true));
+			WM_CYC(6, MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd));
+			WM_CYC(7, MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2));
 
 			// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
 			firstVertex[0]._p0 = (unsigned char)poly->pad2;  // v0: own fog (game carries it in pad2; v0 color word's pad is the code byte)
@@ -3350,7 +4259,16 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 			TriangulateQuad();
 
-			g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 6);
+			WM_CYC(8, g_vertexIndex += PgxpEmitPoly(firstVertex, 6));
+			if (g_PsyX_PpLitActive)
+			{
+				/* MakeVertexQuad takes x0 x1 x3 x2 and TriangulateQuad expands that
+				 * to corners 0 1 2 / 1 2 3. */
+				static const int s_quadCorners[6] = { 0, 1, 2, 1, 2, 3 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 6, ppReshaped, s_quadCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -3376,10 +4294,19 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE* poly = (TILE*)polyTag;
 
+		/* The lighthouse glow (map6_s02 func_800D2364; map7_s00 has a twin) pairs its
+		 * feedback sprites with add/subtract fills under the same display-band
+		 * tpage. The sprites get stretched across the widened UI ortho; the
+		 * fills must follow or their contrast lands as a 4:3 box. */
+		if (semiTrans && poly->h >= 224 &&
+		    ((activeDrawEnv.tpage >> 7) & 0x3) >= 2 && ((activeDrawEnv.tpage & 0xF) * 64) < 320)
+			s_curPrimIsFeedback = 1;
+
 		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+		StretchFullFrameFillToWorldOrtho(firstVertex);
 		MakeTexcoordQuadZero(firstVertex, 0);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
@@ -3399,12 +4326,42 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		{
 			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
+			/* dream_blur off: the soft-focus composite is not drawn at all (its
+			 * capture is skipped too), leaving the plain scene. */
+			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
+				return 4;
+
 			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
 			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
 			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+
+			/* dream_blur_strength: every soft-focus layer lerps from what is
+			 * under it toward its hardware result, so 1.0 is the PS1 image and 0
+			 * the plain scene, at unchanged brightness. The average layers scale
+			 * their 0.5 weight, the additive layer its colour, and the opaque
+			 * base layer is BM_CONSTANT_ALPHA (AddSplit). */
+			if (s_curPrimIsScratch && semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+			{
+				const float s = g_PsxFeedbackDampBlend;
+				const bool  avg = GET_TPAGE_BLEND(activeDrawEnv.tpage) == BM_AVERAGE;
+				int i;
+				for (i = 0; i < 4; i++)
+				{
+					if (avg)
+					{
+						firstVertex[i].a = (unsigned char)(firstVertex[i].a * s + 0.5f);
+					}
+					else
+					{
+						firstVertex[i].r = (unsigned char)(firstVertex[i].r * s + 0.5f);
+						firstVertex[i].g = (unsigned char)(firstVertex[i].g * s + 0.5f);
+						firstVertex[i].b = (unsigned char)(firstVertex[i].b * s + 0.5f);
+					}
+				}
+			}
 
 			TriangulateQuad();
 
@@ -3640,6 +4597,424 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 	return processedLongs;
 }
 
+#define PSYX_FAR_QUAD_MAX (1 << 18)
+static PsyX_FarQuad s_farQuads[PSYX_FAR_QUAD_MAX];
+static int          s_farQuadCount = 0;
+
+/* Per-frame memo of the texture decisions for one tpage/clut: a whole-town
+ * frame draws ~90k far quads over a few hundred keys, and the per-prim CLUT
+ * check, glyph callback and hi-res lookup (a linear entry scan for non-pool
+ * textures) were repeated for every one. Keys that touch the framebuffer
+ * feedback or scene-scratch bands are never memoized (their per-prim side
+ * effects matter); they take EmitFarQuad. Valid for one frame only, so the
+ * hi-res LRU stamp and the lazy-compose demand signal still fire each frame. */
+struct FarTexMemo
+{
+	unsigned  key;
+	unsigned  gen;
+	unsigned char drop, glyph, special, _pad;
+	TextureID tex;
+	int       w, h, ox, oy, hw, hh;
+};
+#define FAR_TEX_MEMO_SIZE 2048
+static FarTexMemo s_farTexMemo[FAR_TEX_MEMO_SIZE];
+static unsigned   s_farTexGen = 1;
+
+extern "C" void PsyX_FarQuadsReset(void)
+{
+	s_farQuadCount = 0;
+	if (++s_farTexGen == 0)
+	{
+		memset(s_farTexMemo, 0, sizeof(s_farTexMemo));
+		s_farTexGen = 1;
+	}
+}
+
+extern "C" PsyX_FarQuad* PsyX_FarQuadAlloc(int* index)
+{
+	if (s_farQuadCount >= PSYX_FAR_QUAD_MAX)
+		return NULL;
+	*index = s_farQuadCount;
+	return &s_farQuads[s_farQuadCount++];
+}
+
+/* Emit one prepared far quad exactly as the GT4 parse would emit a world quad:
+ * same split classification, hi-res lookup, vertex/texcoord/colour builders and
+ * fog, but from the game's own projection instead of the GTE and shadow tables. */
+static void EmitFarQuad(const PsyX_FarQuad* q)
+{
+	static const int ord[4] = { 0, 1, 3, 2 }; /* MakeVertexQuad's v0,v1,v3,v2 buffer order */
+	float ofsX, ofsY;
+	float wsum = 0.0f;
+
+	s_curPrimSemiTrans  = 0;
+	s_curPrimIsFeedback = 0;
+	s_curPrimIsScratch  = 0;
+	s_curPrimIsGlyph    = 0;
+	activeDrawEnv.tpage = q->tpage;
+	if (ClutHasNoPalette(q->tpage, q->clut))
+		return;
+	ApplyHiresOverride(q->tpage, q->clut);
+	AddSplit(false, true, (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED);
+
+	if (g_vertexIndex + 24 > MAX_VERTEX_BUFFER_SIZE)
+	{
+		GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
+		flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
+		DrawAllSplits();
+		AddSplit(false, true, (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED);
+	}
+
+	GrVertex* v = &g_vertexBuffer[g_vertexIndex];
+	DrawEnvOffset(ofsX, ofsY);
+	memset(v, 0, sizeof(GrVertex) * 4);
+	for (int k = 0; k < 4; k++)
+	{
+		const int   s  = ord[k];
+		const float fx = q->sx[s], fy = q->sy[s];
+		int ix = (int)(fx >= 0.0f ? fx + 0.5f : fx - 0.5f);
+		int iy = (int)(fy >= 0.0f ? fy + 0.5f : fy - 0.5f);
+		if (ix < -1024) ix = -1024; else if (ix > 1023) ix = 1023;
+		if (iy < -1024) iy = -1024; else if (iy > 1023) iy = 1023;
+		v[k].x = (short)(ix + (int)ofsX);
+		v[k].y = (short)(iy + (int)ofsY);
+		v[k].geom3d = 1.0f;
+		if (g_PsxUsePgxp)
+		{
+			v[k].ppx = fx + ofsX;
+			v[k].ppy = fy + ofsY;
+			v[k].ppw = q->w[s];
+		}
+		else
+		{
+			v[k].ppx = (float)v[k].x;
+			v[k].ppy = (float)v[k].y;
+		}
+		wsum += q->w[s];
+	}
+	if (g_PsxUsePgxp)
+	{
+		const float z = PgxpNdcFromViewZ(wsum * 0.25f + (float)g_PsxPgxpWorldFarBias);
+		for (int k = 0; k < 4; k++) { v[k].z = z; v[k]._p1 = 1; }
+	}
+	else
+	{
+		float z = 1.0f - 2.0f * (wsum * 0.25f) / (g_szMaxPrevFrame < 1 ? 1.0f : (float)g_szMaxPrevFrame);
+		if (z < -1.0f) z = -1.0f;
+		for (int k = 0; k < 4; k++) v[k].z = z;
+	}
+
+	MakeTexcoordQuad(v, (unsigned char*)q->uv[0], (unsigned char*)q->uv[1], (unsigned char*)q->uv[3], (unsigned char*)q->uv[2],
+	                 q->tpage, q->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+	MakeColourQuad(v, true, (unsigned char*)q->rgb[0], (unsigned char*)q->rgb[1], (unsigned char*)q->rgb[3], (unsigned char*)q->rgb[2]);
+	v[0]._p0 = (char)q->fog[0];
+	v[1]._p0 = (char)q->fog[1];
+	v[2]._p0 = (char)q->fog[3];
+	v[3]._p0 = (char)q->fog[2];
+
+	TriangulateQuad();
+	g_vertexIndex += PgxpEmitPoly(v, 6);
+}
+
+static const FarTexMemo* FarTexLookup(unsigned short tpage, unsigned short clut)
+{
+	const unsigned key = ((unsigned)tpage << 16) | clut;
+	unsigned slot = (key * 2654435761u) >> 21;
+	for (int i = 0; i < 16; i++, slot = (slot + 1) & (FAR_TEX_MEMO_SIZE - 1))
+	{
+		FarTexMemo* m = &s_farTexMemo[slot];
+		if (m->gen == s_farTexGen && m->key == key)
+			return m;
+		if (m->gen != s_farTexGen)
+		{
+			m->key  = key;
+			m->gen  = s_farTexGen;
+			m->drop = ClutHasNoPalette(tpage, clut) ? 1 : 0;
+			s_curPrimIsFeedback = 0;
+			s_curPrimIsScratch  = 0;
+			ApplyHiresOverride(tpage, clut);
+			m->special = (s_curPrimIsFeedback || s_curPrimIsScratch) ? 1 : 0;
+			m->glyph   = (unsigned char)s_curPrimIsGlyph;
+			m->tex = overrideTexture;
+			m->w   = overrideTextureWidth;
+			m->h   = overrideTextureHeight;
+			m->ox  = overrideTextureOffsetX;
+			m->oy  = overrideTextureOffsetY;
+			m->hw  = overrideTextureHiresW;
+			m->hh  = overrideTextureHiresH;
+			return m;
+		}
+	}
+	return NULL;
+}
+
+/* The far-quad chain's hot loop: same output as EmitFarQuad (vertex fields,
+ * triangle order, split key) for PGXP-on world quads, built straight into the
+ * vertex buffer. EmitFarQuad's generic builders memset, copy for the
+ * triangulation and run the near clipper, none of which a quad 16u+ out needs. */
+static void EmitFarChain(int first)
+{
+	if (!g_PsxUsePgxp)
+	{
+		for (int i = first; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+			EmitFarQuad(&s_farQuads[i]);
+		return;
+	}
+
+	float ofsX, ofsY;
+	DrawEnvOffset(ofsX, ofsY);
+	const int ofsXi = (int)ofsX, ofsYi = (int)ofsY;
+	const int depthMode = g_PsxPgxpWorldDepth ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED;
+	const float farBias = (float)g_PsxPgxpWorldFarBias;
+	unsigned lastKey = 0xFFFFFFFFu;
+
+	s_curPrimSemiTrans = 0;
+	s_primAlphaPending = 255;
+
+	for (int i = first; i >= 0 && i < s_farQuadCount; i = s_farQuads[i].next)
+	{
+		const PsyX_FarQuad* q = &s_farQuads[i];
+		const unsigned key = ((unsigned)q->tpage << 16) | q->clut;
+
+		if (g_PsxWholeMapProbe == 1) g_wmFarQuads++;
+
+		if (key != lastKey)
+		{
+			const FarTexMemo* m = FarTexLookup(q->tpage, q->clut);
+			if (m == NULL || m->special)
+			{
+				EmitFarQuad(q);
+				lastKey = 0xFFFFFFFFu;
+				continue;
+			}
+			if (m->drop)
+			{
+				lastKey = 0xFFFFFFFFu;
+				continue;
+			}
+			s_curPrimIsFeedback = 0;
+			s_curPrimIsScratch  = 0;
+			s_curPrimIsGlyph    = m->glyph;
+			overrideTexture        = m->tex;
+			overrideTextureWidth   = m->w;
+			overrideTextureHeight  = m->h;
+			overrideTextureOffsetX = m->ox;
+			overrideTextureOffsetY = m->oy;
+			overrideTextureHiresW  = m->hw;
+			overrideTextureHiresH  = m->hh;
+			activeDrawEnv.tpage = q->tpage;
+			if (g_PsxWholeMapProbe == 1)
+			{
+				const int before = g_splitIndex;
+				AddSplit(false, true, depthMode);
+				g_wmFarSplits += (unsigned)(g_splitIndex - before);
+			}
+			else
+				AddSplit(false, true, depthMode);
+			lastKey = key;
+		}
+
+		if (g_vertexIndex + 24 > MAX_VERTEX_BUFFER_SIZE)
+		{
+			GPUDrawSplit& flushSplit = g_splits[g_splitIndex];
+			flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
+			if (g_PsxWholeMapProbe == 1) g_wmFarFlushes++;
+			DrawAllSplits();
+			AddSplit(false, true, depthMode);
+		}
+
+		GrVertex qv[4];
+		const unsigned char dither = (GET_TPAGE_DITHER(q->tpage) || activeDrawEnv.dtd) ? 1 : 0;
+		const short page = q->tpage & 0x1F;
+		unsigned char ulo = q->uv[0][0], uhi = ulo, vlo = q->uv[0][1], vhi = vlo;
+		for (int k = 1; k < 4; k++)
+		{
+			if (q->uv[k][0] < ulo) ulo = q->uv[k][0];
+			if (q->uv[k][0] > uhi) uhi = q->uv[k][0];
+			if (q->uv[k][1] < vlo) vlo = q->uv[k][1];
+			if (q->uv[k][1] > vhi) vhi = q->uv[k][1];
+		}
+		const float z = PgxpNdcFromViewZ((q->w[0] + q->w[1] + q->w[2] + q->w[3]) * 0.25f + farBias);
+		for (int k = 0; k < 4; k++)
+		{
+			GrVertex& v = qv[k];
+			const float fx = q->sx[k], fy = q->sy[k];
+			int ix = (int)(fx >= 0.0f ? fx + 0.5f : fx - 0.5f);
+			int iy = (int)(fy >= 0.0f ? fy + 0.5f : fy - 0.5f);
+			if (ix < -1024) ix = -1024; else if (ix > 1023) ix = 1023;
+			if (iy < -1024) iy = -1024; else if (iy > 1023) iy = 1023;
+			v.x = (short)(ix + ofsXi);
+			v.y = (short)(iy + ofsYi);
+			v.page = page;
+			v.clut = (short)q->clut;
+			v.z = z;
+			v.u = q->uv[k][0];
+			v.v = q->uv[k][1];
+			v.bright = 2;
+			v.dither = dither;
+			v.r = q->rgb[k][0];
+			v.g = q->rgb[k][1];
+			v.b = q->rgb[k][2];
+			v.a = 255;
+			v.tcx = 0;
+			v.tcy = 0;
+			v._p0 = (char)q->fog[k];
+			v._p1 = 1;
+			v.ppx = fx + ofsX;
+			v.ppy = fy + ofsY;
+			v.ppw = q->w[k];
+			v.nx = v.ny = v.nz = 0.0f;
+			v.vsx = v.vsy = v.vsz = 0.0f;
+			v.geom3d = 1.0f;
+			v.ulo = ulo; v.vlo = vlo; v.uhi = uhi; v.vhi = vhi;
+		}
+		/* PSX quad order 0,1,2,3 = TL,TR,BL,BR; TriangulateQuad's result is
+		 * (v0,v1,v2)(v1,v2,v3). */
+		GrVertex* out = &g_vertexBuffer[g_vertexIndex];
+		out[0] = qv[0]; out[1] = qv[1]; out[2] = qv[2];
+		out[3] = qv[1]; out[4] = qv[2]; out[5] = qv[3];
+		g_vertexIndex += 6;
+	}
+}
+
+/* ---- Whole-map GPU far meshes (0xB6) ---- */
+extern "C" unsigned GR_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                     const unsigned* indices, int indexCount);
+extern "C" void GR_FarMeshFree(unsigned handle);
+extern "C" void GR_FarMeshSetUniforms(const PsyX_FarMeshFrame* f, float ofsX, float ofsY, float layerK);
+extern "C" void GR_FarMeshDraw(unsigned handle, const float base[3], const float eye[3], int firstIndex, int indexCount);
+extern "C" void GR_FarMeshEnd(void);
+
+struct FarMeshQueued
+{
+	unsigned                 handle;
+	float                    base[3], eye[3];
+	const PsyX_FarMeshRange* ranges;
+	int                      rangeCount;
+};
+#define FAR_MESH_QUEUE_MAX 512
+static FarMeshQueued     s_fmQueue[FAR_MESH_QUEUE_MAX];
+static int               s_fmCount = 0;
+static PsyX_FarMeshFrame s_fmFrame;
+static float             s_fmOfsX = 0.0f, s_fmOfsY = 0.0f;
+/* Coplanar layering: each pixel's depth moves this fraction of the way toward
+ * its quad's farthest point, so where two layers share a plane the smaller one
+ * (a marking inside the asphalt it sits on) is nearer, the same rule the PSX
+ * far list's max-depth order applies. Console `wholemap layer`. */
+extern "C" { float g_PsxFarLayerK = 0.0625f; }
+
+extern "C" unsigned PsyX_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                       const unsigned* indices, int indexCount)
+{
+	return GR_FarMeshUpload(handle, v, vertexCount, indices, indexCount);
+}
+
+extern "C" void PsyX_FarMeshFree(unsigned handle)
+{
+	GR_FarMeshFree(handle);
+}
+
+extern "C" void PsyX_FarMeshFrameBegin(const PsyX_FarMeshFrame* frame)
+{
+	s_fmFrame = *frame;
+	s_fmCount = 0;
+}
+
+extern "C" void PsyX_FarMeshQueue(unsigned handle, const float base[3], const float eye[3],
+                                  const PsyX_FarMeshRange* ranges, int rangeCount)
+{
+	if (s_fmCount >= FAR_MESH_QUEUE_MAX || handle == 0 || rangeCount <= 0)
+		return;
+	FarMeshQueued& q = s_fmQueue[s_fmCount++];
+	q.handle = handle;
+	q.base[0] = base[0]; q.base[1] = base[1]; q.base[2] = base[2];
+	q.eye[0] = eye[0]; q.eye[1] = eye[1]; q.eye[2] = eye[2];
+	q.ranges = ranges;
+	q.rangeCount = rangeCount;
+}
+
+static void AddFarMeshSplit(void)
+{
+	GPUDrawSplit& current = g_splits[g_splitIndex];
+	current.numVerts = g_vertexIndex - current.startVertex;
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+		return;
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_FARMESH;
+	split.drawenv = activeDrawEnv;
+	split.dispenv = activeDispEnv;
+	split.drawPrimMode = g_DrawPrimMode;
+	split.startVertex = g_vertexIndex;
+	split.numVerts = 0;
+	DrawEnvOffset(s_fmOfsX, s_fmOfsY);
+}
+
+struct FarMeshItem { unsigned key; unsigned short q, r; };
+
+static void DrawFarMeshSplit(const GPUDrawSplit& split)
+{
+	static FarMeshItem items[1 << 16];
+	int n = 0;
+
+	if (s_fmCount == 0)
+		return;
+	if (g_PsxWholeMapProbe == 1)
+		g_wmFarMeshQueued = (unsigned)s_fmCount;
+	for (int q = 0; q < s_fmCount; q++)
+		for (int r = 0; r < s_fmQueue[q].rangeCount && n < (int)(sizeof(items) / sizeof(items[0])); r++)
+		{
+			items[n].key = ((unsigned)s_fmQueue[q].ranges[r].tpage << 16) | s_fmQueue[q].ranges[r].clut;
+			items[n].q = (unsigned short)q;
+			items[n].r = (unsigned short)r;
+			n++;
+		}
+	std::sort(items, items + n, [](const FarMeshItem& a, const FarMeshItem& b) { return a.key < b.key; });
+
+	for (int i = 0; i < n; )
+	{
+		const unsigned key = items[i].key;
+		int j = i;
+		while (j < n && items[j].key == key)
+			j++;
+
+		const unsigned short tpage = (unsigned short)(key >> 16), clut = (unsigned short)(key & 0xFFFF);
+		const FarTexMemo* m = FarTexLookup(tpage, clut);
+		if (m != NULL && !m->drop)
+		{
+			TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
+			TextureID textureId = g_vramTexture;
+			if (m->tex != 0)
+			{
+				texFormat = TF_32_BIT_RGBA;
+				textureId = m->tex;
+			}
+			GR_SetStencilMode(split.drawPrimMode);
+			g_PsxSplitIsGlyph = m->glyph;
+			GR_SetTexture(textureId, texFormat);
+			if (texFormat == TF_32_BIT_RGBA)
+				GR_SetOverrideTextureSize(m->w, m->h, m->ox, m->oy, m->hw, m->hh);
+			GR_SetupClipMode(&split.drawenv.clip, split.drawenv.dfe);
+			GR_SetOffscreenState(&split.drawenv.clip, !split.drawenv.dfe);
+			GR_SetBlendMode(BM_NONE);
+			GR_SetDepthFuncAlways(0);
+			GR_FarMeshSetUniforms(&s_fmFrame, s_fmOfsX, s_fmOfsY, g_PsxFarLayerK);
+			for (int k = i; k < j; k++)
+			{
+				const FarMeshQueued&     fq = s_fmQueue[items[k].q];
+				const PsyX_FarMeshRange& rg = fq.ranges[items[k].r];
+				GR_FarMeshDraw(fq.handle, fq.base, fq.eye, rg.firstIndex, rg.indexCount);
+			}
+			if (g_PsxWholeMapProbe == 1)
+			{
+				g_wmFarMeshKeys++;
+				g_wmFarMeshDraws += (unsigned)(j - i);
+			}
+		}
+		i = j;
+	}
+	GR_FarMeshEnd();
+}
+
 static int ProcessPsyXPrims(P_TAG* polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
@@ -3673,6 +5048,22 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		AddModernSplit(modern->code[1]);
 		return 2;
 	}
+	case 0x06:
+		AddFarMeshSplit();
+		return 2;
+	case 0x05:
+	{
+		const DR_PSYX_FARQUADS* fq = (const DR_PSYX_FARQUADS*)polyTag;
+		EmitFarChain((int)fq->code[1]);
+		return 2;
+	}
+	case 0x04:
+	{
+		const DR_PSYX_FBCAPTURE* cap = (const DR_PSYX_FBCAPTURE*)polyTag;
+		AddFbCaptureSplit((int)(cap->code[0] & 0x3FF), (int)((cap->code[0] >> 10) & 0x1FF),
+		                  (int)(cap->code[1] & 0xFFFF), (int)(cap->code[1] >> 16));
+		return 2;
+	}
 	}
 
 	return 0;
@@ -3685,6 +5076,18 @@ int ParsePrimitive(P_TAG* polyTag)
 	const int primType = polyTag->code & 0xF0;
 
 	int primLength = 0;
+
+	/* For the framebuffer-feedback detector in ApplyHiresOverride, which sees
+	 * the tpage but not the primitive. A feedback overlay that blends (the
+	 * per-map dream shots) needs the stored frame packed with the mask bit set
+	 * so its texels read back as semi-transparent; the loading trail draws
+	 * opaque and needs it clear, or its black packs to an opaque black rect
+	 * instead of nothing. */
+	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
+	s_curPrimIsFeedback = 0;
+	s_curPrimIsScratch  = 0;
+	s_curPrimIsGlyph    = 0;
+	s_curPrimR0         = polyTag->pad0; /* r0 in every prim struct */
 
 	switch (primType)
 	{

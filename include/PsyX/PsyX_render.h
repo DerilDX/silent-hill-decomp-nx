@@ -6,7 +6,20 @@
 /*
  * Platform specific emulator setup
  */
-#if (defined(_WIN32) || defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
+#if defined(__APPLE__)
+#   include <TargetConditionals.h>
+#endif
+
+/* iOS must be tested before the desktop branch below: __APPLE__ is defined on
+ * iPhone too, so it would otherwise select desktop GL and glad, neither of
+ * which exists there. iOS caps out at OpenGL ES 3.0 (deprecated since iOS 12,
+ * still functional), and its GLES entry points link statically from
+ * OpenGLES.framework, so no loader is used. */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#   define PSYX_IOS 1
+#   define RENDERER_OGLES
+#   define OGLES_VERSION (3)
+#elif (defined(_WIN32) || defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
 #   define RENDERER_OGL
 #   define USE_GLAD
 #elif defined(__RPI__)
@@ -60,6 +73,10 @@
 #else
 #   ifdef __EMSCRIPTEN__
 #      include <GL/gl.h>
+#   elif defined(PSYX_IOS)
+/* Apple ships GLES under its own framework layout, not the Khronos paths. */
+#      include <OpenGLES/ES3/gl.h>
+#      include <OpenGLES/ES3/glext.h>
 #   else
 #      if OGLES_VERSION == 2
 #          include <GLES2/gl2.h>
@@ -70,7 +87,10 @@
 #   endif
 #endif
 
+/* iOS has no EGL at all — context creation goes through EAGL, which SDL owns. */
+#if !defined(PSYX_IOS)
 #   include <EGL/egl.h>
+#endif
 
 #endif
 
@@ -168,6 +188,26 @@ typedef struct
 	 * shader reads it only under u_flashlightOn, and gates on vsz>0 so untracked
 	 * (zero) verts and 2D prims are never lit. */
 	float		vsx, vsy, vsz;
+
+	/* 1.0 when this vertex belongs to a primitive the GTE projected, i.e. world
+	 * geometry rather than a 2D screen prim. Set per PRIMITIVE, not per vertex:
+	 * the view-space lookup resolves ~84% of vertices, and because this reaches
+	 * the fragment stage as a varying, a prim with a mix of resolved and
+	 * unresolved vertices interpolates across 0.5 and splits a single surface
+	 * into filtered and unfiltered halves. Marking the whole prim from any one
+	 * resolved vertex removes that and lifts coverage to ~per-prim. Cannot reuse
+	 * a_normal.y, which the near clipper reads as "this vertex has valid
+	 * view-space data" and must stay per-vertex and truthful. */
+	float		geom3d;
+
+	/* Per-POLYGON UV bounds (min u,v / max u,v), identical on every vertex of
+	 * the prim. The manual bilinear/aniso taps clamp to them so a tap at the
+	 * edge of a polygon's texture region cannot read the neighbouring region of
+	 * the page -- the bright seam down a character's UV boundary (Harry's
+	 * pants), and the same class as the gutterless font bleed. All-zero means
+	 * "no bounds known" and the shader skips the clamp, so prim paths that
+	 * never set them keep the old behaviour. DuckStation's approach. */
+	u_char		ulo, vlo, uhi, vhi;
 } GrVertex;
 
 typedef struct GrModernVertex
@@ -176,6 +216,9 @@ typedef struct GrModernVertex
 	u_char r, g, b, a;
 	char tcx, tcy, fog, reserved;
 	float ppx, ppy, ppw, nx, ny, nz, vsx, vsy, vsz;
+	/* Skinned characters lit per pixel: view-space normal (w unused) and
+	 * tangent (w = bitangent sign). Zero on every other modern mesh. */
+	float snx, sny, snz, snw, stx, sty, stz, stw;
 } GrModernVertex;
 #pragma pack(pop)
 
@@ -189,6 +232,13 @@ typedef enum
 	a_pgxp,
 	a_normal,
 	a_viewpos,
+	a_geom3d,
+	a_uvlim,
+	a_farP0,
+	a_farP1,
+	a_skinNormal,
+	a_skinTangent,
+	a_ppNormal,
 } ShaderAttrib;
 
 typedef enum
@@ -197,7 +247,10 @@ typedef enum
 	BM_AVERAGE,
 	BM_ADD,
 	BM_SUBTRACT,
-	BM_ADD_QUATER_SOURCE
+	BM_ADD_QUATER_SOURCE,
+	/* PC only: an opaque prim faded in at dream_blur_strength (the scene-scratch
+	 * soft focus base layer). */
+	BM_CONSTANT_ALPHA
 } BlendMode;
 
 typedef enum
@@ -248,6 +301,30 @@ extern void			GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int
 extern void			GR_StoreFrameBufferPsx(void);
 extern void			GR_RepackFrameToVramBuffers(void);
 
+/* A prim sampling a display buffer was just drawn: keep the store running and
+ * record which ortho pass will redraw the capture. Called for any 16bpp tpage
+ * in the left 320 VRAM columns. g_cfg_dreamFeedback = 0 leaves the per-map
+ * overlays switched off (the rects stay blanked, so they draw nothing). */
+extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
+extern int			g_PsxFeedbackExact;
+extern int			g_cfg_dreamFeedback;
+
+/* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
+ * reaches, and about which point. The effect's primitives are stretched by this
+ * and the capture is stretched with them, so the blur fills the window at any
+ * aspect instead of blurring a 4:3 box with sharp margins. 1.0 = 4:3, no-op. */
+extern float		g_PsxFeedbackWideScale;
+extern float		g_PsxFeedbackWideCenter;
+
+/* The WORLD pass's ortho (L, R, T, B, display coordinates) and the display size
+ * it was built for. Full-frame flat fills drawn in OT0 are remapped onto it so
+ * they cover the picture instead of a cropped 4:3 box. g_PsxUIOrthoPass tells
+ * the prim builder which pass it is in. */
+extern float		g_PsxWorldOrtho[4];
+extern float		g_PsxWorldDisp[2];
+extern int			g_PsxWorldOrthoValid;
+extern int			g_PsxUIOrthoPass;
+
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */
@@ -279,6 +356,8 @@ extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);
 extern void			GR_SetViewPort(int x, int y, int width, int height);
 extern void			GR_SetTexture(TextureID texture, TexFormat texFormat);
+extern void			GR_SetTextureMixed(TextureID texture);
+extern void			GR_InvalidateViewScissorCache(void);
 extern void			GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY, int hiresW, int hiresH);
 extern void			GR_SetWireframe(int enable);
 
@@ -287,7 +366,7 @@ extern void			GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned cha
 extern void			GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_UpdateVertexBuffer(const GrVertex* vertices, int count);
 extern void			GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int count);
-extern int			GR_DrawModernMesh(unsigned int mesh_handle);
+extern int			GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env);
 extern void			GR_DrawTriangles(int start_vertex, int triangles);
 
 /* Flashlight shadow map depth pre-pass (see g_PsyX_UseFlashlightShadows). Call

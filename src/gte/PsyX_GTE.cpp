@@ -7,6 +7,8 @@
 
 #include <math.h>
 
+extern "C" int GR_NeedViewSpaceData(void);
+
 
 
 GTERegisters gteRegs;
@@ -329,7 +331,7 @@ extern "C" void PGXP_StoreAddr(void* addr, int slot)
 	/* View-space shadow also feeds the PGXP near-plane clipper, so it must be
 	 * recorded whenever PGXP is on, not just for the per-pixel flashlight. Gate
 	 * matches the vs FIFO fill in GTE_RotTransPers below. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	if (GR_NeedViewSpaceData())
 		VShadow_Store(addr, s_vsFifoX[slot], s_vsFifoY[slot], s_vsFifoZ[slot],
 		              s_vsFifoOfx[slot], s_vsFifoOfy[slot], s_vsFifoH[slot]);
 }
@@ -395,7 +397,9 @@ static bool IdentityKey(const short k[9]) {
 	return Eq9(k, id);
 }
 static bool AspectIdentityKey(const short k[9]) {
-	/* Psy-Q GsIDMATRIX2: identity plus the exact 3/4 NTSC Y scale. */
+	/* A 3/4 Y scale, exactly representable, so PGXP can shadow it without
+	 * quantization error if a game builds one. NOT Psy-Q's GsIDMATRIX2, which
+	 * is a plain identity (see libgs_stub.c) -- this used to claim it was. */
 	static const short id[9] = { 4096, 0, 0, 0, 3072, 0, 0, 0, 4096 };
 	return Eq9(k, id);
 }
@@ -806,8 +810,9 @@ int GTE_RotTransPers(int idx, int lm)
 		 * coincident edges from independent GTE calls now share one exact projection,
 		 * and view coords are no longer frozen by the IR/SZ3 saturation. */
 		{
+			extern int g_PsxPgxpDbg;
 			double exR[9], exT[3], exV[3];
-			if (CurrentExact(exR) && CurrentExactTranslation(exT)) {
+			if (!(g_PsxPgxpDbg & 16) && CurrentExact(exR) && CurrentExactTranslation(exT)) {
 				double vx = (double)VX(idx), vy = (double)VY(idx), vz = (double)VZ(idx);
 				if (CurrentExactVector(idx, exV)) { vx = exV[0]; vy = exV[1]; vz = exV[2]; }
 				double tvX = exT[0] + exR[0] * vx + exR[1] * vy + exR[2] * vz;
@@ -829,6 +834,16 @@ int GTE_RotTransPers(int idx, int lm)
 			fx = wmFarX;
 			fy = wmFarY;
 			pgxpW = wmFarW;
+		}
+		{
+			extern int g_PsxPgxpDbg;
+			long long dz = gte_shift(m_mac3, 1);
+			if ((g_PsxPgxpDbg & 32) && dz > 0) {
+				double r = (double)C2_H / (double)dz;
+				fx = (double)C2_OFX / 65536.0 + (double)C2_MAC1 * r;
+				fy = (double)C2_OFY / 65536.0 + (double)C2_MAC2 * r;
+				pgxpW = (float)dz;
+			}
 		}
 
 		/* Mirror the GTE SXY FIFO with a precise FIFO so the gte_stsxy* store macros
@@ -853,7 +868,7 @@ int GTE_RotTransPers(int idx, int lm)
 	 * MAC1/MAC2/MAC3). Source data for the per-pixel flashlight AND the PGXP
 	 * near-plane clipper, so it runs when either is on. Mirrors the SXY FIFO
 	 * shift above so gte_stsxy* can resolve address->view-pos. Off = no cost. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	if (GR_NeedViewSpaceData())
 	{
 		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)C2_MAC1;
 		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)C2_MAC2;

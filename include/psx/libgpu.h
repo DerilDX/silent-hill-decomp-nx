@@ -225,6 +225,8 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
  * unit, which the 64-unit quantization in PsyX_SetNextPrimSz collapses into one
  * depth (the see-through bug). */
 extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3);
+/* One unclamped SZ for all four verts (whole-map billboards past the 0xFFFF clamp). */
+extern void PsyX_SetNextPrimDepthSz(unsigned int sz);
 extern float PsyX_GetItemDepthSzMax(void);
 /* Contribute an SZ to the frame maximum WITHOUT arming a one-shot payload for
  * the next addPrim. For a drawer that replaces a sort-time prim builder
@@ -251,6 +253,14 @@ extern void PsyX_SetNextPrimAffine(void);
  * shadow but whose bright albedo would blow out under the beam (reflective sewer
  * water). No-op when PGXP is off. */
 extern void PsyX_SetNextPrimNoFlashlight(void);
+/* Software PSX-GPU rasterization of an axis-aligned, unscaled textured rect
+ * from one VRAM region into another (texel fetch through the CLUT, dither,
+ * 5-bit semi-transparency per the tpage abr, STP into bit 15), for render-to-
+ * VRAM scratches a later prim samples back as a texture. Updates vram[] and
+ * the VRAM textures. */
+extern unsigned short PsyX_VramRead(int x, int y);
+extern void PsyX_VramDrawTexturedRect(int dstX, int dstY, int w, int h, int tpage, int clut,
+                                      int u0, int v0, int semiTrans, int dither);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 /* PGXP shadow propagation: after a drawer copies a vertex word from a GTE scratch
@@ -763,6 +773,109 @@ typedef struct {
 } DR_PSYX_MODERN_MESH;
 
 static_assert(sizeof(DR_PSYX_MODERN_MESH) / 4 - P_LEN == 2, "DR_PSYX_MODERN_MESH size must be 2 longs");
+
+/* 0xB4: capture the frame drawn so far into a VRAM rect, at this point in draw
+ * order. code[0] = 0xB4<<24 | x | y<<10, code[1] = w | h<<16. Produced by the
+ * PC port's OT sanitizer in place of a game DR_AREA that switches drawing back
+ * from an offscreen scratch rect (the scene-scratch soft-focus effects). */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FBCAPTURE;
+
+static_assert(sizeof(DR_PSYX_FBCAPTURE) / 4 - P_LEN == 2, "DR_PSYX_FBCAPTURE size must be 2 longs");
+
+/* 0xB5: whole-map fast far path. code[1] = index of the first PsyX_FarQuad of
+ * a chain (linked by .next, -1 ends it), drawn at this point in OT order as
+ * opaque textured world quads. The game projects them itself from cached
+ * world-space geometry, skipping the GTE, packet build and shadow tables. */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FARQUADS;
+
+static_assert(sizeof(DR_PSYX_FARQUADS) / 4 - P_LEN == 2, "DR_PSYX_FARQUADS size must be 2 longs");
+
+/* Vertices in PSX quad order (0,1,2,3 = TL,TR,BL,BR): screen coords without
+ * the draw-env offset, w = view depth in SZ units. rgb[k][3] is padding. */
+typedef struct PsyX_FarQuad {
+	float          sx[4], sy[4], w[4];
+	unsigned char  uv[4][2];
+	unsigned short tpage, clut;
+	unsigned char  rgb[4][4];
+	unsigned char  fog[4];
+	int            next;
+} PsyX_FarQuad;
+
+/* Frame-lifetime pool. Reset at the start of the frame's world submission;
+ * Alloc returns NULL once full (the caller drops the quad). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void          PsyX_FarQuadsReset(void);
+extern PsyX_FarQuad* PsyX_FarQuadAlloc(int* index);
+#ifdef __cplusplus
+}
+#endif
+
+/* 0xB6: whole-map GPU far meshes. The frame's queued meshes draw at this point
+ * in OT order, depth-tested, one draw per mesh per texture. code[1] unused. */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FARMESH;
+
+static_assert(sizeof(DR_PSYX_FARMESH) / 4 - P_LEN == 2, "DR_PSYX_FARMESH size must be 2 longs");
+
+/* One vertex of a static far mesh, uploaded once. Positions are local to the
+ * mesh origin (the shader projects them); c/h are the owning quad's bounding
+ * box (centre, half extents) and plane0/1 its two triangles' planes
+ * (normal, dot(normal, vertex)), both for per-quad decisions in the shader. */
+#pragma pack(push, 1)
+typedef struct PsyX_FarMeshVertex {
+	short          x, y, page, clut;
+	unsigned char  u, v, bright, dither;
+	unsigned char  r, g, b, a;
+	char           tcx, tcy, fog, p1;
+	float          px, py, pz;
+	float          cx, cy, cz;
+	float          hx, hy, hz;
+	unsigned char  ulo, vlo, uhi, vhi;
+	float          plane0[4];
+	float          plane1[4];
+} PsyX_FarMeshVertex;
+#pragma pack(pop)
+
+typedef struct PsyX_FarMeshRange {
+	unsigned short tpage, clut;
+	int            firstIndex, indexCount;
+} PsyX_FarMeshRange;
+
+/* Per-frame camera and fog. rot = view rotation rows (VbWvsMatrix / 4096);
+ * screen = (ofs + H * view.xy / view.z), plus the draw-env offset added here. */
+typedef struct PsyX_FarMeshFrame {
+	float         rot[9];
+	float         h, ofsX, ofsY;
+	float         detSign;
+	int           fogOn, fogShift, fogIntensity;
+	unsigned char fogRamp[128];
+} PsyX_FarMeshFrame;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* handle 0 creates; returns the handle, 0 on failure. */
+extern unsigned PsyX_FarMeshUpload(unsigned handle, const PsyX_FarMeshVertex* v, int vertexCount,
+                                   const unsigned* indices, int indexCount);
+extern void     PsyX_FarMeshFree(unsigned handle);
+extern void     PsyX_FarMeshFrameBegin(const PsyX_FarMeshFrame* frame);
+/* base = R*(origin - cam) + T, eye = camera position - origin; ranges must
+ * stay valid until the frame is drawn. */
+extern void     PsyX_FarMeshQueue(unsigned handle, const float base[3], const float eye[3],
+                                  const PsyX_FarMeshRange* ranges, int rangeCount);
+#ifdef __cplusplus
+}
+#endif
 
 typedef struct {
 	DECLARE_P_ADDR
