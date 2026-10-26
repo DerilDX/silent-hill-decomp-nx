@@ -18,6 +18,10 @@ extern void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, int bitP
 extern int PsyX_SPUAL_ConfigureRenderer(
 	int renderer, int highPrecisionClip, int modernClip, int modernDither);
 
+/* Spatial output (software backend only): run the core through OpenAL
+ * placement instead of taking its stereo downmix. */
+extern void PsyX_SPUAL_ConfigureSpatial(int enable, int speakers);
+
 extern int PsyX_SPUAL_PushXaFrames(
 	const short* samples, u_int frames, int sourceRate, int channels);
 extern void PsyX_SPUAL_ResetXa(void);

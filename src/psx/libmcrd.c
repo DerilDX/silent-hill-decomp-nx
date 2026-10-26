@@ -122,6 +122,15 @@ int MemCardAccept(int chan)
 	memoryCardCmds = McFuncAccept;
 
 	unsigned int fileMagic = 0;
+	/* fopen can fail on a fresh install with no card file, and this read went
+	 * straight at the result. Report a new card rather than deref NULL. */
+	if (memoryCards[chan] == NULL)
+	{
+		memoryCardResult = McErrNewCard;
+		memoryCardsNew[chan] = 0;
+		return 0;
+	}
+
 	fread(&fileMagic, 4, 1, memoryCards[chan]);
 	fclose(memoryCards[chan]);
 
@@ -156,6 +165,9 @@ int MemCardOpen(int chan, char* file, int flag)
 		break;
 	}
 	
+	if (memoryCards[chan] == NULL)
+		return 0;
+
 	fseek(memoryCards[chan], 0, SEEK_SET);
 	currentlyOpenedMemoryCard = chan;
 

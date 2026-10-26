@@ -2,6 +2,8 @@
 
 #include "PsyX_SPUCore.h"
 
+#include "PsyX/PsyX_public.h" /* g_PsyX_SfxOverride */
+
 #include <string.h>
 #include <algorithm>
 #include <cmath>
@@ -604,6 +606,62 @@ void SPUCore::KeyOnVoice(SPUVoiceState& v, int voiceIndex)
     v.envLevel = 0;             // Key On always resets envelope to 0
     v.envCounter = 0;
     v.everKeyedOn = true;
+
+    // Loose per-sound replacement, the same registry the OpenAL voice path uses
+    // (g_PsyX_SfxOverride -> pc_sfx_override.c), keyed on the SPU address this
+    // voice plays from. Without this the software SPU just decodes the original
+    // ADPCM and every sound mod is silently ignored -- which is what happened to
+    // all of them when the software SPU became the default renderer.
+    v.ovrPcm = nullptr;
+    v.ovrCount = 0;
+    v.ovrPos = 0;
+    v.ovrStep = 0x10000u;
+    {
+        const short* modPcm = nullptr;
+        int modCount = 0;
+        int modRate = 0;
+
+        if (g_PsyX_SfxOverride != nullptr &&
+            g_PsyX_SfxOverride(static_cast<int>(v.attr.addr), &modPcm, &modCount, &modRate) &&
+            modCount > 0 && modPcm != nullptr)
+        {
+            // A replacement whose rate is KNOWN plays at the rate it was AUTHORED
+            // at. A voice consumes decoded samples at (pitch/4096) per 44.1kHz
+            // tick, so advancing the source by rate*4096/(44100*pitch) per emitted
+            // sample lands it at its own rate for this Key On. Pitch the game
+            // applies later still scales relative to that latch, so a modulated
+            // sound keeps its modulation -- the same contract the OpenAL path
+            // documents.
+            //
+            // An UNKNOWN rate (modRate 0) falls back to native semantics instead:
+            // one source sample per (pitch/4096) tick, exactly what the original
+            // ADPCM at this address would have done. That is every sample lifted
+            // out of a whole-bank SND/<BANK>.VAB replacement -- ADPCM carries no
+            // rate, so the registry reports 0 and the game's own pitch is the only
+            // thing that knows how fast the sound should run. Latching a 44100
+            // baseline there played such a bank at a flat 44.1kHz however low the
+            // game keyed it, which is what broke the replaced weapon sounds:
+            // PISTOL and SHOTGUN are whole-bank mods. The OpenAL path draws the
+            // same line -- overridePitchBase stays 0 unless modRate > 0, leaving
+            // plain pitch/4096 semantics in place.
+            uint64_t step = 0x10000ull;
+
+            if (modRate > 0 && v.attr.pitch > 0)
+            {
+                const uint64_t pitch = static_cast<uint64_t>(v.attr.pitch);
+                const uint64_t rate = static_cast<uint64_t>(modRate);
+
+                step = (rate * 4096ull * 65536ull) / (44100ull * pitch);
+            }
+
+            if (step == 0) step = 1;
+            if (step > 0xFFFFFFFFull) step = 0xFFFFFFFFull;
+
+            v.ovrPcm = reinterpret_cast<const int16_t*>(modPcm);
+            v.ovrCount = static_cast<uint32_t>(modCount);
+            v.ovrStep = static_cast<uint32_t>(step);
+        }
+    }
     if (voiceIndex >= 0 && voiceIndex < kNumVoices)
     {
         m_referenceVoices[voiceIndex].resampler.Reset();
@@ -957,6 +1015,43 @@ void SPUCore::ClearCdQueue()
 
 void SPUCore::DecodeAdpcmBlock(SPUVoiceState& v, int voiceIndex)
 {
+    if (v.ovrPcm != nullptr)
+    {
+        // Replaced sample: fill the block from PC-owned PCM rather than decoding
+        // the ADPCM at curAddr. Nothing downstream changes.
+        bool ended = false;
+
+        for (int i = 0; i < kAdpcmBlockSamples; ++i)
+        {
+            const uint32_t idx = static_cast<uint32_t>(v.ovrPos >> 16);
+
+            if (idx >= v.ovrCount)
+            {
+                v.blockSamples[i] = 0;
+                ended = true;
+                continue;
+            }
+            v.blockSamples[i] = v.ovrPcm[idx];
+            v.ovrPos += v.ovrStep;
+        }
+
+        v.blockSamplePos = 0;
+        v.blockValid = true;
+
+        // Running out ends the voice the way a final block carrying End+Mute
+        // does, so it releases instead of falling back into the original ADPCM
+        // at the repeat address. Clearing the pointer means the block decoded
+        // after the release is the real (silent, enveloped-off) data again.
+        v.blockLoopEnd = ended;
+        v.forceReleaseOnBlockEnd = ended;
+        if (ended)
+        {
+            v.reachedLoopEnd = true;
+            v.ovrPcm = nullptr;
+        }
+        return;
+    }
+
     if (v.curAddr + kAdpcmBlockBytes > kSpuRamSize)
     {
         // Out-of-range: treat as silence rather than reading (and corrupting
@@ -1148,7 +1243,23 @@ static bool StepGenericEnvelope(int32_t& level, uint32_t& counter,
     }
     else if (exponential && decreasing)
     {
-        adsrStep = static_cast<int32_t>((static_cast<int64_t>(adsrStep) * level) / 0x8000);
+        const int32_t scaled =
+            static_cast<int32_t>((static_cast<int64_t>(adsrStep) * level) / 0x8000);
+
+        /* Integer division truncates toward zero, so this scaling reaches ZERO
+         * while the level is still audible: with the fixed -8 step Decay and
+         * Release use, any level below 0x8000/8 = 4096 gives -0.99.. -> 0, and
+         * the envelope then never moves again. A key-off in that band is a
+         * voice that plays FOREVER, which on a looping sample means forever
+         * out loud -- the radio still going on the main menu long after the
+         * demo ended, logged at exactly env=4095, one below the threshold.
+         *
+         * Keep the step's sign whenever it has any distance left to travel, so
+         * an exponential decrease always converges. It costs at most 4095 extra
+         * steps (~0.7 s of tail at the release rate that reported this). */
+        adsrStep = (scaled == 0 && adsrStep != 0 && level > 0)
+                 ? ((adsrStep < 0) ? -1 : 1)
+                 : scaled;
     }
 
     // "Using a step value of all-ones causes the volume to never step, and
@@ -1336,7 +1447,7 @@ void SPUCore::StepSharedNoise()
 // Rendering
 // ---------------------------------------------------------------------------
 
-void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
+void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutput* split)
 {
     for (int f = 0; f < frameCount; ++f)
     {
@@ -1402,6 +1513,11 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
             v.attr.volumex.right = SaturateS16(v.curVolR);
             v.attr.envx = static_cast<int16_t>(v.envLevel);
 
+            /* Pre-pan mono tap for the spatialiser: the exact sample the mix
+             * below is about to pan, so the two can never disagree. */
+            if (split && split->voiceMono[vi])
+                split->voiceMono[vi][f] = SaturateS16(envScaled);
+
             int32_t voiceL = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolL) >> 15);
             int32_t voiceR = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolR) >> 15);
             mixL += voiceL;
@@ -1438,6 +1554,11 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
                 (static_cast<int64_t>(cd.r) * m_xaMasterGainQ16) >> 16);
             int32_t cdL = static_cast<int32_t>((static_cast<int64_t>(xaL) * m_cdVolL) >> 15);
             int32_t cdR = static_cast<int32_t>((static_cast<int64_t>(xaR) * m_cdVolR) >> 15);
+            if (split && split->cdLR)
+            {
+                split->cdLR[f * 2 + 0] = SaturateS16(cdL);
+                split->cdLR[f * 2 + 1] = SaturateS16(cdR);
+            }
             mixL += cdL;
             mixR += cdR;
             if (m_cdReverb)
@@ -1447,12 +1568,23 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
             }
         }
 
+        else if (split && split->cdLR)
+        {
+            split->cdLR[f * 2 + 0] = 0;
+            split->cdLR[f * 2 + 1] = 0;
+        }
+
         int32_t reverbOutL = 0;
         int32_t reverbOutR = 0;
         m_reverb.Process(m_ram, kSpuRamSize,
                          SaturateS16(static_cast<int32_t>(reverbInL)),
                          SaturateS16(static_cast<int32_t>(reverbInR)),
                          &reverbOutL, &reverbOutR);
+        if (split && split->wetLR)
+        {
+            split->wetLR[f * 2 + 0] = SaturateS16(reverbOutL);
+            split->wetLR[f * 2 + 1] = SaturateS16(reverbOutR);
+        }
         mixL += reverbOutL;
         mixR += reverbOutR;
 
@@ -1475,8 +1607,25 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
         mixL = (static_cast<int64_t>(clampedL) * m_curMasterVolL) >> 15;
         mixR = (static_cast<int64_t>(clampedR) * m_curMasterVolR) >> 15;
 
-        outInterleavedLR[f * 2 + 0] = SaturateS16(static_cast<int32_t>(mixL));
-        outInterleavedLR[f * 2 + 1] = SaturateS16(static_cast<int32_t>(mixR));
+        if (outInterleavedLR)
+        {
+            outInterleavedLR[f * 2 + 0] = SaturateS16(static_cast<int32_t>(mixL));
+            outInterleavedLR[f * 2 + 1] = SaturateS16(static_cast<int32_t>(mixR));
+        }
+    }
+
+    if (split)
+    {
+        /* End-of-block pan, for the caller's azimuth. Sampling once per block
+         * rather than per frame is deliberate: OpenAL positions a source once
+         * per queued buffer anyway. */
+        for (int vi = 0; vi < kNumVoices; ++vi)
+        {
+            split->panL[vi] = m_voices[vi].curVolL;
+            split->panR[vi] = m_voices[vi].curVolR;
+        }
+        split->masterL = m_curMasterVolL;
+        split->masterR = m_curMasterVolR;
     }
 }
 

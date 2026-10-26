@@ -480,51 +480,46 @@ MATRIX* MulMatrix2(MATRIX* m0, MATRIX* m1)
 	return m1;
 }
 
+/* m0 = R * m0, where R is the GTE's current rotation matrix. R is left as it
+ * was (gte_MulMatrix0 re-sets it to the value just read back).
+ *
+ * The old implementation fed each ROW of m0 through RTV0, which computes
+ * m0 * transpose(R) — a different matrix, and the wrong one for every caller.
+ * Callers build a local->world rotation, put a view-space position in ->t, and
+ * then hand the whole thing to SetRotMatrix/SetTransMatrix, so the world->view
+ * rotation has to arrive on the LEFT for the rotation and the translation to
+ * describe the same space. That is what broke the map6_s04 Flauros ray: both
+ * of its endpoints are correct in world space (verified from a capture), but
+ * the transposed product aimed the drawn ribbon somewhere else entirely, so
+ * the beam passed over Alessa instead of through her. */
 MATRIX* MulRotMatrix(MATRIX* m0)
 {
-	// FIXME: might be wrong
-	// as RTV0 can be insufficient
-	double exact[9];
-	int haveExact = 0;
+	MATRIX cur, out;
+
+	gte_ReadRotMatrix(&cur);
+	gte_MulMatrix0(&cur, m0, &out);
+
+	/* MulMatrix0 computes only the 3x3; m0 keeps its own translation. */
+	memcpy(m0->m, out.m, sizeof(m0->m));
 	if (g_PsxUsePgxp)
-	{
-		double input[9], current[9];
-		haveExact = PGXP_MatrixLookup(m0, input) && PGXP_MatrixLookupCurrent(current);
-		if (haveExact)
-		{
-			/* This routine feeds each input row to the current GTE matrix as a
-			 * column vector: result = input * transpose(current). */
-			int row, col;
-			for (row = 0; row < 3; ++row)
-				for (col = 0; col < 3; ++col)
-					exact[row * 3 + col] =
-						input[row * 3 + 0] * current[col * 3 + 0] +
-						input[row * 3 + 1] * current[col * 3 + 1] +
-						input[row * 3 + 2] * current[col * 3 + 2];
-		}
-	}
-
-	gte_ldv0(&m0->m[0]);
-	gte_rtv0();
-	gte_stsv(&m0->m[0]);
-
-	gte_ldv0(&m0->m[1]);
-	gte_rtv0();
-	gte_stsv(&m0->m[1]);
-
-	gte_ldv0(&m0->m[2]);
-	gte_rtv0();
-	gte_stsv(&m0->m[2]);
-
-	if (g_PsxUsePgxp)
-	{
-		if (haveExact)
-			PGXP_MatrixRegister(m0, exact);
-		else
-			PGXP_MatrixInvalidate(m0);
-	}
+		PGXP_MatrixCopy(m0, &out);
 
 	return m0;
+}
+
+/* GTE rotation matrix = R * m. m itself is not modified. Was an empty stub in
+ * pc_port/src/stubs/func_stubs.c, which left the caller's own rotation out of
+ * the product entirely — map6_s04's force-field grid (func_800DFA38) drew with
+ * the bare world->view matrix instead of its own ~106 degree yaw. */
+MATRIX* SetMulRotMatrix(MATRIX* m)
+{
+	MATRIX cur, out;
+
+	gte_ReadRotMatrix(&cur);
+	gte_MulMatrix0(&cur, m, &out);
+	gte_SetRotMatrix(&out);
+
+	return m;
 }
 
 void SetBackColor(int rbk, int gbk, int bbk)

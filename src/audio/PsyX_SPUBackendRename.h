@@ -48,6 +48,7 @@
 #define PsyX_SPUAL_ClearReverbWorkArea PSYX_SPUAL_BACKEND_NAME(ClearReverbWorkArea)
 #define PsyX_SPUAL_ConfigureOutput PSYX_SPUAL_BACKEND_NAME(ConfigureOutput)
 #define PsyX_SPUAL_ConfigureRenderer PSYX_SPUAL_BACKEND_NAME(ConfigureRenderer)
+#define PsyX_SPUAL_ConfigureSpatial PSYX_SPUAL_BACKEND_NAME(ConfigureSpatial)
 #define PsyX_SPUAL_PushXaFrames PSYX_SPUAL_BACKEND_NAME(PushXaFrames)
 #define PsyX_SPUAL_ResetXa PSYX_SPUAL_BACKEND_NAME(ResetXa)
 #define PsyX_SPUAL_FinishXa PSYX_SPUAL_BACKEND_NAME(FinishXa)
