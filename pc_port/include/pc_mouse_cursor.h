@@ -63,13 +63,29 @@ int Pc_MouseCursor_RightClicked(void);
  * adjust the hovered value row / scroll lists. */
 int Pc_MouseCursor_WheelStep(void);
 
+/* Every wheel notch since the last frame, signed (+ = up). WheelStep merges
+ * notches that land inside its 2-frame latch, which makes a fast spin feel
+ * dead in a long list. */
+int Pc_MouseCursor_WheelNotches(void);
+
+/* The pad bits (ControllerFlag_*) the mouse is producing right now through
+ * mouse binds (key_cross = Mouse1 and the like), d-pad bits mirrored onto the
+ * left-stick ones. Panels that handle the mouse themselves drop these from the
+ * pad flags they read, or one click acts twice. */
+unsigned int Pc_MouseCursor_BoundPadBits(void);
+
 /* 1 while a free-cursor puzzle is on screen. control_style.c releases the TPS/OTS
  * mouse capture when this is set, so a cursor puzzle always gets the pointer
  * regardless of the active camera. */
 int Pc_MouseCursor_PuzzleActive(void);
 
-/* Draw the mouse cursor sprite at the current pointer position. Call during a
- * menu's render (needs the 2D packet buffer + ordering table set up). */
-void Pc_MouseCursor_Draw(void);
+/* A screen that wants the pointer calls this during its render, every frame it
+ * should show. The GL panels (Quick Options, bind panel, Yes/No box) show it
+ * while open without asking. */
+void Pc_MouseCursor_Show(void);
+
+/* Draws the pointer, if shown this frame, above the game picture and every PC
+ * panel. Once per frame, last, from the post-capture overlay hook. */
+void Pc_MouseCursor_GlDraw(void);
 
 #endif /* PC_MOUSE_CURSOR_H */

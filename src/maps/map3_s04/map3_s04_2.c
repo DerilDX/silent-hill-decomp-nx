@@ -570,7 +570,11 @@ void Map_WorldObjectsUpdate(void) // 0x800D3DA4
         SD_Call(Sfx_Unk1529);
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 4, -1, 4) && PLAYER_IN_MAP_CHUNK(vz, 1, 2, -1, 2)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[0].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 4, -1, 4) && PLAYER_IN_MAP_CHUNK(vz, 1, 2, -1, 2))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M3S04_HealthDrink0))
         {
@@ -578,7 +582,11 @@ void Map_WorldObjectsUpdate(void) // 0x800D3DA4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 3, -1, 3)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[1].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, 3, -1, 3) && PLAYER_IN_MAP_CHUNK(vz, 1, 3, -1, 3))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M3S04_HandgunBullets))
         {

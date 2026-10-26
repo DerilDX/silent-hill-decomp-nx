@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "font_region.h"
+#include "lang_text.h"
+#include "main/fsqueue.h"
+#include <stdlib.h>
+#include "lang_ru.h"
+#include "pc_title_style.h"
 
 #include <string.h> /* memcpy */
 
@@ -7,6 +12,9 @@
 #include "bodyprog/bodyprog.h"           /* g_Font16AtlasImg */
 #include "bodyprog/text/text_draw.h"     /* GLYPH_TABLE_ASCII_OFFSET, FONT_12X16_* */
 #include "main/fileinfo.h"               /* g_GameRegion */
+#include "hires_override.h"             /* the pinned grid override */
+#include "pc_big_lm.h"                  /* Pc_LooseFOpen */
+#include "pc_config.h"
 #include "sh_log.h"
 
 /* US kerning table — must stay byte-identical to FONT_12X16_GLYPH_WIDTHS in
@@ -49,11 +57,80 @@ static const unsigned char s_GlyphWidths_EUR_PL[126] = {
     12, 11, 12, 0,  0,  0
 };
 
+/* Russian needs sixty-six letterforms, which no amount of free cells in the
+ * retail atlas can hold, so its pack replaces the atlas outright with the one
+ * the consolgames.ru PAL translation drew -- uppercase Cyrillic over the Latin
+ * capitals, lowercase over the accent block. lang_ru.c already carries the byte
+ * table for that layout, and those bytes deliberately avoid 0x96/0x9C/0xA1, the
+ * three the retail EUR scheme special-cases, so Font_MapChar's existing
+ * arithmetic (cell = byte - 0x27) addresses every one of them unchanged.
+ * Latin CAPITALS are gone while this is active, exactly as on the fan disc; the
+ * atlas is re-read on a language switch, so stepping off Russian restores it. */
+#include "font_ru.inc"
+
 static const s_FontLayout s_FontLayout_USA    = { 84,  240, 1, 0x10, 0x7FD3, 30, s_GlyphWidths_USA };
 static const s_FontLayout s_FontLayout_EUR    = { 120, 128, 6, 0x0C, 0x3FF3, 31, s_GlyphWidths_EUR };
 static const s_FontLayout s_FontLayout_EUR_PL = { 126, 128, 6, 0x0C, 0x3FF3, 31, s_GlyphWidths_EUR_PL };
+static const s_FontLayout s_FontLayout_EUR_RU = { 126, 128, 6, 0x0C, 0x3FF3, 31, FONT_RU_WIDTHS };
 
 const s_FontLayout* g_FontLayout = &s_FontLayout_USA;
+
+/* The Polish pack's byte window (0xA2-0xB3) overlaps letters a Cyrillic PAL
+ * repaint puts in the same range, so the pack's decode branch is keyed on the
+ * pack actually being active rather than on a wide glyph count — a fan disc
+ * that extends the atlas to 126 cells reaches the same count. */
+static int s_PolishLayoutActive;
+
+/* Portuguese pack active: its accented CAPITALS draw as a combining mark plus
+ * the base capital, the way retail builds A-acute and E-acute. */
+static int s_PtLayoutActive;
+static int s_RussianLayoutActive;
+
+/* The PAL cell grid on a disc that does not carry it.
+ *
+ * Its 126 cells are what every pack language draws through -- the accents the
+ * four PAL languages need, and the cells Polish and Russian build their
+ * letters into. On a USA or Japanese disc its VRAM home (768,128) belongs to
+ * other art (Font_EurGridBacked), so the atlas is never UPLOADED there: it is
+ * registered as a hi-res override keyed to the grid's tpage and CLUT -- the GL
+ * texture the draw samples instead of VRAM -- and pinned, so the uploads that
+ * own those cells (KONAMI, BG_ETC, TV2) neither stale it nor evict it. VRAM is
+ * untouched, so the trees keep their texels and the font keeps its letters.
+ *
+ * Source: the installed HD font pack when it is PAL-shaped, else
+ * gamedata/font/eur16.tim at native size. Russian always takes the TIM: its
+ * pack replaces every cell with Cyrillic and a hi-res pack is Latin art. */
+static unsigned char*     s_HiresGridHd; /* decoded PAL-shaped pack, pristine */
+static int                s_HiresGridHdW, s_HiresGridHdH;
+static int                s_HiresGridHdProbed;
+static unsigned char*     s_HiresRuHd; /* decoded FONT16_RU, pristine */
+static int                s_HiresRuHdW, s_HiresRuHdH;
+static int                s_HiresRuHdProbed;
+static int                s_HiresGridTimSeen;
+static int                s_HiresGridLive;
+/* Still registered after the layout leaves the grid. The frames already built
+ * when a language switch lands carry the grid's tpage and CLUT, and two of them
+ * are drawn after the switch; deleting the entry made those sample the art that
+ * really lives at (768,128) -- a two-frame flash of coloured blocks. */
+static int                s_HiresGridRegistered;
+static unsigned long long s_HiresGridHash; /* source + pack flags it was built for */
+
+#define EUR_ATLAS_PATH "gamedata/font/eur16.tim"
+#define HD_FONT_PATH   "gamedata/load/1ST/FONT16.png"
+/* Cyrillic HD: a PAL-shaped (21x6 cell) image carrying the Russian atlas's
+ * cells in its own order (font_ru.inc). Separate from FONT16.png because the
+ * Russian layout replaces every cell, so neither file can serve the other. */
+#define HD_FONT_RU_PATH "gamedata/load/1ST/FONT16_RU.png"
+
+/* The grid's retail PAL home and palette: tpage 12 at v 128, 64 units by 96
+ * rows at 4bpp, CLUT (816,255). The override key must be exactly what
+ * s_FontLayout_EUR's prims resolve to (tpageBase 0x0C, packedClut 0x3FF3). */
+#define GRID_VRAM_X 768
+#define GRID_VRAM_Y 128
+#define GRID_VRAM_W 64
+#define GRID_VRAM_H 96
+#define GRID_CLUT_X 816
+#define GRID_CLUT_Y 255
 
 /* == FONT_12X16_LINE_COUNT_MAX (see font_region.h). Region-independent default
  * so USA and NTSC-J evaluate every site exactly as before; Font_ApplyRegionPatches
@@ -70,6 +147,19 @@ int g_PcMapMsgLineMax = FONT_12X16_LINE_COUNT_MAX;
 #define PL_CELL_L_STROKE 122
 #define PL_CELL_DOT_MARK 123
 #define PL_CELL_ACUTE    119 /* retail combining acute, reused for c/n/s/z */
+
+/* Portuguese capital marks. They reuse the POLISH cells: Portuguese text never
+ * contains a Polish letter, and Pc_LangInit re-reads FONT16 from the disc on
+ * every language switch, so each language gets a clean atlas to build into. */
+#define PT_CELL_A_TILDE  90
+#define PT_CELL_O_TILDE  91
+#define PT_CELL_A_CIRC   101
+#define PT_CELL_E_CIRC   109
+#define PT_CELL_O_CIRC   120
+#define PT_CELL_A_GRAVE  121
+#define PT_CELL_I_ACUTE  122
+#define PT_CELL_U_ACUTE  123
+#define CELL_NTILDE      102
 
 /* Polish text bytes. The pack loader emits these; 0xA2..0xB3 are bytes the
  * retail EUR drawer sends to atlas cells 130..147 — past the grid, so it
@@ -105,15 +195,27 @@ static const s_PolishChar s_PolishChars[] = {
 
 /* Fan-translation patches repaint FONT16 glyphs on the disc and retune the
  * BODYPROG kerning table to match (e.g. the Spanish fandub turns ';' into a
- * full-width 'á'). Swap in the disc's widths, everything else unchanged. */
-void Font_SetGlyphWidths(const unsigned char* widths)
+ * full-width 'á'). Swap in the disc's widths, everything else unchanged.
+ *
+ * `count` comes from the disc too, because a patch can also make the atlas
+ * BIGGER: retail PAL declares 120 glyphs but its grid is 21x6, and the Russian
+ * consolgames.ru repaint fills the six spare cells (120-125) with ъ ы ь э ю я
+ * and extends the kerning table to match. Rendered at the retail count those
+ * six letters fail Font_MapChar's range check and vanish from every line of
+ * text on the disc. */
+void Font_SetGlyphWidths(const unsigned char* widths, int count)
 {
     static s_FontLayout  s_overrideLayout;
-    static unsigned char s_overrideWidths[120];
-    int                  count = g_FontLayout->glyphCount;
+    static unsigned char s_overrideWidths[FONT_ATLAS_CELL_MAX];
 
-    memcpy(s_overrideWidths, widths, (count <= 120) ? count : 120);
+    if (count < 1)
+        return;
+    if (count > FONT_ATLAS_CELL_MAX)
+        count = FONT_ATLAS_CELL_MAX;
+
+    memcpy(s_overrideWidths, widths, (size_t)count);
     s_overrideLayout             = *g_FontLayout;
+    s_overrideLayout.glyphCount  = count;
     s_overrideLayout.glyphWidths = s_overrideWidths;
     g_FontLayout                 = &s_overrideLayout;
 }
@@ -137,32 +239,88 @@ int Font_MapChar(unsigned int charCode, s_GlyphEmit emits[2])
          * path can't affect it. */
         switch (charCode)
         {
-            case 0xE0: case 0xE1: case 0xE2: case 0xE4: cell = 'a'; break;
+            case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: cell = 'a'; break;
             case 0xE7:                                  cell = 'c'; break;
             case 0xE8: case 0xE9: case 0xEA: case 0xEB: cell = 'e'; break;
             case 0xEC: case 0xED: case 0xEE: case 0xEF: cell = 'i'; break;
             case 0xF1:                                  cell = 'n'; break;
-            case 0xF2: case 0xF3: case 0xF4: case 0xF6: cell = 'o'; break;
+            case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6: cell = 'o'; break;
             case 0xF9: case 0xFA: case 0xFB: case 0xFC: cell = 'u'; break;
-            case 0xC0: case 0xC1: case 0xC2: case 0xC4: cell = 'A'; break;
+            case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: cell = 'A'; break;
             case 0xC7:                                  cell = 'C'; break;
             case 0xC8: case 0xC9: case 0xCA: case 0xCB: cell = 'E'; break;
             case 0xCC: case 0xCD:                       cell = 'I'; break;
             case 0xD1:                                  cell = 'N'; break;
-            case 0xD2: case 0xD3: case 0xD6:            cell = 'O'; break;
+            case 0xD2: case 0xD3: case 0xD5: case 0xD6: cell = 'O'; break;
             case 0xD9: case 0xDA: case 0xDC:            cell = 'U'; break;
             case 0x9C:                                  cell = 'o'; break;
             case 0x96:                                  cell = '-'; break;
+            /* The PAL languages now run on this atlas too (their packs), and
+             * these three are common enough that dropping them would be read
+             * as missing text: Spanish opens 342 sentences with an inverted
+             * question mark and German writes 191 sharp s. The inverted
+             * exclamation has no home here -- the US atlas starts above '!'
+             * and the drawer rewrites that byte anyway -- so it still goes. */
+            case 0xBF:                                  cell = '?'; break;
+            case 0x85:                                  cell = '.'; break;
+            case 0xDF:
+            {
+                /* No sharp s in this atlas, and "ss" is what German itself
+                 * writes without one. Two emissions, both advancing. */
+                int ss = 's' - GLYPH_TABLE_ASCII_OFFSET;
+
+                emits[0].cell    = ss;
+                emits[0].dy      = 0;
+                emits[0].advance = layout->glyphWidths[ss];
+                emits[1].cell    = ss;
+                emits[1].dy      = 0;
+                emits[1].advance = layout->glyphWidths[ss];
+                return 2;
+            }
             default: return 0;
         }
         cell -= GLYPH_TABLE_ASCII_OFFSET;
     }
     else
     {
+        /* Portuguese accented capitals: a combining mark plus the base
+         * capital, exactly how retail draws A-acute and E-acute. Ahead of the
+         * retail scheme, which would otherwise fold these into its 0x80-0xBF
+         * arithmetic and lose them. */
+        if (s_PtLayoutActive)
+        {
+            int mark = -1;
+            int base = 0;
+
+            switch (charCode)
+            {
+                case 0xC3: mark = PT_CELL_A_TILDE; base = 'A'; break;
+                case 0xD5: mark = PT_CELL_O_TILDE; base = 'O'; break;
+                case 0xC2: mark = PT_CELL_A_CIRC;  base = 'A'; break;
+                case 0xCA: mark = PT_CELL_E_CIRC;  base = 'E'; break;
+                case 0xD4: mark = PT_CELL_O_CIRC;  base = 'O'; break;
+                case 0xC0: mark = PT_CELL_A_GRAVE; base = 'A'; break;
+                case 0xCD: mark = PT_CELL_I_ACUTE; base = 'I'; break;
+                case 0xDA: mark = PT_CELL_U_ACUTE; base = 'U'; break;
+                default: break;
+            }
+            if (mark >= 0)
+            {
+                base             -= GLYPH_TABLE_ASCII_OFFSET;
+                emits[0].cell    = mark;
+                emits[0].dy      = -3; /* the lift retail gives its own A-acute */
+                emits[0].advance = 0;
+                emits[1].cell    = base;
+                emits[1].dy      = 0;
+                emits[1].advance = layout->glyphWidths[base];
+                return 2;
+            }
+        }
+
         /* Polish, when its pack is active. Ahead of the retail scheme because
          * these bytes would otherwise fall into the 0x80-0xBF arithmetic and
          * be dropped. */
-        if (layout->glyphCount > 120 && charCode >= 0xA2 && charCode <= 0xB3)
+        if (s_PolishLayoutActive && charCode >= 0xA2 && charCode <= 0xB3)
         {
             const s_PolishChar* pc = &s_PolishChars[charCode - 0xA2];
             int                 base;
@@ -293,9 +451,14 @@ static const s_GlyphBuild s_PolishGlyphs[] = {
     { PL_CELL_DOT_MARK, -1, 49, 7 }
 };
 
+/* consolgames' uppercase Э, and the spare cell it is copied to. */
+#define RU_CELL_E_OBERT 87
+#define RU_CELL_E_ALT   90
+
 #define ATLAS_COLS 21
 #define CELL_W     12
 #define CELL_H     16
+#define FONT_PAGE_PX 256 /* one 4bpp texture page; 21 cells of 12 use 252 of it */
 
 static unsigned int PixGet(const unsigned char* p, int stride, int x, int y)
 {
@@ -309,6 +472,209 @@ static void PixSet(unsigned char* p, int stride, int x, int y, unsigned int v)
 
     *b = (x & 1) ? (unsigned char)((*b & 0x0F) | (v << 4))
                  : (unsigned char)((*b & 0xF0) | (v & 0xF));
+}
+
+/* ---- Portuguese letterforms, built from the atlas's own accents ----------
+ *
+ * Contributed with the pt translation. Portuguese needs 24 accented letters;
+ * retail PAL draws all but ten. a-tilde and o-tilde have cells reserved
+ * (88, 106) with real advances but ship BLANK, because no PAL language uses
+ * them -- so pack text came out "N o" and "Op es". The eight accented capitals
+ * degrade to a mark and a '*'.
+ *
+ * Every stroke is cut from the loaded atlas rather than drawn, so the ink,
+ * the shadow and the palette match the font exactly and a repainted FONT16 is
+ * followed for free. Cells that already hold ink are left alone, so a fan
+ * repaint that fills them wins. */
+
+static int CellBlank(const unsigned char* p, int stride, int cell)
+{
+    int ox = (cell % ATLAS_COLS) * CELL_W, oy = (cell / ATLAS_COLS) * CELL_H, x, y;
+
+    for (y = 0; y < CELL_H; y++)
+        for (x = 0; x < CELL_W; x++)
+            if (PixGet(p, stride, ox + x, oy + y))
+                return 0;
+    return 1;
+}
+
+/* Twice the horizontal ink centre of a cell over rows y0.., or -1 if empty.
+ * Doubled so the midpoint stays exact without a divide. */
+static int CellInkCentre2(const unsigned char* p, int stride, int cell, int y0)
+{
+    int ox = (cell % ATLAS_COLS) * CELL_W, oy = (cell / ATLAS_COLS) * CELL_H;
+    int mn = CELL_W, mx = -1, x, y;
+
+    for (y = y0; y < CELL_H; y++)
+        for (x = 0; x < CELL_W; x++)
+            if (PixGet(p, stride, ox + x, oy + y))
+            {
+                if (x < mn) mn = x;
+                if (x > mx) mx = x;
+            }
+    return (mx < 0) ? -1 : (mn + mx);
+}
+
+/* Ink bounding box of a cell over rows [y0, y1). Zero if those rows are empty. */
+static int CellInkBox(const unsigned char* p, int stride, int cell, int y0, int y1,
+                      int* x0, int* x1, int* yt, int* yb)
+{
+    int ox = (cell % ATLAS_COLS) * CELL_W, oy = (cell / ATLAS_COLS) * CELL_H, x, y, any = 0;
+
+    *x0 = CELL_W; *x1 = -1; *yt = CELL_H; *yb = -1;
+    for (y = y0; y < y1; y++)
+        for (x = 0; x < CELL_W; x++)
+            if (PixGet(p, stride, ox + x, oy + y))
+            {
+                any = 1;
+                if (x < *x0) *x0 = x;
+                if (x > *x1) *x1 = x;
+                if (y < *yt) *yt = y;
+                if (y > *yb) *yb = y;
+            }
+    return any;
+}
+
+/* a-tilde and o-tilde, built the way retail builds n-tilde: copy the base
+ * letter, then lay n-tilde's own tilde over it, re-centred. The tilde is the
+ * ink above the 'n' x-height, which is where the top of 'n' tells us to cut. */
+static void Font_BuildTildeGlyphs(unsigned char* p, int stride)
+{
+    static const struct { unsigned char cell; char base; } s_Tilde[] = {
+        { 88, 'a' }, { 106, 'o' }
+    };
+    int nCell = 'n' - GLYPH_TABLE_ASCII_OFFSET;
+    int nOx   = (nCell % ATLAS_COLS) * CELL_W, nOy = (nCell / ATLAS_COLS) * CELL_H;
+    int tOx   = (CELL_NTILDE % ATLAS_COLS) * CELL_W;
+    int tOy   = (CELL_NTILDE / ATLAS_COLS) * CELL_H;
+    int top   = CELL_H, ntC, i, x, y;
+
+    for (y = 0; y < CELL_H && top == CELL_H; y++)
+        for (x = 0; x < CELL_W; x++)
+            if (PixGet(p, stride, nOx + x, nOy + y)) { top = y; break; }
+
+    if (top < 2 || top == CELL_H || CellBlank(p, stride, CELL_NTILDE))
+        return;
+    ntC = CellInkCentre2(p, stride, CELL_NTILDE, top);
+
+    for (i = 0; i < (int)(sizeof(s_Tilde) / sizeof(s_Tilde[0])); i++)
+    {
+        int bCell = s_Tilde[i].base - GLYPH_TABLE_ASCII_OFFSET;
+        int bOx   = (bCell % ATLAS_COLS) * CELL_W, bOy = (bCell / ATLAS_COLS) * CELL_H;
+        int dOx   = (s_Tilde[i].cell % ATLAS_COLS) * CELL_W;
+        int dOy   = (s_Tilde[i].cell / ATLAS_COLS) * CELL_H;
+        int bC, dx;
+
+        if (!CellBlank(p, stride, s_Tilde[i].cell))
+            continue;
+        bC = CellInkCentre2(p, stride, bCell, top);
+        if (bC < 0 || ntC < 0)
+            continue;
+        dx = (bC - ntC) >> 1;
+
+        for (y = 0; y < CELL_H; y++)
+            for (x = 0; x < CELL_W; x++)
+                PixSet(p, stride, dOx + x, dOy + y, PixGet(p, stride, bOx + x, bOy + y));
+
+        for (y = 0; y < top; y++)
+            for (x = 0; x < CELL_W; x++)
+            {
+                unsigned int v = PixGet(p, stride, tOx + x, tOy + y);
+
+                if (v && x + dx >= 0 && x + dx < CELL_W)
+                    PixSet(p, stride, dOx + x + dx, dOy + y, v);
+            }
+    }
+}
+
+/* One combining-mark cell per accented capital, so each accent is centred on
+ * its own letter rather than sharing one mark. Each is dropped so its bottom
+ * row matches the retail acute's: Font_MapChar then emits it with the same
+ * dy of -3 retail uses for A-acute, and it lands at exactly that height. */
+static void Font_BuildPtCapitalMarks(unsigned char* p, int stride)
+{
+    static const struct { unsigned char dst, src; char lowerBase, capital; } s_Marks[] = {
+        { PT_CELL_A_TILDE, CELL_NTILDE,   'n', 'A' },
+        { PT_CELL_O_TILDE, CELL_NTILDE,   'n', 'O' },
+        { PT_CELL_A_CIRC,  87,            'a', 'A' },
+        { PT_CELL_E_CIRC,  87,            'a', 'E' },
+        { PT_CELL_O_CIRC,  87,            'a', 'O' },
+        { PT_CELL_A_GRAVE, 85,            'a', 'A' },
+        { PT_CELL_I_ACUTE, PL_CELL_ACUTE, 0,   'I' },
+        { PT_CELL_U_ACUTE, PL_CELL_ACUTE, 0,   'U' }
+    };
+    int ax0, ax1, ayt, ayb, i, x, y;
+
+    if (!CellInkBox(p, stride, PL_CELL_ACUTE, 0, CELL_H, &ax0, &ax1, &ayt, &ayb))
+        return;
+
+    for (i = 0; i < (int)(sizeof(s_Marks) / sizeof(s_Marks[0])); i++)
+    {
+        int src = s_Marks[i].src, dst = s_Marks[i].dst;
+        int cap = s_Marks[i].capital - GLYPH_TABLE_ASCII_OFFSET;
+        int lim = CELL_H;
+        int mx0, mx1, myt, myb, cx0, cx1, cyt, cyb, dx, dy;
+        int sOx = (src % ATLAS_COLS) * CELL_W, sOy = (src / ATLAS_COLS) * CELL_H;
+        int dOx = (dst % ATLAS_COLS) * CELL_W, dOy = (dst / ATLAS_COLS) * CELL_H;
+
+        if (s_Marks[i].lowerBase)
+        {
+            int lb = s_Marks[i].lowerBase - GLYPH_TABLE_ASCII_OFFSET;
+            int bx0, bx1, byt, byb;
+
+            if (!CellInkBox(p, stride, lb, 0, CELL_H, &bx0, &bx1, &byt, &byb))
+                continue;
+            lim = byt; /* the accent is whatever sits above the base's x-height */
+        }
+        if (!CellInkBox(p, stride, src, 0, lim, &mx0, &mx1, &myt, &myb) ||
+            !CellInkBox(p, stride, cap, 0, CELL_H, &cx0, &cx1, &cyt, &cyb))
+            continue;
+
+        dy = ayb - myb;
+        dx = ((cx0 + cx1) - (mx0 + mx1)) >> 1;
+
+        for (y = 0; y < CELL_H; y++)
+            for (x = 0; x < CELL_W; x++)
+                PixSet(p, stride, dOx + x, dOy + y, 0);
+
+        for (y = 0; y < lim; y++)
+            for (x = 0; x < CELL_W; x++)
+            {
+                unsigned int v = PixGet(p, stride, sOx + x, sOy + y);
+
+                if (v && x + dx >= 0 && x + dx < CELL_W && y + dy >= 0 && y + dy < CELL_H)
+                    PixSet(p, stride, dOx + x + dx, dOy + y + dy, v);
+            }
+    }
+}
+
+/* Portuguese: the two tildes every sentence needs, then the capital marks. */
+void Font_PatchPortugueseGlyphs(void* pixels, int widthWords, int height)
+{
+    unsigned char* p      = (unsigned char*)pixels;
+    int            stride = widthWords * 2;
+
+    if (pixels == NULL || (widthWords * 4) < (ATLAS_COLS * CELL_W) || height < (6 * CELL_H))
+        return;
+
+    Font_BuildTildeGlyphs(p, stride);
+    Font_BuildPtCapitalMarks(p, stride);
+    SH_LOG("[FONT] Portuguese glyphs built into FONT16");
+}
+
+void Font_UsePortugueseLayout(void)
+{
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
+    if (g_FontLayout == &s_FontLayout_EUR)
+    {
+        /* The 126-cell layout, same as Polish: the capital marks live in cells
+         * 120..123, past the 120 the plain PAL layout counts. */
+        g_FontLayout     = &s_FontLayout_EUR_PL;
+        s_PtLayoutActive = 1;
+    }
 }
 
 /* Build the Polish letterforms into the freshly-read FONT16 pixel block,
@@ -367,14 +733,414 @@ void Font_PatchPolishGlyphs(void* pixels, int widthWords, int height)
 
 void Font_UsePolishLayout(void)
 {
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
     if (g_FontLayout == &s_FontLayout_EUR)
     {
-        g_FontLayout = &s_FontLayout_EUR_PL;
+        g_FontLayout         = &s_FontLayout_EUR_PL;
+        s_PolishLayoutActive = 1;
     }
+}
+
+/* Can a draw pointed at the PAL cell grid find the PAL atlas there?
+ *
+ * On a PAL disc the grid is real VRAM at (768,128). On a US or JP one that
+ * address belongs to other art and always will: KONAMI.TIM (768,0 96x384) and
+ * BG_ETC.TIM (768,0) cover it at boot, and from the mall onward map4_s03
+ * re-uploads TV2.TIM to (800,0 64x256) on every visit -- its relocation away
+ * from the font is `if (g_GameRegion == Region_EUR)` only (map4_s03.c:3891).
+ * Whoever writes last wins, and the font cannot win a fight it has to keep
+ * winning all session. So there the grid is backed without any upload, by a
+ * pinned override built from eur16.tim (Font_HiresGridSync) -- which makes
+ * that file the whole condition, opt-out through crossRegionLanguages.
+ *
+ * This is the one predicate that decides it, so the rule has a single owner.
+ * Nothing may point the draw at that grid while this returns 0. */
+int Font_EurGridBacked(void)
+{
+    if (g_GameRegion == Region_EUR)
+        return 1;
+    if (!g_PcConfig.crossRegionLanguages)
+        return 0;
+    if (!s_HiresGridTimSeen)
+    {
+        FILE* probe = fopen(EUR_ATLAS_PATH, "rb");
+
+        if (probe == NULL)
+        {
+            static int s_warned;
+
+            if (!s_warned)
+            {
+                s_warned = 1;
+                SH_WARN("[FONT] %s is missing - a pack language draws base "
+                        "letters from this disc's own atlas", EUR_ATLAS_PATH);
+            }
+            return 0;
+        }
+        fclose(probe);
+        s_HiresGridTimSeen = 1;
+    }
+    return 1;
+}
+
+/* Draw from the PAL cell grid on a disc that does not carry it. No-op on a
+ * PAL disc, which already does. Only the draw address moves: FONT16's
+ * descriptor stays at this disc's own home, because the grid is fed by
+ * Font_HiresGridSync and never by an upload. */
+void Font_UseEurAtlas(void)
+{
+    if (g_GameRegion == Region_EUR)
+        return;
+
+    if (!Font_EurGridBacked())
+    {
+        SH_LOG("[FONT] keeping this disc's atlas: the PAL cell grid is not backed "
+               "on this disc, so a pack language draws base letters");
+        return;
+    }
+
+    if (g_FontLayout == &s_FontLayout_USA)
+        g_FontLayout = &s_FontLayout_EUR;
+}
+
+int Font_RussianLayoutActive(void)
+{
+    return s_RussianLayoutActive;
+}
+
+void Font_UseRussianLayout(void)
+{
+    /* From the PAL base ONLY. These layouts draw from the PAL grid at
+     * (768,128); accepting the US base promoted a disc that has nothing there
+     * into reading it anyway, which is why every non-English Latin language
+     * was corrupt on a US disc whether or not a font pack was installed. */
+    if (g_FontLayout == &s_FontLayout_EUR)
+    {
+        g_FontLayout          = &s_FontLayout_EUR_RU;
+        s_RussianLayoutActive = 1;
+    }
+}
+
+/* Replace the atlas with the Cyrillic one, cell for cell. */
+static void FontPatchRussianGlyphs(void* pixels, int widthWords, int height)
+{
+    unsigned char* p      = (unsigned char*)pixels;
+    int            stride = widthWords * 2;
+    int            cell;
+
+    if (pixels == NULL || (widthWords * 4) < (ATLAS_COLS * CELL_W) || height < (6 * CELL_H))
+    {
+        SH_WARN("[FONT] Cyrillic atlas skipped: FONT16 is %dx%d, need %dx%d",
+                widthWords * 4, height, ATLAS_COLS * CELL_W, 6 * CELL_H);
+        return;
+    }
+
+    for (cell = 0; cell < (int)(sizeof(FONT_RU_ATLAS) / sizeof(FONT_RU_ATLAS[0])); cell++)
+    {
+        const unsigned char* src  = FONT_RU_ATLAS[cell];
+        int                  dstX = (cell % ATLAS_COLS) * CELL_W;
+        int                  dstY = (cell / ATLAS_COLS) * CELL_H;
+        int                  x, y;
+
+        for (y = 0; y < CELL_H; y++)
+        {
+            for (x = 0; x < CELL_W; x++)
+            {
+                unsigned char b = src[(y * CELL_W + x) >> 1];
+
+                PixSet(p, stride, dstX + x, dstY + y, (x & 1) ? (b >> 4) : (b & 0x0F));
+            }
+        }
+    }
+
+    SH_LOG("[FONT] Cyrillic atlas built into FONT16 (%d cells)",
+           (int)(sizeof(FONT_RU_ATLAS) / sizeof(FONT_RU_ATLAS[0])));
+}
+
+/* The FONT16 upload site calls this for whichever pack is active: the hook
+ * fires for any pack at all, so it cannot assume Polish. */
+
+/* ---- The same built letters, on a hi-res font pack ----------------------
+ *
+ * Font_PatchPackGlyphs edits the native 4bpp atlas, but a hi-res pack replaces
+ * that atlas through the override path instead, so its cells are whatever the
+ * artist drew -- and nobody draws a-tilde or the Polish letters, because no
+ * disc has them. Checked against the EU HD pack: the cells these cut FROM
+ * (n-tilde, a-circumflex, a-grave, the acute mark) all have ink, and every
+ * cell they write INTO is blank. So the same operations work; they just have
+ * to run on the RGBA image.
+ *
+ * Everything here is a whole-cell copy, so it is scale-independent: the pack's
+ * own scale is read off its size and the same cell arithmetic applies. No
+ * second asset, nothing for an artist to redraw, and a pack painted tomorrow
+ * picks the letters up for free.
+ *
+ * `scale` is pixels per atlas pixel (10 for a 2560x960 pack). */
+
+#define HD_PIX(img, w, x, y) ((img) + (((size_t)(y) * (w) + (x)) * 4))
+
+static void HdCellCopy(unsigned char* img, int w, int scale,
+                       int dstCell, int srcCell)
+{
+    int sx = (srcCell % ATLAS_COLS) * CELL_W * scale;
+    int sy = (srcCell / ATLAS_COLS) * CELL_H * scale;
+    int dx = (dstCell % ATLAS_COLS) * CELL_W * scale;
+    int dy = (dstCell / ATLAS_COLS) * CELL_H * scale;
+    int y;
+
+    for (y = 0; y < CELL_H * scale; y++)
+        memcpy(HD_PIX(img, w, dx, dy + y), HD_PIX(img, w, sx, sy + y),
+               (size_t)CELL_W * scale * 4);
+}
+
+/* Overlay the non-transparent pixels of rows [0, limit) of one cell onto
+ * another, shifted by dx/dy atlas pixels. */
+static void HdCellOverlay(unsigned char* img, int w, int scale,
+                          int dstCell, int srcCell, int limit, int dx, int dy)
+{
+    int sx = (srcCell % ATLAS_COLS) * CELL_W * scale;
+    int sy = (srcCell / ATLAS_COLS) * CELL_H * scale;
+    int ox = (dstCell % ATLAS_COLS) * CELL_W * scale;
+    int oy = (dstCell / ATLAS_COLS) * CELL_H * scale;
+    int x, y;
+
+    for (y = 0; y < limit * scale; y++)
+        for (x = 0; x < CELL_W * scale; x++)
+        {
+            const unsigned char* s = HD_PIX(img, w, sx + x, sy + y);
+            int                  tx = x + dx * scale;
+            int                  ty = y + dy * scale;
+
+            if (s[3] == 0 || tx < 0 || ty < 0 ||
+                tx >= CELL_W * scale || ty >= CELL_H * scale)
+                continue;
+            memcpy(HD_PIX(img, w, ox + tx, oy + ty), s, 4);
+        }
+}
+
+static int HdCellBlank(const unsigned char* img, int w, int scale, int cell)
+{
+    int ox = (cell % ATLAS_COLS) * CELL_W * scale;
+    int oy = (cell / ATLAS_COLS) * CELL_H * scale;
+    int x, y;
+
+    for (y = 0; y < CELL_H * scale; y++)
+        for (x = 0; x < CELL_W * scale; x++)
+            if (HD_PIX(img, w, ox + x, oy + y)[3] != 0)
+                return 0;
+    return 1;
+}
+
+/* Ink box of a cell in ATLAS pixels, over atlas rows [y0, y1). */
+static int HdCellInkBox(const unsigned char* img, int w, int scale, int cell,
+                        int y0, int y1, int* x0, int* x1, int* yb)
+{
+    int ox = (cell % ATLAS_COLS) * CELL_W * scale;
+    int oy = (cell / ATLAS_COLS) * CELL_H * scale;
+    int x, y, any = 0;
+
+    *x0 = CELL_W; *x1 = -1; *yb = -1;
+    for (y = y0 * scale; y < y1 * scale; y++)
+        for (x = 0; x < CELL_W * scale; x++)
+            if (HD_PIX(img, w, ox + x, oy + y)[3] != 0)
+            {
+                int ax = x / scale, ay = y / scale;
+
+                any = 1;
+                if (ax < *x0) *x0 = ax;
+                if (ax > *x1) *x1 = ax;
+                if (ay > *yb) *yb = ay;
+            }
+    return any;
+}
+
+/* Build whatever the active language needs into a hi-res atlas. Mirrors
+ * Font_PatchPackGlyphs, cell for cell. Returns non-zero if it changed it. */
+/* Pixels per atlas pixel for an image already in the ACTIVE layout's shape,
+ * or 0 if it is not a whole multiple of it. */
+int Font_HiresAtlasScale(int w, int h)
+{
+    /* A texture page is 256 pixels at 4bpp (64 VRAM units), and 21 cells of 12
+     * occupy 252 of them -- so the atlas is page-sized, NOT cell-sized. The US
+     * strip is four pages across and one cell tall; the PAL grid is one page
+     * across, and a converted pack carries only its first four rows, which is
+     * every cell the strip can hold. */
+    int us    = (g_FontLayout->rowsPerPage == 1);
+    int baseW = us ? (FONT_PAGE_PX * 4) : FONT_PAGE_PX;
+    int baseH = us ? CELL_H : (CELL_H * 4);
+    int s     = (baseW > 0) ? (w / baseW) : 0;
+
+    if (s < 1 || w % baseW != 0 || h < baseH * s)
+        return 0;
+    return s;
+}
+
+int Font_PatchPackGlyphsHires(unsigned char* rgba, int w, int h, int scale)
+{
+    int top, i, dummy;
+    int nx0, nx1, nyb, tx0, tx1, tyb, ax0, ax1, ayb;
+
+    if (rgba == NULL || scale < 1 || !(s_PtLayoutActive || s_PolishLayoutActive))
+        return 0;
+    if (w < ATLAS_COLS * CELL_W * scale || h < 4 * CELL_H * scale)
+        return 0;
+
+    /* a-tilde / o-tilde: the tilde is the ink above the 'n' x-height. */
+    if (HdCellInkBox(rgba, w, scale, 'n' - GLYPH_TABLE_ASCII_OFFSET, 0, CELL_H,
+                     &nx0, &nx1, &nyb))
+    {
+        int nTop = CELL_H;
+
+        for (top = 0; top < CELL_H; top++)
+        {
+            if (HdCellInkBox(rgba, w, scale, 'n' - GLYPH_TABLE_ASCII_OFFSET,
+                             top, top + 1, &dummy, &dummy, &dummy))
+            {
+                nTop = top;
+                break;
+            }
+        }
+        if (nTop >= 2 && nTop < CELL_H &&
+            HdCellInkBox(rgba, w, scale, CELL_NTILDE, nTop, CELL_H, &tx0, &tx1, &tyb))
+        {
+            static const struct { unsigned char cell; char base; } s_T[] = {
+                { 88, 'a' }, { 106, 'o' }
+            };
+
+            for (i = 0; i < (int)(sizeof(s_T) / sizeof(s_T[0])); i++)
+            {
+                int bc = s_T[i].base - GLYPH_TABLE_ASCII_OFFSET;
+                int bx0, bx1, byb;
+
+                if (!HdCellBlank(rgba, w, scale, s_T[i].cell))
+                    continue;
+                if (!HdCellInkBox(rgba, w, scale, bc, nTop, CELL_H, &bx0, &bx1, &byb))
+                    continue;
+                HdCellCopy(rgba, w, scale, s_T[i].cell, bc);
+                HdCellOverlay(rgba, w, scale, s_T[i].cell, CELL_NTILDE, nTop,
+                              ((bx0 + bx1) - (tx0 + tx1)) >> 1, 0);
+            }
+        }
+    }
+
+    if (!s_PtLayoutActive)
+        return 1; /* Polish builds its own letters; only the tildes are shared */
+
+    /* The accented capitals, each mark dropped to the retail acute's baseline. */
+    if (HdCellInkBox(rgba, w, scale, PL_CELL_ACUTE, 0, CELL_H, &ax0, &ax1, &ayb))
+    {
+        static const struct { unsigned char dst, src; char lowerBase, capital; } s_M[] = {
+            { PT_CELL_A_TILDE, CELL_NTILDE,   'n', 'A' },
+            { PT_CELL_O_TILDE, CELL_NTILDE,   'n', 'O' },
+            { PT_CELL_A_CIRC,  87,            'a', 'A' },
+            { PT_CELL_E_CIRC,  87,            'a', 'E' },
+            { PT_CELL_O_CIRC,  87,            'a', 'O' },
+            { PT_CELL_A_GRAVE, 85,            'a', 'A' },
+            { PT_CELL_I_ACUTE, PL_CELL_ACUTE, 0,   'I' },
+            { PT_CELL_U_ACUTE, PL_CELL_ACUTE, 0,   'U' }
+        };
+
+        for (i = 0; i < (int)(sizeof(s_M) / sizeof(s_M[0])); i++)
+        {
+            int cap = s_M[i].capital - GLYPH_TABLE_ASCII_OFFSET;
+            int lim = CELL_H;
+            int mx0, mx1, myb, cx0, cx1, cyb, bx0, bx1, byb;
+            int ox = (s_M[i].dst % ATLAS_COLS) * CELL_W * scale;
+            int oy = (s_M[i].dst / ATLAS_COLS) * CELL_H * scale;
+            int y;
+
+            if (s_M[i].lowerBase)
+            {
+                int lb = s_M[i].lowerBase - GLYPH_TABLE_ASCII_OFFSET;
+                int t;
+
+                lim = CELL_H;
+                for (t = 0; t < CELL_H; t++)
+                    if (HdCellInkBox(rgba, w, scale, lb, t, t + 1, &bx0, &bx1, &byb))
+                    {
+                        lim = t;
+                        break;
+                    }
+            }
+            if (!HdCellInkBox(rgba, w, scale, s_M[i].src, 0, lim, &mx0, &mx1, &myb) ||
+                !HdCellInkBox(rgba, w, scale, cap, 0, CELL_H, &cx0, &cx1, &cyb))
+                continue;
+
+            for (y = 0; y < CELL_H * scale; y++)
+                memset(HD_PIX(rgba, w, ox, oy + y), 0, (size_t)CELL_W * scale * 4);
+
+            HdCellOverlay(rgba, w, scale, s_M[i].dst, s_M[i].src, lim,
+                          ((cx0 + cx1) - (mx0 + mx1)) >> 1, ayb - myb);
+        }
+    }
+    return 1;
+}
+
+void Font_PatchPackGlyphs(void* pixels, int widthWords, int height)
+{
+    if (s_RussianLayoutActive)
+    {
+        FontPatchRussianGlyphs(pixels, widthWords, height);
+        return;
+    }
+    if (s_PtLayoutActive)
+    {
+        Font_PatchPortugueseGlyphs(pixels, widthWords, height);
+        return;
+    }
+    if (s_PolishLayoutActive)
+    {
+        Font_PatchPolishGlyphs(pixels, widthWords, height);
+        return;
+    }
+
+    /* No pack, but a Russian-patched disc whose atlas puts Э on the byte this
+     * engine reads as '~'. Copy that glyph to cell 90 -- a duplicate the
+     * charset never addresses -- so the encoder can write it as 0x81 instead.
+     * Without this the port's own Russian menu rows lose every capital Э
+     * ("ЭЛТ", "Эйсес") and eat the letter after it. */
+    if (Pc_RuDiscNeedsEFix() && pixels != NULL &&
+        (widthWords * 4) >= (ATLAS_COLS * CELL_W) && height >= (6 * CELL_H))
+    {
+        unsigned char* p      = (unsigned char*)pixels;
+        int            stride = widthWords * 2;
+        int            sx     = (RU_CELL_E_OBERT % ATLAS_COLS) * CELL_W;
+        int            sy     = (RU_CELL_E_OBERT / ATLAS_COLS) * CELL_H;
+        int            dx     = (RU_CELL_E_ALT % ATLAS_COLS) * CELL_W;
+        int            dy     = (RU_CELL_E_ALT / ATLAS_COLS) * CELL_H;
+        int            x, y;
+
+        for (y = 0; y < CELL_H; y++)
+            for (x = 0; x < CELL_W; x++)
+                PixSet(p, stride, dx + x, dy + y, PixGet(p, stride, sx + x, sy + y));
+    }
+}
+
+/* Back to the region's pristine base layout. Pc_LangInit is re-entrant (the
+ * options menu re-runs it on every language step) and each run has to derive
+ * fan-patch override vs Polish layout from scratch: EurFanFontInit judges the
+ * disc table against the CURRENT layout's glyph count, and Font_UsePolishLayout
+ * only installs over the untouched EUR base. Left as they were, stepping off
+ * Polish (126 cells) made EurFanFontInit install a 120-cell override, and
+ * stepping back onto Polish then refused the Polish layout -- its letters drew
+ * with zero advance and folded into the next glyph until a restart. */
+void Font_ResetLayout(void)
+{
+    s_PolishLayoutActive = 0;
+    s_RussianLayoutActive = 0;
+    s_PtLayoutActive = 0;
+
+    g_FontLayout = (g_GameRegion == Region_EUR) ? &s_FontLayout_EUR : &s_FontLayout_USA;
 }
 
 void Font_ApplyRegionPatches(void)
 {
+    s_PolishLayoutActive = 0;
+    s_RussianLayoutActive = 0;
+
     if (g_GameRegion != Region_EUR)
     {
         return;
@@ -401,12 +1167,7 @@ void Font_ApplyRegionPatches(void)
      * at (896,0) and composes the title as black + logo + fog. The 16-entry
      * CLUT keeps the US title-CLUT home (224,15). The matching draw is
      * Pc_TitleLogoDrawEur() in title.c. */
-    g_TitleImg.tPage[0] = 0;
-    g_TitleImg.tPage[1] = 14;
-    g_TitleImg.u        = 0;
-    g_TitleImg.v        = 0;
-    g_TitleImg.clutX    = 224;
-    g_TitleImg.clutY    = 15;
+    Pc_TitleStyleApplyDesc();
 
     /* Exterior tree/branch billboards (Gfx_BillboardDraw) sample BG_ETC
      * texels (0..63,128..191) — on PAL that band is resliced to
@@ -453,4 +1214,559 @@ void Font_ApplyRegionPatches(void)
     }
 
     SH_LOG("[FONT] EUR layout installed: FONT16 -> (768,128) tpage 12, clut (816,255); item CLUTs -> (896..928,480)");
+}
+
+/* Re-read FONT16 and upload it NOW, rather than queueing it.
+ *
+ * A language switch changes the layout (the glyph widths, and for Russian the
+ * whole atlas) the instant it happens, but the queued re-read lands a frame or
+ * more later -- so for those frames the old pixels are drawn at the new
+ * language's advances, which is the "delayed change" a Russian switch showed.
+ * Doing the read and the LoadImage inline keeps the two in step. */
+static unsigned char* FontReadFile(const char* path, unsigned int* outSize, long cap)
+{
+    FILE*          f = fopen(path, "rb");
+    long           n;
+    unsigned char* buf;
+
+    if (f == NULL)
+    {
+        SH_WARN("[FONT] %s is missing", path);
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = (n > 0 && n < cap) ? (unsigned char*)malloc((size_t)n) : NULL;
+    if (buf == NULL || fread(buf, 1, (size_t)n, f) != (size_t)n)
+    {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    *outSize = (unsigned int)n;
+    return buf;
+}
+
+void Font_AtlasReloadNow(void)
+{
+    const s_FileInfo*   info = &g_FileTable[FILE_1ST_FONT16_TIM];
+    unsigned int        size = (unsigned int)info->blockCount << 8;
+    unsigned char*      raw;
+    TIM_IMAGE           tim;
+    RECT                rect;
+
+    if (size == 0)
+        return;
+
+    raw = Pc_LangReadDiscFile(info->startSector, size);
+    if (raw == NULL)
+    {
+        SH_WARN("[FONT] could not re-read FONT16 - the atlas keeps the old language's glyphs");
+        return;
+    }
+
+    OpenTIM((u_long*)raw);
+    if (ReadTIM(&tim) != NULL)
+    {
+        Font_PatchPackGlyphs(tim.paddr, tim.prect->w, tim.prect->h);
+
+        rect   = *tim.prect;
+        rect.x = g_Font16AtlasImg.u + ((g_Font16AtlasImg.tPage[1] & 0xF) << 6);
+        rect.y = g_Font16AtlasImg.v + ((g_Font16AtlasImg.tPage[1] << 4) & 0x100);
+        LoadImage(&rect, (u_long*)tim.paddr);
+
+        if (tim.caddr != NULL)
+        {
+            rect   = *tim.crect;
+            rect.x = g_Font16AtlasImg.clutX;
+            rect.y = g_Font16AtlasImg.clutY;
+            LoadImage(&rect, (u_long*)tim.caddr);
+        }
+        DrawSync(0);
+    }
+    free(raw);
+}
+
+/* Re-lay a FONT16 atlas into the shape of the home it is about to be uploaded
+ * to -- the DISC's shape, not the active layout's. On a US or JP disc the
+ * layout can be the PAL grid while the upload still goes to the US strip at
+ * (0,496): the grid there is a pinned override (Font_HiresGridSync), and the
+ * native strip stays a strip, or 64 grid rows written from row 496 run off
+ * the bottom of VRAM and leave the strip holding cells 0..20 only.
+ *
+ * A font pack replaces 1ST/FONT16.TIM wholesale, but the two regions store the
+ * same glyphs in different shapes: the US atlas is one strip 256 VRAM units
+ * wide and 16 rows tall, holding four pages of 21 glyphs; the PAL one is a
+ * 64x96 grid of 21 glyphs per row. The upload DESTINATION comes from the image
+ * descriptor rather than from the file, so a pack built for the other region
+ * is written at the wrong shape and smears across VRAM. That is what "the font
+ * pack has to match your disc" has always meant.
+ *
+ * Nothing is lost in between. Cell N is cell N in both -- only its position
+ * differs -- so a pack can simply be re-laid-out. Only the 84 cells the US
+ * strip can hold are moved; converting TO the PAL grid therefore writes just
+ * its first four rows, leaving rows 4 and 5 (the accents, which a US pack has
+ * no opinion about) as they were in VRAM.
+ *
+ * A pack already in the right shape is left completely alone, so no existing
+ * pack changes behaviour. Returns non-zero when it converted. */
+#define FONT_CELL_UNITS 3                      /* 12px at 4bpp */
+#define FONT_CELL_BYTES (FONT_CELL_UNITS * 2)
+#define FONT_US_UNITS   256
+#define FONT_EUR_UNITS  64
+#define FONT_COLS       21
+
+static unsigned char s_AtlasFit[FONT_EUR_UNITS * 2 * 64];
+
+int Font_FitAtlasToLayout(void** pixels, int* w, int* h)
+{
+    const unsigned char* src = (const unsigned char*)*pixels;
+    int  wantEur = (g_GameRegion == Region_EUR);
+    int  isUs    = (*w == FONT_US_UNITS && *h == 16);
+    int  isEur   = (*w == FONT_EUR_UNITS && *h >= 64);
+    int  c;
+
+    if (src == NULL || (isUs == isEur))
+        return 0; /* not a shape this knows; leave it be */
+    if (isUs == !wantEur)
+        return 0; /* already what this disc's home wants -- the common case */
+
+    for (c = 0; c < FONT_COLS * 4; c++)
+    {
+        int  col = c % FONT_COLS;
+        int  row = c / FONT_COLS;
+        int  r;
+
+        for (r = 0; r < 16; r++)
+        {
+            const unsigned char* from;
+            unsigned char*       to;
+
+            if (isUs) /* strip -> grid */
+            {
+                from = src + (size_t)r * FONT_US_UNITS * 2
+                     + (size_t)(row * 64 + col * FONT_CELL_UNITS) * 2;
+                to   = s_AtlasFit + (size_t)(row * 16 + r) * FONT_EUR_UNITS * 2
+                     + (size_t)col * FONT_CELL_UNITS * 2;
+            }
+            else /* grid -> strip */
+            {
+                from = src + (size_t)(row * 16 + r) * FONT_EUR_UNITS * 2
+                     + (size_t)col * FONT_CELL_UNITS * 2;
+                to   = s_AtlasFit + (size_t)r * FONT_US_UNITS * 2
+                     + (size_t)(row * 64 + col * FONT_CELL_UNITS) * 2;
+            }
+            memcpy(to, from, FONT_CELL_BYTES);
+        }
+    }
+
+    *pixels = s_AtlasFit;
+    *w      = wantEur ? FONT_EUR_UNITS : FONT_US_UNITS;
+    *h      = wantEur ? 64 : 16;
+    SH_LOG("[FONT] font pack re-laid from the %s atlas shape to the %s one",
+           isUs ? "US" : "PAL", wantEur ? "PAL" : "US");
+    return 1;
+}
+
+/* The same re-layout for a hi-res font pack, which is an RGBA image rather
+ * than a 4bpp atlas.
+ *
+ * A pack ships load/1ST/FONT16.png at some whole multiple of its region's
+ * atlas: the EU one is 2560x960, exactly 10x the PAL atlas's 256x96. The
+ * override maps that image onto the VRAM rect the descriptor names, so on a US
+ * disc it was being stretched across the 1024x16 strip -- garbled, as reported.
+ *
+ * The shape is unambiguous because only one of the two divides evenly: 2560/256
+ * and 960/96 are both 10, while 2560/1024 is 2.5. So the scale identifies the
+ * pack's region, and the cells can be moved at that scale.
+ *
+ * Returns the scale on success and fills outW/outH plus a malloc'd image the
+ * caller frees; 0 when the pack already matches the layout, or its shape is not
+ * a whole multiple of either atlas. */
+#define FONT_CELL_PX_W 12
+#define FONT_CELL_PX_H 16
+#define FONT_US_PX_W   1024
+#define FONT_US_PX_H   16
+#define FONT_EUR_PX_W  256
+#define FONT_EUR_PX_H  96
+
+static int AtlasScale(int w, int h, int baseW, int baseH)
+{
+    int s = w / baseW;
+
+    if (s < 1 || w % baseW != 0 || h % baseH != 0 || h / baseH != s)
+        return 0;
+    return s;
+}
+
+/* Which disc's atlas a hi-res pack was cut for, from its pixel size alone.
+ * Deliberately independent of g_FontLayout, unlike Font_HiresAtlasScale: this
+ * answers "what IS this pack", not "does it fit what is loaded".
+ *
+ * The two shapes cannot both match. A pack satisfies one only if its width and
+ * height are the same whole multiple of that atlas, and 1024x16 against 256x96
+ * would need w/1024 == h/16 and w/256 == h/96 at once, i.e. 6w == w. So the
+ * known EU pack 2560x960 is PAL (scale 10; 2560/1024 is not even an integer)
+ * and nothing can be mistaken for both. */
+int Font_HiresPackShape(int w, int h)
+{
+    int us  = AtlasScale(w, h, FONT_US_PX_W, FONT_US_PX_H);
+    int eur = AtlasScale(w, h, FONT_EUR_PX_W, FONT_EUR_PX_H);
+
+    if ((us != 0) == (eur != 0))
+        return FONT_PACK_SHAPE_UNKNOWN;
+    return us ? FONT_PACK_SHAPE_US : FONT_PACK_SHAPE_PAL;
+}
+
+/* The US hi-res pack is for US English on a USA disc and nothing else.
+ *
+ * It carries 84 cells and no accents, so under any other language it would
+ * supply the unaccented letters while the disc's own font supplied the rest --
+ * two different fonts inside one sentence. The PAL pack has all 126 and is
+ * re-laid to whichever shape the disc wants, so it is the one that travels.
+ *
+ * A pack of neither shape is left alone, exactly as before: that path already
+ * registers it unchanged and nothing here should start second-guessing it. */
+int Font_HiresPackUsable(int shape)
+{
+    if (shape != FONT_PACK_SHAPE_US)
+        return 1;
+
+    return g_GameRegion == Region_USA && g_PcConfig.language == 0;
+}
+
+int Font_FitHiresAtlasToLayout(const unsigned char* rgba, int w, int h,
+                               unsigned char** out, int* outW, int* outH,
+                               int* outUnits, int* outRows)
+{
+    /* The disc's shape, as for Font_FitAtlasToLayout: this entry is keyed to
+     * the descriptor's rect, which never leaves the disc's own home. */
+    int wantEur = (g_GameRegion == Region_EUR);
+    int usScale = AtlasScale(w, h, FONT_US_PX_W, FONT_US_PX_H);
+    int eurScale = AtlasScale(w, h, FONT_EUR_PX_W, FONT_EUR_PX_H);
+    int scale, dstW, dstH, c;
+    unsigned char* dst;
+
+    if (rgba == NULL || (usScale != 0) == (eurScale != 0))
+        return 0; /* neither shape, or ambiguous: leave it alone */
+    if ((usScale != 0) == !wantEur)
+        return 0; /* already the shape this disc's home wants */
+
+    scale = usScale ? usScale : eurScale;
+    dstW  = wantEur ? FONT_EUR_PX_W * scale : FONT_US_PX_W * scale;
+    /* Only the 84 cells a US strip holds are carried, so converting TO the PAL
+     * grid covers its first four rows and leaves the accent rows to VRAM. */
+    dstH  = wantEur ? (FONT_CELL_PX_H * 4 * scale) : FONT_US_PX_H * scale;
+
+    dst = (unsigned char*)calloc((size_t)dstW * dstH, 4);
+    if (dst == NULL)
+        return 0;
+
+    for (c = 0; c < FONT_COLS * 4; c++)
+    {
+        int col = c % FONT_COLS;
+        int row = c / FONT_COLS;
+        int y;
+
+        for (y = 0; y < FONT_CELL_PX_H * scale; y++)
+        {
+            size_t from, to;
+
+            if (usScale) /* strip -> grid */
+            {
+                from = ((size_t)y * w
+                        + (size_t)(row * FONT_EUR_PX_W + col * FONT_CELL_PX_W) * scale) * 4;
+                to   = ((size_t)(row * FONT_CELL_PX_H * scale + y) * dstW
+                        + (size_t)col * FONT_CELL_PX_W * scale) * 4;
+            }
+            else /* grid -> strip */
+            {
+                from = ((size_t)(row * FONT_CELL_PX_H * scale + y) * w
+                        + (size_t)col * FONT_CELL_PX_W * scale) * 4;
+                to   = ((size_t)y * dstW
+                        + (size_t)(row * FONT_EUR_PX_W + col * FONT_CELL_PX_W) * scale) * 4;
+            }
+            memcpy(dst + to, rgba + from, (size_t)FONT_CELL_PX_W * scale * 4);
+        }
+    }
+
+    *out  = dst;
+    *outW = dstW;
+    *outH = dstH;
+    /* The NATIVE VRAM rect the image maps onto, which is the atlas's own size
+     * and has nothing to do with the hi-res pixel count: 256 units x 16 rows
+     * for the US strip, or the PAL grid's first four rows, 64 x 64. Passing
+     * the hi-res size here instead is what made a converted pack invisible. */
+    *outUnits = wantEur ? 64 : 256;
+    *outRows  = wantEur ? 64 : 16;
+    SH_LOG("[FONT] hi-res font pack re-laid from the %s shape to the %s one (%dx) ",
+           usScale ? "US" : "PAL", wantEur ? "PAL" : "US", scale);
+    return scale;
+}
+
+/* ---- The PAL grid as a pinned override (see the statics above) ------------ */
+
+int Font_HiresGridLive(void)
+{
+    return s_HiresGridLive;
+}
+
+/* g_PsyX_TextGlyphTest: the kanji/hanzi atlas, by its palette, which nothing
+ * else uses. The Latin font is drawn from cells with anti-aliased edges and
+ * smooths well, so it keeps the Menus filter like the rest of the menu; a
+ * kanji cell is dense one-pixel strokes, and smoothing those at four or five
+ * times their size runs them together into blots. The Cyrillic atlas is the
+ * same case in the PAL grid: its letters fill the 12px cell edge to edge (some
+ * advance 13-14), so the filter both thickens them and pulls in the next
+ * cell's strokes. Its palette is the grid's (816,255), text-only too. */
+int Font_IsTextGlyphPrim(int tpage, int clut)
+{
+    extern int Pc_KanjiClutId(void);
+    extern int Pc_RuActive(void);
+    const int  c = clut & 0xFFFF;
+
+    (void)tpage;
+    if (c == Pc_KanjiClutId())
+        return 1;
+    /* An HD Cyrillic font is drawn art with real edges, and smooths like the
+     * Latin one. */
+    return c == ((GRID_CLUT_Y << 6) | (GRID_CLUT_X >> 4)) &&
+           (s_RussianLayoutActive || Pc_RuActive()) &&
+           !(s_RussianLayoutActive && Font_RuHiresImage(NULL, NULL) != NULL);
+}
+
+const unsigned char* Font_RuHiresImage(int* outW, int* outH)
+{
+    if (!s_HiresRuHdProbed)
+    {
+        FILE*          f;
+        long           n    = 0;
+        unsigned char* buf  = NULL;
+        unsigned char* rgba = NULL;
+        int            w = 0, h = 0;
+
+        s_HiresRuHdProbed = 1;
+        f = Pc_LooseFOpen(HD_FONT_RU_PATH, "rb");
+        if (f != NULL)
+        {
+            fseek(f, 0, SEEK_END);
+            n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            buf = (n > 0 && n < (64L << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+            if (buf != NULL && fread(buf, 1, (size_t)n, f) != (size_t)n)
+            {
+                free(buf);
+                buf = NULL;
+            }
+            fclose(f);
+        }
+        if (buf != NULL && HiresOverride_DecodeToRGBA(buf, (unsigned int)n, &rgba, &w, &h) == 0)
+        {
+            if (Font_HiresPackShape(w, h) == FONT_PACK_SHAPE_PAL)
+            {
+                s_HiresRuHd  = rgba;
+                s_HiresRuHdW = w;
+                s_HiresRuHdH = h;
+                SH_LOG("[FONT] Cyrillic HD font %s: %dx%d (%dx)", HD_FONT_RU_PATH, w, h,
+                       w / FONT_EUR_PX_W);
+            }
+            else
+            {
+                SH_WARN("[FONT] %s is %dx%d, not a whole multiple of the 256x96 PAL "
+                        "grid - ignored", HD_FONT_RU_PATH, w, h);
+                free(rgba);
+            }
+        }
+        free(buf);
+    }
+    if (outW) *outW = s_HiresRuHdW;
+    if (outH) *outH = s_HiresRuHdH;
+    return s_HiresRuHd;
+}
+
+static void FontHiresGridProbeHd(void)
+{
+    FILE*          f;
+    long           n = 0;
+    unsigned char* buf;
+    unsigned char* rgba = NULL;
+    int            w = 0, h = 0;
+
+    s_HiresGridHdProbed = 1;
+
+    f = Pc_LooseFOpen(HD_FONT_PATH, "rb");
+    if (f == NULL)
+        return;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = (n > 0 && n < (64L << 20)) ? (unsigned char*)malloc((size_t)n) : NULL;
+    if (buf == NULL || fread(buf, 1, (size_t)n, f) != (size_t)n)
+    {
+        free(buf);
+        fclose(f);
+        return;
+    }
+    fclose(f);
+
+    if (HiresOverride_DecodeToRGBA(buf, (unsigned int)n, &rgba, &w, &h) == 0)
+    {
+        /* A US-cut pack has no accent rows to give; the grid takes the TIM
+         * then, and the pack keeps applying to US English the way it did. */
+        if (Font_HiresPackShape(w, h) == FONT_PACK_SHAPE_PAL)
+        {
+            s_HiresGridHd  = rgba;
+            s_HiresGridHdW = w;
+            s_HiresGridHdH = h;
+        }
+        else
+        {
+            SH_LOG("[FONT] %s is cut for the US atlas; the PAL grid on this disc "
+                   "uses %s at native size", HD_FONT_PATH, EUR_ATLAS_PATH);
+            free(rgba);
+        }
+    }
+    free(buf);
+}
+
+/* eur16.tim with the active pack's letters built in, as RGBA at 1:1. The 4bpp
+ * patchers work on the TIM's pixels in place, so the decode that follows
+ * carries their cells. */
+static unsigned char* FontHiresGridFromTim(int* outW, int* outH)
+{
+    unsigned int   size = 0;
+    unsigned char* raw  = FontReadFile(EUR_ATLAS_PATH, &size, 1L << 20);
+    unsigned char* rgba = NULL;
+    TIM_IMAGE      tim;
+
+    if (raw == NULL)
+        return NULL;
+
+    OpenTIM((u_long*)raw);
+    if (ReadTIM(&tim) != NULL && tim.prect != NULL)
+    {
+        Font_PatchPackGlyphs(tim.paddr, tim.prect->w, tim.prect->h);
+        if (HiresOverride_DecodeToRGBA(raw, size, &rgba, outW, outH) != 0)
+            rgba = NULL;
+    }
+    free(raw);
+
+    if (rgba != NULL && (*outW != FONT_EUR_PX_W || *outH != FONT_EUR_PX_H))
+    {
+        SH_WARN("[FONT] %s decoded to %dx%d, not the %dx%d grid", EUR_ATLAS_PATH,
+                *outW, *outH, FONT_EUR_PX_W, FONT_EUR_PX_H);
+        free(rgba);
+        rgba = NULL;
+    }
+    return rgba;
+}
+
+/* Bring the pinned override in line with the layout now in force. Called once
+ * at the end of every Pc_LangInit, when the layout and the pack flags are
+ * final: the grid is wanted exactly when the draw points at it on a disc that
+ * has nothing there, and then the override must carry THIS language's cells.
+ * Re-registering what is already there is a hash no-op, so a map load costs
+ * nothing; a language step rebuilds it once. */
+void Font_HiresGridSync(void)
+{
+    unsigned char*     rgba = NULL;
+    int                w = 0, h = 0;
+    int                fromHd;
+    int                flags;
+    unsigned long long hash;
+
+    if (g_GameRegion == Region_EUR || g_FontLayout->rowsPerPage == 1)
+    {
+        if (s_HiresGridLive)
+        {
+            s_HiresGridLive = 0;
+            SH_LOG("[FONT] PAL grid override idle: this language draws this disc's own atlas");
+        }
+        return;
+    }
+
+    if (!s_HiresGridHdProbed)
+        FontHiresGridProbeHd();
+
+    fromHd = s_RussianLayoutActive ? (Font_RuHiresImage(NULL, NULL) != NULL)
+                                   : (s_HiresGridHd != NULL);
+    flags  = (s_PolishLayoutActive ? 1 : 0) | (s_PtLayoutActive ? 2 : 0) |
+             (s_RussianLayoutActive ? 4 : 0) | (Pc_RuDiscNeedsEFix() ? 8 : 0);
+    hash   = 0x464F4E5447524944ull ^ ((unsigned long long)(fromHd ? 1 : 2) << 8) ^
+             (unsigned long long)flags;
+    if (s_HiresGridRegistered && hash == s_HiresGridHash)
+    {
+        s_HiresGridLive = 1;
+        return;
+    }
+
+    if (fromHd && s_RussianLayoutActive)
+    {
+        const unsigned char* ru = Font_RuHiresImage(&w, &h);
+        size_t               bytes = (size_t)w * (size_t)h * 4;
+
+        rgba = (unsigned char*)malloc(bytes);
+        if (rgba != NULL)
+            memcpy(rgba, ru, bytes);
+    }
+    else if (fromHd)
+    {
+        size_t bytes = (size_t)s_HiresGridHdW * (size_t)s_HiresGridHdH * 4;
+
+        rgba = (unsigned char*)malloc(bytes);
+        if (rgba != NULL)
+        {
+            memcpy(rgba, s_HiresGridHd, bytes);
+            w = s_HiresGridHdW;
+            h = s_HiresGridHdH;
+            Font_PatchPackGlyphsHires(rgba, w, h, Font_HiresAtlasScale(w, h));
+        }
+    }
+    else
+    {
+        rgba = FontHiresGridFromTim(&w, &h);
+    }
+
+    if (rgba != NULL)
+    {
+        int ok;
+
+        /* Gutterless glyph cells bleed under bilinear sampling, same as the
+         * font pack path in fsqueue_3.c. */
+        HiresOverride_SetForceNearestUpload(1);
+        ok = HiresOverride_RegisterRGBAKeyed("PAL grid", rgba, w, h,
+                                             GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                             GRID_CLUT_X, GRID_CLUT_Y, 4, hash) == 0 &&
+             HiresOverride_PinVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                       GRID_CLUT_X, GRID_CLUT_Y, 4, 1) == 0;
+        HiresOverride_SetForceNearestUpload(0);
+        free(rgba);
+
+        if (ok)
+        {
+            s_HiresGridLive       = 1;
+            s_HiresGridRegistered = 1;
+            s_HiresGridHash       = hash;
+            SH_LOG("[FONT] PAL grid backed by a pinned %dx%d override from %s",
+                   w, h, !fromHd ? EUR_ATLAS_PATH : s_RussianLayoutActive ? HD_FONT_RU_PATH : HD_FONT_PATH);
+            return;
+        }
+    }
+
+    /* Nothing may read the grid without a backing (Font_EurGridBacked): a draw
+     * there would show tree texels, so the draw goes back to this disc's own
+     * atlas and base letters instead. */
+    SH_WARN("[FONT] could not back the PAL grid - this language draws base letters "
+            "from this disc's own atlas");
+    if (s_HiresGridRegistered)
+    {
+        HiresOverride_DropVramRect(GRID_VRAM_X, GRID_VRAM_Y, GRID_VRAM_W, GRID_VRAM_H,
+                                   GRID_CLUT_X, GRID_CLUT_Y, 4);
+        s_HiresGridRegistered = 0;
+        s_HiresGridHash       = 0;
+    }
+    s_HiresGridLive = 0;
+    g_FontLayout    = &s_FontLayout_USA;
 }

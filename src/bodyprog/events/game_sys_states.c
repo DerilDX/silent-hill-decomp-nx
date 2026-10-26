@@ -24,6 +24,10 @@ extern s_WorldEnvWork g_WorldEnvWork;
 #include "bodyprog/events/bodyprog_data_800A99B4.h"
 #include "bodyprog/events/events_main.h"
 #include "bodyprog/events/npc_main.h"
+#ifdef SH_PC_PORT
+#include "pc_pick.h"
+#include "pc_dark_harry.h"
+#endif
 #include "bodyprog/events/radio.h"
 #include "bodyprog/demo.h"
 #include "bodyprog/gfx/map_effects.h"
@@ -362,6 +366,10 @@ void GameState_InGame_Update(void) // 0x80038BD4
              * back negative — fixed at the lookup itself (PC_FOG_VTX_RAMP
              * in bodyprog_80055028.c), so the full fog+lighting pipeline
              * is safe for characters. */
+            Pc_Pick_CharaPreDraw(&g_SysWork.playerWork.player, -1, g_SysWork.playerBoneCoords);
+            /* Dark Harry easter egg (pc_dark_harry.c): drawn here with the
+             * other world characters. No-op unless he is present. */
+            Pc_DarkHarry_Draw();
             func_8003DA9C(Chara_Harry, g_SysWork.playerBoneCoords, 1, g_SysWork.playerWork.player.timer_C6, 0);
 #else
             func_8003DA9C(Chara_Harry, g_SysWork.playerBoneCoords, 1, g_SysWork.playerWork.player.timer_C6, 0);
@@ -376,11 +384,38 @@ void GameState_InGame_Update(void) // 0x80038BD4
         Game_NpcUpdate();
         func_8005E89C();
         Ipd_CloseRangeChunksInit();
+#ifdef SH_PC_PORT
+        /* Last point in the gameplay update, so every map/event caller has had
+         * its chance to write a positional sfx this frame. */
+        { extern void Pc_3dAudio_SustainPositionalLoops(void); Pc_3dAudio_SustainPositionalLoops(); }
+#endif
         Gfx_InGameDraw(1);
 #ifdef SH_PC_PORT
         /* The world is in the OT for this frame, so the fog-colored clear behind
          * it is correct. Without the world, that clear is the whole image. */
         { extern int g_PcWorldDrawnThisFrame; g_PcWorldDrawnThisFrame = 1; }
+        /* ...and it must be framed Hor+, decided HERE rather than in MainLoop's
+         * gate. That gate runs before this submission, so its 2D-background hold
+         * (300ms past the last 2D frame) was still set on the first frames the
+         * world came back after the inventory: the picture -- and the minimap
+         * with it -- rendered 4:3 for ~2 frames before snapping (measured from a
+         * user recording: the minimap jumps to the pillarbox x-offset for exactly
+         * frames 141-142 of the exit). Submitting the world and choosing its
+         * framing in the same place cannot lag. The non-transient gates still
+         * win: the map screen and the paper-map/pickup protect flag. */
+        {
+            extern int g_PcHorPlusEnabled, g_PcMapScreenActive, g_PsxSkipFramebufferStore;
+            extern int g_PcWorldHorPlus;
+            /* Same exemption as MainLoop's gate: the ending raises the protect
+             * flag for its palettes while drawing a 3D cutscene. */
+            const int cutsceneLive = ((g_SysWork.sysFlags & SysFlag_CutsceneActive) ||
+                                      g_SysWork.cutsceneBorderState != CutsceneBorderState_None) ? 1 : 0;
+            if (!g_PcMapScreenActive && !(g_PsxSkipFramebufferStore && !cutsceneLive))
+                g_PcHorPlusEnabled = 1;
+            /* Record what the world is actually being drawn with, for HUD
+             * elements that lay out before this point in the frame. */
+            g_PcWorldHorPlus = g_PcHorPlusEnabled;
+        }
 #endif
         Demo_DemoRandSeedAdvance();
     }
@@ -391,6 +426,34 @@ void SysState_Gameplay_Update(void) // 0x80038BD4
     s_SubCharacter* player;
 
     player = &g_SysWork.playerWork.player;
+
+#ifdef SH_PC_PORT
+    /* Randomizer settings panel (opened by tapping Map): while it is up, freeze
+     * the world and hand it input. Returning here skips Event_Update + every
+     * transition below, so nothing ticks and no state change fires. */
+    {
+        extern int  Pc_RandoSettings_IsOpen(void);
+        extern void Pc_RandoSettings_Update(int, int, int, int, int, int);
+        if (Pc_RandoSettings_IsOpen())
+        {
+            const s_ControllerConfig* cc = &g_GameWorkPtr->config.controllerConfig;
+            /* Same as the quick menu: the panel handles the mouse itself, so
+             * pad bits a mouse bind is producing must not act a second time. */
+            extern unsigned int Pc_MouseCursor_BoundPadBits(void);
+            const unsigned int  mouseBits = Pc_MouseCursor_BoundPadBits();
+            Pc_RandoSettings_Update(
+                (g_Controller0->pulsedBtnFlags  & ~mouseBits & ControllerFlag_LStickUp)    != 0,
+                (g_Controller0->pulsedBtnFlags  & ~mouseBits & ControllerFlag_LStickDown)  != 0,
+                (g_Controller0->pulsedBtnFlags  & ~mouseBits & ControllerFlag_LStickLeft)  != 0,
+                (g_Controller0->pulsedBtnFlags  & ~mouseBits & ControllerFlag_LStickRight) != 0,
+                (g_Controller0->clickedBtnFlags & ~mouseBits & (cc->enter | cc->action))   != 0,
+                (g_Controller0->clickedBtnFlags & ~mouseBits & (cc->cancel | cc->map))     != 0);
+            g_Controller0->clickedBtnFlags = 0;
+            g_Controller0->pulsedBtnFlags  = 0;
+            return;
+        }
+    }
+#endif
 
     Event_Update(player->attackReceived != NO_VALUE);
     Game_MapRoomIdxUpdate();
@@ -433,6 +496,29 @@ void SysState_Gameplay_Update(void) // 0x80038BD4
     {
         Game_FlashlightToggle();
     }
+
+#ifdef SH_PC_PORT
+    /* Randomizer: the Map button opens the settings panel on a quick TAP and the
+     * real map on a HOLD (the map screen self-gates on HAS_MAP, so "no map yet"
+     * just bounces). Poll every frame for the hold timer, then swallow the Map
+     * edge so the vanilla map branch below never also fires. */
+    {
+        extern int Pc_Rando_Active(void);
+        extern int Pc_RandoSettings_MapButtonArbiter(int, int);
+        if (Pc_Rando_Active())
+        {
+            u16 mapBtn     = g_GameWorkPtr->config.controllerConfig.map;
+            int mapClicked = (g_Controller0->clickedBtnFlags & mapBtn) != 0;
+            int mapHeld    = (g_Controller0->heldBtnFlags & mapBtn) != 0;
+            if (Pc_RandoSettings_MapButtonArbiter(mapClicked, mapHeld) == 2 /* RANDO_MAP_WANT_MAP */)
+            {
+                SysWork_StateSetNext(SysState_MapScreen);
+                g_SysWork.isMgsStringSet = false;
+            }
+            g_Controller0->clickedBtnFlags &= ~(e_ControllerFlags)mapBtn;
+        }
+    }
+#endif
 
     if (g_MapEventSysState != SysState_Invalid)
     {

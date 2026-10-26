@@ -88,17 +88,17 @@ typedef enum _MainMenuEntry
     MainMenuEntry_Continue = 1,
     MainMenuEntry_Start    = 2,
     MainMenuEntry_Option   = 3,
+#ifdef SH_PC_PORT
+    /* PC port: the unused Extra slot becomes Achievements, then the port's Exit
+     * row. Draw order is entry order, so both sit under Option. */
+    MainMenuEntry_Achievements = 4,
+    MainMenuEntry_Exit         = 5,
+    MainMenuEntry_Count        = 6
+#else
     MainMenuEntry_Extra    = 4, /** @unused The extra options menu may have been accessible via the main menu. */
 
-#ifdef SH_PC_PORT
-    /* PC port: the port's Exit row reuses the unused Extra slot. It sits
-     * directly under Option in draw order and inside the existing
-     * MainMenuEntry_Count, so the row layout, selection wrap and mouse
-     * hit-test all keep working untouched. */
-    MainMenuEntry_Exit     = 4,
-#endif
-
     MainMenuEntry_Count    = 5
+#endif
 } e_MainMenuEntry;
 
 typedef enum _MainMenuState
@@ -107,7 +107,12 @@ typedef enum _MainMenuState
     MenuState_Main               = 1,
     MenuState_LoadGame           = 2,
     MenuState_DifficultySelector = 3,
+#ifdef SH_PC_PORT
+    MenuState_NewGameStart       = 4,
+    MenuState_Achievements       = 5
+#else
     MenuState_NewGameStart       = 4
+#endif
 } e_MainMenuState;
 
 /** Used by `func_8003F654` to cast a specific field to the desired type. */
@@ -1211,6 +1216,18 @@ void WorldObject_ModelNameSet(s_WorldObjectModel* model, char* newStr);
 
 /** Submits a world object to draw. */
 void WorldGfx_ObjectAdd(s_WorldObjectModel* model, const VECTOR3* pos, const SVECTOR3* rot);
+#ifdef SH_PC_PORT
+/* Interiors only. Map scripts draw a common pickup only while the player stands in its 40u map
+ * cell. Behind fog and fixed cameras that edge never showed; in first person or
+ * with the fog thinned the item blinked out a few steps away. ORed into each
+ * pickup's cell test so a nearby item stays drawn. Drawing only: taking an
+ * item is a separate map event and is unchanged. */
+bool Pc_CommonPickupInRange(const VECTOR3* pos);
+/* Hold the live fog at >= 1.0 this frame (call every frame the scene needs it);
+ * Pc_FogFloorFrameEnd restores the user's value once no one asks. */
+void Pc_FogFloorRequest(void);
+void Pc_FogFloorFrameEnd(void);
+#endif
 
 /** @unused Returns held item ID. */
 s32 WorldGfx_HeldItemIdGet(void);
@@ -2159,7 +2176,9 @@ void SysWork_SavegameReadPlayer(void);
 /** @brief Handles a warm game reboot. */
 void Game_WarmBoot(void);
 
-s32 func_800382B0(s32 arg0);
+/* func_800382B0 was a GCC nested function inside Game_NpcUpdate (npc_main.c);
+ * un-nested there to a file-scope static taking its captured slot array, so this
+ * stale 1-arg extern prototype (never had an external definition) is removed. */
 
 /** @brief Computes the distance between two positions.
  *

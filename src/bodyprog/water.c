@@ -11,6 +11,9 @@
 #include "bodyprog/math/math.h"
 #include "bodyprog/sound/sound_system.h"
 #include "main/fsqueue.h"
+#ifdef SH_PC_PORT
+#include "sh_log.h"
+#endif
 
 s_800C4818 D_800C4818;
 s32 __pad_bss_800C483C;
@@ -726,10 +729,35 @@ void func_8008E5B4(void) // 0x8008E5B4
     s32              temp_v0;
     s_func_8008E5B4* packet;
 
-    /* PC: this render-to-VRAM scratch (RECT 832,224 = the tile the water
-     * surface samples) works again — PsyX routes small x>=320 draw-areas
-     * through the offscreen FBO and packs the pixels back into VRAM
-     * (ProcessDrawEnv DR_AREA / GR_SetOffscreenState small-rect writeback). */
+#ifdef SH_PC_PORT
+    /* The water surface reads this tile back as a 4bpp texture through
+     * another palette, so each colour word must be bit-exact GPU output;
+     * the GL offscreen round trip was not. Rasterize the two 1:1 layers in
+     * software (PsyX_VramDrawTexturedRect) in the order DrawOTag drew them:
+     * the opaque base, then the additive copy; dtd is on (main.c). */
+    /* The original counter advances once per 30 FPS game tick, not once per
+     * rendered frame. Retain fractional ticks at higher frame rates and wrap
+     * after 128 ticks, when both 32-texel scrolling layers repeat. Using the
+     * game's Q12 timestep also preserves the original 30 FPS sequence. */
+    static s32 waterTime = 0;
+
+    if (g_DeltaTime > Q12(0.0f))
+    {
+        waterTime = (waterTime + g_DeltaTime) % (128 * TIMESTEP_30_FPS);
+        D_800AFDAC = waterTime / TIMESTEP_30_FPS;
+    }
+
+    PsyX_VramDrawTexturedRect(D_800AFDA4.x, D_800AFDA4.y, D_800AFDA4.w, D_800AFDA4.h,
+                              45, 14, 0, (D_800AFDAC >> 1) & 0x1F, 0, 1);
+    PsyX_VramDrawTexturedRect(D_800AFDA4.x, D_800AFDA4.y, D_800AFDA4.w, D_800AFDA4.h,
+                              45, 14, ((D_800AFDAC + 1) >> 2) & 0x1F, 8, 1, 1);
+
+    (void)drawEnv;
+    (void)temp_v0;
+    (void)packet;
+    return;
+#endif
+
     GetDrawEnv(&drawEnv);
     packet         = GsOUT_PACKET_P;
     GsOUT_PACKET_P = &packet[1];

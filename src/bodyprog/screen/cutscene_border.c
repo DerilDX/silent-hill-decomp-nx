@@ -63,12 +63,20 @@ static void Screen_BorderInitStatics(void)
     }
 
     {
-        const float psxAspect = 320.0f / 240.0f;
+        /* Same wrong formula as the screenBrightness/fog quads (320/240 base, no
+         * PAR, no hfov): halfW ~223 while the visible half is ~250 at 16:9, so
+         * the letterbox bars stopped short of the window edges. Use the shared
+         * visible-extent bound instead. */
+        extern float g_PsxPixelAspect, g_PsxWorldHScale;
+extern float GR_LivePixelAspect(void);
         const int   rw = g_windowWidth  > 0 ? g_windowWidth  : g_PcConfig.windowWidth;
         const int   rh = g_windowHeight > 0 ? g_windowHeight : g_PcConfig.windowHeight;
-        const float winAspect = rh > 0 ? (float)rw / (float)rh : psxAspect;
-        const float horScale = winAspect / psxAspect;
-        halfW = (s16)(160.0f * horScale + 10.0f);
+        const float hs = (g_PsxWorldHScale > 0.01f) ? g_PsxWorldHScale : 1.0f;
+        float fw = (rh > 0)
+            ? ((float)g_GameWork.gsScreenHeight * (float)rw / (2.0f * (float)rh)) * GR_LivePixelAspect() / hs
+            : 160.0f;
+        if (fw < 160.0f) fw = 160.0f;
+        halfW = (s16)(fw + 10.0f);
     }
 
     /* Width recomputed every call so a window resize is reflected.
@@ -145,39 +153,42 @@ static q19_12 g_BlackBorderShade = Q12(0.0f);
 // CUTSCENE BORDERS
 // ========================================
 
-void Screen_CutsceneCameraStateUpdate(void) // 0x80032904
+// Un-nested from Screen_CutsceneCameraStateUpdate: Clang has no GCC
+// nested-function extension. Everything this touches arrives by parameter, so a
+// file-scope static is behaviour-identical.
+static void Screen_BlackBorderDraw(POLY_G4* poly, s32 color)
 {
-    void Screen_BlackBorderDraw(POLY_G4* poly, s32 color)
+    s32 i;
+    s32 color0;
+    s32 color1;
+
+    color0 = color >> 4;
+    color1 = color >> 5;
+
+    if (color == Q12_CLAMPED(1.0f))
     {
-        s32 i;
-        s32 color0;
-        s32 color1;
-
-        color0 = color >> 4;
-        color1 = color >> 5;
-
-        if (color == Q12_CLAMPED(1.0f))
-        {
-            color1 = Q8_CLAMPED(1.0f);
-        }
-
-        for (i = 0; i < 2; i++)
-        {
-            poly[i * 2].r0 = color0;
-            poly[i * 2].g0 = color0;
-            poly[i * 2].b0 = color0;
-            poly[i * 2].r1 = color0;
-            poly[i * 2].g1 = color0;
-            poly[i * 2].b1 = color0;
-            poly[i * 2].r2 = color1;
-            poly[i * 2].g2 = color1;
-            poly[i * 2].b2 = color1;
-            poly[i * 2].r3 = color1;
-            poly[i * 2].g3 = color1;
-            poly[i * 2].b3 = color1;
-        }
+        color1 = Q8_CLAMPED(1.0f);
     }
 
+    for (i = 0; i < 2; i++)
+    {
+        poly[i * 2].r0 = color0;
+        poly[i * 2].g0 = color0;
+        poly[i * 2].b0 = color0;
+        poly[i * 2].r1 = color0;
+        poly[i * 2].g1 = color0;
+        poly[i * 2].b1 = color0;
+        poly[i * 2].r2 = color1;
+        poly[i * 2].g2 = color1;
+        poly[i * 2].b2 = color1;
+        poly[i * 2].r3 = color1;
+        poly[i * 2].g3 = color1;
+        poly[i * 2].b3 = color1;
+    }
+}
+
+void Screen_CutsceneCameraStateUpdate(void) // 0x80032904
+{
     GsOT*    ot;
     POLY_G4* poly;
     DR_MODE* drMode;

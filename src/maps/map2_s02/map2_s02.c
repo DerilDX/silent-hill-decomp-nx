@@ -240,7 +240,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EA1C4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[0].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -2, -1, -2))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M2S02_HealthDrink0))
         {
@@ -248,7 +252,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EA1C4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -3, -1, -3)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[1].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -3, -1, -3))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M2S02_HealthDrink1))
         {
@@ -256,7 +264,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EA1C4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -3, -1, -3)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[2].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -1, 0, 0) && PLAYER_IN_MAP_CHUNK(vz, 1, -3, -1, -3))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M2S02_HandgunBullets0))
         {
@@ -264,7 +276,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EA1C4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -4, -1, -4) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[3].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -4, -1, -4) && PLAYER_IN_MAP_CHUNK(vz, 1, -1, 0, 0))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M2S02_HandgunBullets1))
         {
@@ -272,7 +288,11 @@ void Map_WorldObjectsUpdate(void) // 0x800EA1C4
         }
     }
 
+#ifdef SH_PC_PORT
+    if ((PLAYER_IN_MAP_CHUNK(vx, 1, -5, -1, -5) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1)) || Pc_CommonPickupInRange(&g_CommonWorldObjectPoses[4].position))
+#else
     if (PLAYER_IN_MAP_CHUNK(vx, 1, -5, -1, -5) && PLAYER_IN_MAP_CHUNK(vz, 0, 0, -1, 1))
+#endif
     {
         if (!Savegame_EventFlagGet(EventFlag_M2S02_HealthDrink2))
         {

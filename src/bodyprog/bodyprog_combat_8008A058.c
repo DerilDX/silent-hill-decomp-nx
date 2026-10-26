@@ -1,5 +1,8 @@
 #include "game.h"
 #ifdef SH_PC_PORT
+#include "pc_pick.h"
+#endif
+#ifdef SH_PC_PORT
 #include "sh_log.h"
 #endif
 #include "inline_no_dmpsx.h"
@@ -146,6 +149,27 @@ s32 func_8008A0E4(s32 arg0, s32 weaponAttack, s_SubCharacter* chara, VECTOR3* po
     {
         return NO_VALUE;
     }
+
+    /* No-target cheat: nothing an enemy swings can land on Harry.
+     *
+     * This is the only place every enemy attack passes through, so it is
+     * the one hook that covers ALL of them. CharaFlag_Unk4, which the cheat
+     * also sets, is the game's own ignore-the-player flag but only six
+     * characters ever test it (stalker, groaner, creeper, hanged scratcher,
+     * air screamer, player) -- the rest inline their own distance and angle
+     * math against the player's position and never consult it, which is why
+     * nurses and the bosses kept attacking.
+     *
+     * Gated on chara2 (the VICTIM) being the player: enemies pass the player
+     * there, while the player's own attacks pass an NPC, so Harry's ability
+     * to damage enemies is untouched. */
+    {
+        extern int g_DebugNoTarget;
+        if (g_DebugNoTarget && chara2 == &g_SysWork.playerWork.player)
+        {
+            return NO_VALUE;
+        }
+    }
 #endif
 
     if (chara == &g_SysWork.playerWork.player)
@@ -170,6 +194,38 @@ s32 func_8008A0E4(s32 arg0, s32 weaponAttack, s_SubCharacter* chara, VECTOR3* po
     }
 
     chara->field_44.field_2 = weaponAttack;
+
+#ifdef SH_PC_PORT
+    /* Re-arm the one-hit-per-swing latch on a genuinely new swing.
+     *
+     * Confirmed by [PLRDMG] against a Puppet Nurse: the first knife hit lands
+     * (sp14=0x0, dmg=132) and every hit after it reads sp14=0xFFFFFFFF, dmg=0,
+     * across eight separate swings. Against the PLAYER sp10 is -1, so
+     * `sp14 |= sp10` sets every bit, and neither clearing branch below ever runs
+     * for this attacker: it registers only inside its attack state, so no call
+     * lands on an anim with the active bit low, and field_0 stays 1 once set, so
+     * the swing-start branch never fires either.
+     *
+     * A new swing is what actually matters, and the animation states it: either
+     * the status changed, or the clock restarted. Tracked in the struct's
+     * existing padding, so nothing grows. Within a swing the status holds and
+     * time only advances, so this cannot fire mid-swing -- the player's melee,
+     * which the existing path already handles correctly, is untouched. */
+    {
+        u8 animSt = (u8)modelAnim->status;
+        u8 animTm = (u8)FP_FROM(modelAnim->time, Q12_SHIFT);
+
+        if ((u8)chara->field_44.__pad_5[0] != animSt ||
+            (u8)chara->field_44.__pad_5[1] > animTm)
+        {
+            chara->field_44.field_8 = 0;
+        }
+
+        chara->field_44.__pad_5[0] = (s8)animSt;
+        chara->field_44.__pad_5[1] = (s8)animTm;
+    }
+#endif
+
     if (!(modelAnim->status & (1 << 0)))
     {
         chara->field_44.field_0 = 0;
@@ -815,13 +871,19 @@ s32 func_8008A3E0(s_SubCharacter* chara) // 0x8008A3E0
                  * in the swing the hit lands. (Using the partial sp28-var_s0_2
                  * here made a hit that landed at window-open — e.g. the 1st of the
                  * knife's two slashes — deal ~0 while the 2nd, landing later, hit.)
-                 * Player only — enemy attack balance is left as-is. */
-                if (chara == &g_SysWork.playerWork.player)
-                {
-                    sp5C = (var_s0_2 < sp2C) ? (sp2C - var_s0_2) / (var_a0 * 4) : 0;
-                }
-                else
-#endif
+                 * Applies to ENEMIES too, which it originally did not.
+                 * "Enemy balance left as-is" sounded conservative but it left
+                 * enemy blades with the identical defect: a Puppet Nurse knife
+                 * measured base=102400 arriving as dmg=132, because sp5C came
+                 * out around 5 -- one frame's sweep at PC frame rates -- and
+                 * D_800AD4C8[57].field_10 == 1 puts that attack in exactly the
+                 * class scaled by it (func_8008B714 multiplies by this when
+                 * field_10 == 1). Enemies whose attacks are not field_10 == 1
+                 * skip the multiply entirely, which is why only the nurse's
+                 * knife read as doing nothing while everything else hurt.
+                 * The grab drain is a separate path and was never affected. */
+                sp5C = (var_s0_2 < sp2C) ? (sp2C - var_s0_2) / (var_a0 * 4) : 0;
+#else
                 if (i < sp28)
                 {
                     sp5C = (sp28 - i) / (var_a0 * 4);
@@ -830,6 +892,7 @@ s32 func_8008A3E0(s_SubCharacter* chara) // 0x8008A3E0
                 {
                     sp5C = 0;
                 }
+#endif
             }
             else
             {
@@ -1370,6 +1433,16 @@ s32 func_8008B714(s_SubCharacter* attacker, s_SubCharacter* target, VECTOR3* arg
     s32         z2;
     s_800AD4C8* temp_fp;
 
+#ifdef SH_PC_PORT
+    /* Console NOCOLLIDE: attacks pass straight through. The ray/hit-volume
+     * queries already skip a phased character (they share
+     * Collision_CollidableCharasGet), so this covers whatever resolves to an
+     * attack without a ray -- grabs and proximity hits. 0 is "connected with
+     * nothing", which is what the caller at ~2353 tests. */
+    if (Pc_Pick_IsNoCollide(target))
+        return 0;
+#endif
+
     weaponAttack = (u8)attacker->field_44.field_2;
     temp_fp      = &D_800AD4C8[weaponAttack];
     offsetY       = temp_fp->field_10;
@@ -1658,6 +1731,24 @@ s32 func_8008B714(s_SubCharacter* attacker, s_SubCharacter* target, VECTOR3* arg
     /* [MELEEDMG] diagnostic: player melee hit on an enemy. base = table damage
      * (D_800AD4C8[weaponAttack].field_4); dmg = after the one-hit-per-swing guard.
      * base>0 with dmg==0 and alreadyHit=1 means the per-swing bitmask zeroed it. */
+    /* The same numbers for a hit ON the player. The nurse knife reaches here with
+     * a correct id (57/58) and a non-zero table damage (field_4 0x19/0x21), so if
+     * the player still takes nothing this says which step drops it -- and if the
+     * line never appears at all, the hit is not reaching this function and the
+     * fault is in detection, not damage. */
+    if (target == &g_SysWork.playerWork.player)
+    {
+        static int s_plrDmgLogs = 0;
+
+        if (s_plrDmgLogs < 40)
+        {
+            s_plrDmgLogs++;
+            SH_DBG("[PLRDMG] wa=%d base=%d dmg=%d sp14=0x%X sp10=0x%X alreadyHit=%d attacker=%d",
+                   weaponAttack, (int)var_s0, (int)damageAmount, (unsigned)sp14, (unsigned)sp10,
+                   (int)((sp14 & sp10) != 0), attacker->model.charaId);
+        }
+    }
+
     if (target != &g_SysWork.playerWork.player && (u8)weaponAttack < 30u)
         SH_DBG("[MELEEDMG] wa=%d base=%d dmg=%d sp14=0x%X sp10=0x%X alreadyHit=%d chara=%d\n",
                weaponAttack, (int)var_s0, (int)damageAmount, (unsigned)sp14, (unsigned)sp10,
@@ -1666,6 +1757,12 @@ s32 func_8008B714(s_SubCharacter* attacker, s_SubCharacter* target, VECTOR3* arg
 
     if (damageAmount != Q12(0.0f))
     {
+#ifdef SH_PC_PORT
+        {
+            extern s32 Pc_Rando_ScaleWeaponDamage(s32 damageAmount, int targetIsPlayer);
+            damageAmount = Pc_Rando_ScaleWeaponDamage(damageAmount, target == &g_SysWork.playerWork.player);
+        }
+#endif
         target->damage.amount += damageAmount;
     }
 
@@ -1811,6 +1908,10 @@ s32 func_8008B714(s_SubCharacter* attacker, s_SubCharacter* target, VECTOR3* arg
 
 s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg3) // 0x8008BF84
 {
+#ifdef SH_PC_PORT
+    q19_12           atkScale;
+    q19_12           tgtScale = Q12(1.0f);
+#endif
     s_SubCharacter*  chara1;
     s32              sp14;
     s32              sp18;
@@ -1896,6 +1997,17 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
     sp40 = 0;
 
     var_s7           = chara->field_44.field_48[0].vy;
+#ifdef SH_PC_PORT
+    /* Console SCALE: a resized attacker swings from where its model reaches,
+     * so the attack point offset and the box around it scale with it. */
+    atkScale = Pc_Pick_CollScale(chara);
+    if (atkScale != Q12(1.0f))
+    {
+        sp34   = Q12_MULT_PRECISE(sp34,   atkScale);
+        var_fp = Q12_MULT_PRECISE(var_fp, atkScale);
+        var_s7 = Q12_MULT_PRECISE(var_s7, atkScale);
+    }
+#endif
     D_800C4788[1].vy = var_s7;
 
     temp_t4          = Q12_MULT_PRECISE(sp34, cosAngle) - Q12_MULT_PRECISE(var_fp, sinAngle);
@@ -1936,6 +2048,14 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
     temp_v1   = *(u16*)&arg2->field_6;
     temp_a0_2 = *(u16*)&arg2->field_8;
     temp_a2   = *(u16*)&arg2->field_A;
+#ifdef SH_PC_PORT
+    if (atkScale != Q12(1.0f))
+    {
+        temp_v1   = Q12_MULT_PRECISE(temp_v1,   atkScale);
+        temp_a0_2 = Q12_MULT_PRECISE(temp_a0_2, atkScale);
+        temp_a2   = Q12_MULT_PRECISE(temp_a2,   atkScale);
+    }
+#endif
 
     var_v0    = (sp38 - sp44);
     temp_v0_7 = (sp3C - sp48);
@@ -1943,20 +2063,20 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
 
     if (var_v0 < temp_v1)
     {
-        sp38 += *(u16*)&arg2->field_6 >> 1;
-        sp44 -= *(u16*)&arg2->field_6 >> 1;
+        sp38 += temp_v1 >> 1;
+        sp44 -= temp_v1 >> 1;
     }
 
     if (temp_v0_7 < temp_a0_2)
     {
-        sp3C += *(u16*)&arg2->field_8 >> 1;
-        sp48 -= *(u16*)&arg2->field_8 >> 1;
+        sp3C += temp_a0_2 >> 1;
+        sp48 -= temp_a0_2 >> 1;
     }
 
     if (var_v0_6 < temp_a2)
     {
-        sp40 += *(u16*)&arg2->field_A >> 1;
-        sp4C -= *(u16*)&arg2->field_A >> 1;
+        sp40 += temp_a2 >> 1;
+        sp4C -= temp_a2 >> 1;
     }
 
     if (chara == &g_SysWork.playerWork.player)
@@ -2010,10 +2130,26 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
         D_800C47E8.vx = chara1->position.vx + chara1->collision.shapeOffsets.box.vx;
         D_800C47E8.vy = chara1->position.vy;
         D_800C47E8.vz = chara1->position.vz + chara1->collision.shapeOffsets.box.vz;
+#ifdef SH_PC_PORT
+        /* Reject range has to grow with whichever body got bigger, or the
+         * fine test below never runs for a scaled pair. */
+        tgtScale = Pc_Pick_CollScale(chara1);
+        {
+            q19_12 reach = (atkScale > tgtScale) ? atkScale : tgtScale;
+            if (reach < Q12(1.0f))
+                reach = Q12(1.0f);
+            if (Math_Distance2dGet(&chara->position, &D_800C47E8) >
+                Q12_MULT_PRECISE(Q12(3.0f), reach))
+            {
+                continue;
+            }
+        }
+#else
         if (Math_Distance2dGet(&chara->position, &D_800C47E8) > Q12(3.0f))
         {
             continue;
         }
+#endif
 
         temp_s1 = chara1->position.vx;
         var_v1  = chara1->position.vy;
@@ -2024,11 +2160,19 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
 
         temp_s1 += temp_s0;
 
+#ifdef SH_PC_PORT
+        var_v1  += Q12_MULT_PRECISE(chara1->collision.box.top, tgtScale);
+#else
         var_v1  += chara1->collision.box.top;
+#endif
         temp_s2 += temp_s3;
 
         D_800C47C8[1].vy = var_v1;
+#ifdef SH_PC_PORT
+        temp_s3          = Q12_MULT_PRECISE(chara1->collision.cylinder.field_2, tgtScale);
+#else
         temp_s3          = chara1->collision.cylinder.field_2;
+#endif
 
         angle1 = ratan2(temp_s1 - posX, temp_s2 - posZ);
         temp_v0_6 = Math_Sin(angle1);
@@ -2072,8 +2216,13 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
         temp_v0_8 = temp_t5 - coundZ;
 
         sp58    = chara1->position.vy;
+#ifdef SH_PC_PORT
+        temp_s6 = Q12_MULT_PRECISE(chara1->collision.box.height, tgtScale);
+        temp_s5 = Q12_MULT_PRECISE(chara1->collision.box.top,    tgtScale);
+#else
         temp_s6 = chara1->collision.box.height;
         temp_s5 = chara1->collision.box.top;
+#endif
 
         j   = sp58 - countY;
         temp_t2   = Q12_MULT_PRECISE(var_v1, cosAngle) - Q12_MULT_PRECISE(temp_v0_8, sinAngle);
@@ -2084,7 +2233,11 @@ s32 func_8008BF84(s_SubCharacter* chara, q19_12 angle, s_800AD4C8* arg2, s32 arg
             continue;
         }
 
+#ifdef SH_PC_PORT
+        temp_s3  = Q12_MULT_PRECISE(chara1->collision.cylinder.field_2, tgtScale);
+#else
         temp_s3  = chara1->collision.cylinder.field_2;
+#endif
         var_a1_2 = 0;
 
         if (temp_t2 < sp44)

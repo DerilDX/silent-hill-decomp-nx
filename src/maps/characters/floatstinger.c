@@ -166,6 +166,13 @@ void func_800D1968(s_SubCharacter* floatstinger) // 0x800D1968
         floatstingerProps.field_F8 += FP_FROM(floatstinger->damage.amount, Q12_SHIFT);
         floatstingerProps.field_FA += FP_FROM(floatstinger->damage.amount, Q12_SHIFT);
 
+#ifdef SH_PC_PORT
+        /* PSX bug: sp10 is never written, so the hit SFX's volume comes from
+         * stack garbage -- silent for most weapons, an irregular thud under the
+         * Hyper Blaster. The origin is ~158 m from this arena, which pins it to
+         * the silent case every weapon already hears. */
+        Math_Vector3Zero(&sp10);
+#endif
         Sfx_WithFlagsPlay(Sfx_Unk1570, &sp10, Q8(0.5f), SfxFlag_None);
 
         if (floatstinger->health == Q12(0.0f) ||
@@ -200,23 +207,6 @@ void func_800D1968(s_SubCharacter* floatstinger) // 0x800D1968
 
 void Floatstinger_ControlUpdate(s_SubCharacter* floatstinger) // 0x800D1B98
 {
-#ifdef SH_PC_PORT
-    /* [MOTH] wing/anim triage: 1/sec state dump. Wings move two ways —
-     * keyframe playback (anim.status loops) and the procedural stroke
-     * (states 2<->3 writing D_800DB8A8 from phase D_800D7858). This names
-     * which one is idle when the wings look frozen. */
-    {
-        static s32 s_lastLog = -1000;
-        if (g_TickCount - s_lastLog > 60)
-        {
-            s_lastLog = g_TickCount;
-            SH_DBG("[MOTH] ctrl=%d step=%d anim=%d kf=%d phase=%d wing0=%d hp=%d",
-                   (int)floatstinger->model.controlState, (int)floatstinger->model.stateStep,
-                   (int)floatstinger->model.anim.status, (int)floatstinger->model.anim.keyframeIdx,
-                   (int)D_800D7858, (int)D_800DB8A8[4], (int)floatstinger->health);
-        }
-    }
-#endif
 
     if (floatstinger->model.anim.status != ANIM_STATUS(FloatstingerAnim_1, true))
     {

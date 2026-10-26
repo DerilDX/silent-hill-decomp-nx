@@ -110,6 +110,34 @@ void ShDiscordIpc_Close(void)
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#else
+#include <sys/syscall.h>
+#endif
+
+/* Never call close() here. PsyCross's libapi.c defines the PSX memory-card
+ * open/close/read/write under those exact names, hidden so they cannot
+ * interpose other libraries -- but every close() linked into the SAME image
+ * (the Android libmain.so, the iOS app, the Linux exe) still binds to it, and
+ * it returns -1 for any handle outside its 16-slot table without touching the
+ * real descriptor. Each connect attempt below opens one socket per candidate
+ * path (30+), so every ten seconds without Discord leaked 30 descriptors and
+ * an Android 8 process hit its 1024 limit at ~318 s: new window buffers could
+ * not be allocated, eglSwapBuffers failed with EGL_BAD_SURFACE and the screen
+ * froze on the last frame while the game ran on. dlsym cannot see hidden
+ * symbols, and the raw syscall bypasses symbol binding entirely. */
+static int ipc_close(int fd)
+{
+#if defined(__APPLE__)
+    static int (*s_realClose)(int) = NULL;
+    if (s_realClose == NULL)
+        s_realClose = (int (*)(int))dlsym(RTLD_DEFAULT, "close");
+    return s_realClose != NULL ? s_realClose(fd) : -1;
+#else
+    return (int)syscall(SYS_close, fd);
+#endif
+}
 
 int ShDiscordIpc_Pid(void)
 {
@@ -135,7 +163,7 @@ static int ipc_try(const char* dir, int idx)
         return 0;
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
-        close(fd);
+        ipc_close(fd);
         return 0;
     }
     s_sock = fd;
@@ -218,7 +246,7 @@ void ShDiscordIpc_Close(void)
 {
     if (s_sock >= 0)
     {
-        close(s_sock);
+        ipc_close(s_sock);
         s_sock = -1;
     }
 }

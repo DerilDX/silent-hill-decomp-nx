@@ -1,4 +1,7 @@
 #include "game.h"
+#ifdef SH_PC_PORT
+#include "pc_pick.h"
+#endif
 #include "inline_no_dmpsx.h"
 
 #include <psyq/gtemac.h>
@@ -9,6 +12,9 @@
 #include "bodyprog/collision/collision.h"
 #ifdef SH_PC_PORT
 #include "sh_log.h"
+#ifdef SH_PC_PORT
+#include <SDL_timer.h>
+#endif
 #endif
 #include "bodyprog/math/math.h"
 #include "bodyprog/item_screens.h"
@@ -509,6 +515,23 @@ bool Collision_CharaCollisionSetup(s_CollisionResult* collResult, const VECTOR3*
     cylinder.radius         = chara->collision.cylinder.radius;
     cylinder.collisionState = chara->collision.state;
 
+#ifdef SH_PC_PORT
+    /* Console SCALE: a resized character is blocked by walls at its own size.
+     * Local query only -- the stored shape is untouched. MoveScale, not
+     * CollScale: this is the cylinder that decides how a body fits through the
+     * world, and the player is held at 1.0 there so doors and corridors keep
+     * working. */
+    {
+        q19_12 cs = Pc_Pick_MoveScale(chara);
+        if (cs != Q12(1.0f))
+        {
+            cylinder.top    = (s32)(((s64)cylinder.top    * cs) >> 12);
+            cylinder.bottom = (s32)(((s64)cylinder.bottom * cs) >> 12);
+            cylinder.radius = (s32)(((s64)cylinder.radius * cs) >> 12);
+        }
+    }
+#endif
+
     offsetCpy = *moveOffset;
 
     switch (chara->model.charaId)
@@ -532,9 +555,24 @@ bool Collision_CharaCollisionSetup(s_CollisionResult* collResult, const VECTOR3*
      * counts would be read uninitialized. Hoist the calls into locals first. */
     s_IpdCollisionData** _collDataPtrs = Ipd_ActiveChunksCollisionDataGet(&collDataIdx);
     s_SubCharacter**     _charas       = Collision_CollidableCharasGet(&charaCount, chara, true);
-    return func_8006A4A8(collResult, &offsetCpy, &cylinder, cond,
-                         _collDataPtrs, collDataIdx, NULL, 0,
-                         _charas, charaCount);
+    {
+        s32 result = func_8006A4A8(collResult, &offsetCpy, &cylinder, cond,
+                                   _collDataPtrs, collDataIdx, NULL, 0,
+                                   _charas, charaCount);
+
+        /* Console NOCOLLIDE: hand back the movement that was actually asked for,
+         * so no wall pushes it back. The query still RAN, so groundHeight, tilt,
+         * ground type and the ceiling are the real surveyed values and the ground
+         * keeps working -- only the horizontal block is dropped. vy is left as
+         * the query produced it, which is what carries the ground follow. */
+        if (Pc_Pick_IsNoCollide(chara))
+        {
+            collResult->offset.vx = moveOffset->vx;
+            collResult->offset.vz = moveOffset->vz;
+        }
+
+        return result;
+    }
 #else
     return func_8006A4A8(collResult, &offsetCpy, &cylinder, cond,
                          Ipd_ActiveChunksCollisionDataGet(&collDataIdx), collDataIdx, NULL, 0,
@@ -560,6 +598,21 @@ s_SubCharacter** Collision_CollidableCharasGet(s32* collCharaCount, const s_SubC
     static s_SubCharacter*  collCharas[NPC_COUNT_MAX + 1]; /** Enough for all NPCs and player. */
     static s_SubCharacter** curCollChara;                  /** Array of active characters. */
 
+    /* Console NOCOLLIDE: phase a character by treating it exactly as the game's
+     * own CharaCollisionState_Ignore, which is already threaded through every
+     * consumer of this list -- chara-vs-chara movement, the slow-down pass and
+     * the ray/hit-volume queries in ray.c. Gating here rather than writing
+     * collision.state is deliberate: that field is a 4-bit bitfield rewritten
+     * every frame by each enemy's AI and by the player, so a stored value would
+     * be clobbered within a frame. Both directions are covered -- the early-out
+     * below leaves the phased character colliding with nobody, and the skips in
+     * the collection loops leave nobody colliding with it. */
+    if (excludedChara != NULL && Pc_Pick_IsNoCollide(excludedChara))
+    {
+        *collCharaCount = 0;
+        return &collCharas;
+    }
+
     // Filter invalid case.
     if (excludedChara != NULL &&
         (excludedChara->model.charaId == Chara_None ||
@@ -576,7 +629,7 @@ s_SubCharacter** Collision_CollidableCharasGet(s32* collCharaCount, const s_SubC
     // Collect collidable NPCs.
     for (curChara = &g_SysWork.npcs[0]; curChara < &g_SysWork.npcs[ARRAY_SIZE(g_SysWork.npcs)]; curChara++)
     {
-        if (curChara->model.charaId != Chara_None)
+        if (curChara->model.charaId != Chara_None && !Pc_Pick_IsNoCollide(curChara))
         {
             if (curChara->collision.state != CharaCollisionState_Ignore &&
                 (curChara->collision.state != CharaCollisionState_Player || includePlayer != true) &&
@@ -595,7 +648,7 @@ s_SubCharacter** Collision_CollidableCharasGet(s32* collCharaCount, const s_SubC
 
     // Collect collidable player.
     curChara = &g_SysWork.playerWork.player;
-    if (curChara->model.charaId != Chara_None)
+    if (curChara->model.charaId != Chara_None && !Pc_Pick_IsNoCollide(curChara))
     {
         if (curChara->collision.state != CharaCollisionState_Ignore &&
             (curChara->collision.state != CharaCollisionState_Player || includePlayer != true) &&
@@ -808,30 +861,14 @@ bool func_8006A4A8(s_CollisionResult* collResult, VECTOR3* moveOffset, const s_C
          * distance, rad = body radius, frac = swept crossing (Q12, kind 1).
          * kind 3=obstacle: a = obstacle XZ, b = (obstY, obstRadius), rad = body+obst
          * reach, dist = center distance, frac = swept crossing. */
-        {
-            s32 _wpdx = cylinder->position.vx - g_SysWork.playerWork.player.position.vx;
-            s32 _wpdz = cylinder->position.vz - g_SysWork.playerWork.player.position.vz;
-            static s32 s_lastStopLog = -1000;
-            if (g_WallStopDbg.active && (g_TickCount - s_lastStopLog) > 8 &&
-                ABS(_wpdx) < Q12(4.0f) && ABS(_wpdz) < Q12(4.0f))
-            {
-                s_lastStopLog = g_TickCount;
-                SH_DBG("[WALLSTOP] kind=%d sub=%d a=(%d,%d) b=(%d,%d) rad=%d dist=%d frac=%d sweepDist=%d spd=%d world=(%d,%d) head=%d",
-                       g_WallStopDbg.kind, g_WallStopDbg.sub,
-                       g_WallStopDbg.ax, g_WallStopDbg.az, g_WallStopDbg.bx, g_WallStopDbg.bz,
-                       g_WallStopDbg.rad, g_WallStopDbg.dist, g_WallStopDbg.frac,
-                       (int)state.charaState.distance,
-                       (int)g_SysWork.playerWork.player.moveSpeed,
-                       (int)g_SysWork.playerWork.player.position.vx, (int)g_SysWork.playerWork.player.position.vz,
-                       (int)g_SysWork.playerWork.player.rotation.vy);
-                SH_DBG("[WALLSTOP]   off=(%d,%d) full=(%d,%d) wrap=%d cellWH=(%d,%d) fall=%d hp=%d",
-                       g_WallStopDbg.offx, g_WallStopDbg.offz, g_WallStopDbg.fullx, g_WallStopDbg.fullz,
-                       (g_WallStopDbg.fullx != g_WallStopDbg.offx) || (g_WallStopDbg.fullz != g_WallStopDbg.offz),
-                       g_WallStopDbg.cellw, g_WallStopDbg.cellh,
-                       (int)g_SysWork.playerWork.player.fallSpeed,
-                       (int)g_SysWork.playerWork.player.health);
-            }
-        }
+        /* [WALLSTOP] logging REMOVED. It ran per collision test and its
+         * throttle counted GAME ticks, which stop advancing while the console
+         * or quick options freezes the game -- so while a panel was open it
+         * logged unthrottled at disk speed and stalled whole frames for
+         * seconds. It was 44% of every line in a normal session's log. The
+         * g_WallStopDbg capture above is kept for the collision visualizer,
+         * which reads it in memory and costs nothing. Do not reintroduce
+         * per-frame logging here. */
 
         /* [WALL-HIT] (#42 invisible walls): on cylinder contact, name the
          * face — subcell index, its EVENT CHANNEL vs the active trigger
@@ -860,6 +897,24 @@ bool func_8006A4A8(s_CollisionResult* collResult, VECTOR3* moveOffset, const s_C
                     s32 chan = (sc->field_0_14 * 4) | sc->field_2_14;
                     s32 s0   = state.point.field_C.cellSurfaces.surfaceIdx0;
                     s32 s1   = state.point.field_C.cellSurfaces.surfaceIdx1;
+                    /* Once per face, not once per 15 ticks of contact: a boss
+                     * pinning Harry to one wall wrote three lines four times a
+                     * second for the whole fight (2841 lines in one log). A new
+                     * face logs at once; the same face again after 30 s. */
+                    static const s_IpdCollisionData* s_lastWallCd  = NULL;
+                    static s32                       s_lastWallKey = -1;
+                    static Uint32                    s_lastWallMs  = 0;
+                    const s32                        wallKey       = (sci << 16) | ((s0 & 0xFF) << 8) | (s1 & 0xFF);
+                    const Uint32                     wallNowMs     = SDL_GetTicks();
+
+                    if (cd == s_lastWallCd && wallKey == s_lastWallKey &&
+                        (wallNowMs - s_lastWallMs) < 30000u)
+                    {
+                        goto pc_wallhit_skip;
+                    }
+                    s_lastWallCd  = cd;
+                    s_lastWallKey = wallKey;
+                    s_lastWallMs  = wallNowMs;
 
                     s_lastWallLog = g_TickCount;
                     SH_DBG("[WALL-HIT] subcell=%d chan=%d flags=0x%04X s0=%d(t%d d%d) s1=%d(t%d d%d) gt=%d dist=%d rad=%d",
@@ -899,6 +954,7 @@ bool func_8006A4A8(s_CollisionResult* collResult, VECTOR3* moveOffset, const s_C
                            (int)state.charaState.distance,
                            (int)state.point.splitVertex0.vx, (int)state.point.splitVertex0.vz,
                            (int)state.point.splitVertex1.vx, (int)state.point.splitVertex1.vz);
+                pc_wallhit_skip:;
                 }
             }
         }
@@ -974,6 +1030,9 @@ void Collision_TargetCharaCollidingSlowDown(VECTOR3* offset, const s_CollisionCy
     q19_12          otherCharaBottom;
     q19_12          otherCharaTop;
     s_SubCharacter* curChara;
+#ifdef SH_PC_PORT
+    q19_12          charaScale;
+#endif
 
     offsetAlpha  = Q12(1.0f);
     headingAngle = ratan2(offset->vx, offset->vz);
@@ -994,6 +1053,14 @@ void Collision_TargetCharaCollidingSlowDown(VECTOR3* offset, const s_CollisionCy
         // Check if cylinders collide on vertical axis using box top and bottom.
         curCharaTop      = curChara->collision.box.top    + curChara->position.vy;
         curCharaBottom   = curChara->collision.box.bottom + curChara->position.vy;
+#ifdef SH_PC_PORT
+        charaScale = Pc_Pick_CollScale(curChara); /* 1.0 unless console SCALE is on */
+        if (charaScale != Q12(1.0f))
+        {
+            curCharaTop    = Pc_Pick_ScaleAbout(curChara->position.vy, curCharaTop,    charaScale);
+            curCharaBottom = Pc_Pick_ScaleAbout(curChara->position.vy, curCharaBottom, charaScale);
+        }
+#endif
         otherCharaTop    = cylinder->top                  + cylinder->position.vy;
         otherCharaBottom = cylinder->bottom               + cylinder->position.vy;
         if (curCharaTop    > otherCharaBottom ||
@@ -1007,7 +1074,14 @@ void Collision_TargetCharaCollidingSlowDown(VECTOR3* offset, const s_CollisionCy
         
         // Check if cylinders collide on XZ plane.
         dist = Vc_VectorMagnitudeCalc(cylinderOffsetX, Q12(0.0f), cylinderOffsetZ);
+#ifdef SH_PC_PORT
+        if (((((charaScale != Q12(1.0f))
+               ? (s32)(((s64)curChara->collision.cylinder.radius * charaScale) >> 12)
+               : curChara->collision.cylinder.radius) +
+              cylinder->radius) + INTERSECTION_BUFFER) < dist)
+#else
         if (((curChara->collision.cylinder.radius + cylinder->radius) + INTERSECTION_BUFFER) < dist)
+#endif
         {
             continue;
         }

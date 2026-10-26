@@ -2,10 +2,39 @@
 #include "inline_no_dmpsx.h"
 #ifdef SH_PC_PORT
 #include "pc_config.h"
+#include "pc_skin_chara.h"
+/* The pixel aspect the renderer is really using (PsyX_render.cpp). NOT
+ * GR_LivePixelAspect(), which display_aspect = crt does not read. */
+extern float GR_LivePixelAspect(void);
 /* PsyCross runtime horizontal PAR. main_pc.c bakes this to 15/14 (320x224 -> 4:3)
  * at startup; the per-poly cull bounds here must track the same factor PsyCross's
  * Hor+ ortho uses. */
 extern float g_PsxPixelAspect;
+extern float g_PsxWorldHScale;
+
+/* Half-width for full-screen overlay quads (screenBrightness, fog colour).
+ * These used psxAspect=320/240 with no PAR and no hfov, giving halfW ~223 at
+ * 16:9 while the visible half is ~250 -- the additive brightness quad ended in
+ * plain sight as hard-edged dark side bands (user-measured cliff at +/-223.8).
+ * Same bound as the mesh cull / halo border, plus the PSX +10 edge pad. */
+static s16 Pc_OverlayQuadHalfH(void)
+{
+    extern float g_PsxWorldVScale, g_PsxWorldVShift;
+    const float vs = (g_PsxWorldVScale > 1.0f) ? g_PsxWorldVScale : 1.0f;
+    const float sh = (g_PsxWorldVShift < 0.0f) ? -g_PsxWorldVShift : g_PsxWorldVShift;
+    return (s16)(112.0f * vs + sh + 8.0f);
+}
+
+static s16 Pc_OverlayQuadHalfW(void)
+{
+    const float hs = (g_PsxWorldHScale > 0.01f) ? g_PsxWorldHScale : 1.0f;
+    float halfW = (g_PcConfig.windowHeight > 0)
+        ? ((float)g_GameWork.gsScreenHeight * (float)g_PcConfig.windowWidth /
+           (2.0f * (float)g_PcConfig.windowHeight)) * GR_LivePixelAspect() / hs
+        : 160.0f;
+    if (halfW < 160.0f) halfW = 160.0f;
+    return (s16)(halfW + 10.0f);
+}
 #endif
 
 #include <psyq/gtemac.h>
@@ -22,14 +51,25 @@ extern float g_PsxPixelAspect;
 #include "main/rng.h"
 #ifdef SH_PC_PORT
 #include <stdio.h>
+#include <stdlib.h>
 #include "sh_log.h"
+#include <SDL_timer.h>
 #include "pc_config.h"
 #include "hires_override.h"
 #include "pc_wide_lm.h"
+#include "pc_pplit.h"
+
+/* Called above their definitions. Without a prototype in scope Clang
+ * synthesises `int f()` at the call site and then rejects the real
+ * definition as a conflicting type; GCC only warns. */
+void func_80057228(MATRIX* mat, s32 alpha, SVECTOR* arg2, VECTOR3* arg3);
 /* When culling is disabled, ignore fog-based draw distance clamp.
  * PSX uses fogFarDistance as a draw distance optimization (don't render
  * what fog fully hides). On PC we want everything to render and let
- * fog visually obscure it instead of culling geometry. */
+ * fog visually obscure it instead of culling geometry. The shader fog now
+ * dissolves fully-fogged geometry to exactly the void colour (PsyCross
+ * GPU_DITHERING_NO_VCOLOR fades dither/quantize with fog), so drawing past
+ * the fog plane no longer leaves a shade-off band -- no distance cull needed. */
 #define FOG_FAR_DIST() (g_PcConfig.disableCulling ? 0x7FFFFFFF : g_WorldEnvWork.fog.farDistance)
 
 /* Per-poly far drop. The base 0x79C shifted by (shift+2) is ~61u, and it -- not
@@ -47,15 +87,64 @@ extern float g_PsxPixelAspect;
  * This prevents double-fogging and seam lines at face boundaries. */
 #define VTXCOL_LDDP(dp) gte_lddp(0)
 
+/* Gfx_MeshDraw's per-vertex colour ops, as closed forms of the emulated
+ * arithmetic (PsyX_GTE.cpp DPCL/DPCS with sf=1, lm=0). Each vertex otherwise
+ * costs ~6 cross-TU GTE calls plus an emulated op. The stored words are
+ * bit-identical; only the GTE registers the ops would leave behind differ, and
+ * every later GTE op loads its own inputs. */
+
+/* DPCL with IR0 = 0 (VTXCOL_LDDP) and IR1-3 = shade << 5. */
+static inline u32 Pc_MeshDpclNoDepth(const CVECTOR* c, s32 shade)
+{
+    s32 r = (c->r * shade) >> 7;
+    s32 g = (c->g * shade) >> 7;
+    s32 b = (c->b * shade) >> 7;
+
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (u32)r | ((u32)g << 8) | ((u32)b << 16) | ((u32)c->cd << 24);
+}
+
+static inline s32 Pc_DpcsChannel(s32 c, s32 fc, s32 ir0)
+{
+    s32 t   = (s32)((((s64)fc << 12) - ((s64)c << 16)) >> 12);
+    s32 mac;
+
+    if (t > 0x7FFF) t = 0x7FFF;
+    if (t < -0x8000) t = -0x8000;
+    mac = (s32)((s64)((c << 16) + ir0 * t) >> 12) >> 4;
+    if (mac < 0) mac = 0;
+    if (mac > 255) mac = 255;
+    return mac;
+}
+
+/* DPCS of colour c toward far colour fc by depth cue ir0. */
+static inline u32 Pc_MeshDpcs(const CVECTOR* c, s32 ir0, const s32* fc)
+{
+    return (u32)Pc_DpcsChannel(c->r, fc[0], ir0) |
+           ((u32)Pc_DpcsChannel(c->g, fc[1], ir0) << 8) |
+           ((u32)Pc_DpcsChannel(c->b, fc[2], ir0) << 16) |
+           ((u32)c->cd << 24);
+}
+
 /* Clamp a polygon's OT depth so the bucket index (depth>>shift>>2) can't overrun
  * org[ORDERING_TABLE_SIZE]; the emulated GTE can return an SZ outside the range
  * real hardware's OTZ register saturates to, and an out-of-range addPrim writes
  * the packet pointer into adjacent memory -> split-pointer cutscene crashes. */
 #ifdef SH_PC_PORT
+/* The drawers add at tag[depth >> shift >> 2], and func_80057090 hands them a
+ * tag that already starts func_800571D0(field_B_1) buckets in (0..99). The
+ * clamp has to leave room for that base, or a clamped far poly lands up to 99
+ * entries past org[] -- into the other frame's OT or whatever follows it. The
+ * vanilla draw distance never got there; whole-map mode puts most of the town
+ * there, which is where its distant road and buildings were going. */
+static s32 s_pcOtTagBase = 0;
+#define SH_OT_LAST_DEPTH(shift) ((ORDERING_TABLE_SIZE - 1 - s_pcOtTagBase) << ((shift) + 2))
 #define SH_CLAMP_OT_DEPTH(depth, shift)                                         \
     do {                                                                        \
-        if ((((depth) >> (shift)) >> 2) >= ORDERING_TABLE_SIZE)                 \
-            (depth) = (ORDERING_TABLE_SIZE - 1) << ((shift) + 2);               \
+        if ((((depth) >> (shift)) >> 2) >= ORDERING_TABLE_SIZE - s_pcOtTagBase) \
+            (depth) = SH_OT_LAST_DEPTH(shift);                                  \
     } while (0)
 
 /* Whole-town mode (Pc_WholeMapDrawActive): the visible-square radius is set
@@ -79,19 +168,143 @@ extern float g_PsxPixelAspect;
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift)                                  \
     do {                                                                        \
         if ((depth) < 0 && Pc_WholeMapDrawActive())                             \
-            (depth) = (ORDERING_TABLE_SIZE - 1) << ((shift) + 2);               \
+            (depth) = SH_OT_LAST_DEPTH(shift);                                  \
     } while (0)
 /* True iff this poly was depth-rescued/clamped into the last OT bucket — the
  * far band the whole-map mode adds. Gates the far-only render tweaks below so
  * the near scene keeps stock PSX behavior exactly. Depth compare FIRST: this
  * runs per poly in the drawers, and the gate is a cross-TU call. */
 #define SH_WHOLEMAP_FAR_POLY(depth, shift)                                      \
-    ((depth) == ((ORDERING_TABLE_SIZE - 1) << ((shift) + 2)) && Pc_WholeMapDrawActive())
+    ((depth) == SH_OT_LAST_DEPTH(shift) && Pc_WholeMapDrawActive())
+extern int g_PsxWholeMapFar;
+extern int g_PsxUsePgxp;
+/* Backface on the PGXP float projection whenever PGXP draws the result. The
+ * integer test sees a distant ground tile under a pixel tall as zero area and
+ * drops it; with integer coords its neighbours snap over the gap, but PGXP
+ * draws them where they really are, so the dropped tile was a sky-coloured
+ * hole -- rows of them in the ground from ~50u out, PGXP only. PGXP off falls
+ * back to the integer sign inside PsyX_PGXP_QuadBackface: same test as stock. */
+#define SH_PRECISE_NCLIP(depth, shift) (g_PsxUsePgxp || SH_WHOLEMAP_FAR_POLY(depth, shift))
+/* Lit world models never report their SZ, so the depth capture hands a far
+ * poly the last OT bucket's seed and it paints over the depth-tested town.
+ * Only inside the whole-map chunk loop: characters drawn by the same code
+ * keep stock depth. */
+/* Whole-map far list. The OT spans ~64u; everything past it was clamped into
+ * one bucket, where order is submission order instead of distance. The streets
+ * are layered coplanar surfaces (a large base under the asphalt tiles) that the
+ * PSX keeps apart by their bucket depth, so in that bucket the base painted over
+ * the asphalt: a ring of broken road from the old draw distance outward. Far
+ * prims go into this depth-sorted list instead, spliced into the last bucket
+ * while the whole-map chunk loop runs. 4096 slots of 64 SZ (0.25u) from 64u
+ * out to ~1000u. */
+#define PC_FAR_OT_SIZE  4096
+#define PC_FAR_OT_SHIFT 6
+#define PC_FAR_OT_BASE  0x4000
+static OT_TAG s_pcFarOt[PC_FAR_OT_SIZE];
+static int    s_pcFarOtActive = 0;
+extern int g_PsxWholeMapChunkSz;
+
+void Pc_FarOt_GetBounds(uintptr_t* lo, uintptr_t* hi)
+{
+    *lo = (uintptr_t)&s_pcFarOt[0];
+    *hi = (uintptr_t)&s_pcFarOt[PC_FAR_OT_SIZE];
+}
+
+void Pc_FarOtBegin(GsOT* ot)
+{
+    extern uintptr_t g_PsxOtNoBucketLo, g_PsxOtNoBucketHi;
+    OT_TAG* last = (OT_TAG*)&ot->org[ORDERING_TABLE_SIZE - 1];
+    s32     i;
+
+    setaddr(&s_pcFarOt[0], getaddr(last));
+    setlen(&s_pcFarOt[0], 0);
+    for (i = 1; i < PC_FAR_OT_SIZE; i++)
+    {
+        setaddr(&s_pcFarOt[i], &s_pcFarOt[i - 1]);
+        setlen(&s_pcFarOt[i], 0);
+    }
+    setaddr(last, &s_pcFarOt[PC_FAR_OT_SIZE - 1]);
+    Pc_FarOt_GetBounds(&g_PsxOtNoBucketLo, &g_PsxOtNoBucketHi);
+    s_pcFarOtActive = 1;
+}
+
+void Pc_FarOtEnd(void)
+{
+    s_pcFarOtActive = 0;
+}
+
+static u32 Pc_FarKey(u16 z0, u16 z1, u16 z2, u16 z3)
+{
+    u32 k = z0;
+
+    if (z1 > k) k = z1;
+    if (z2 > k) k = z2;
+    if (z3 > k) k = z3;
+    /* 0xFFFF is the SZ clamp (~256u): past it only the chunk's true depth is known. */
+    if (k >= 0xFFFF && g_PsxWholeMapChunkSz > 0xFFFF)
+        k = (u32)g_PsxWholeMapChunkSz;
+    return k;
+}
+
+static void Pc_FarOtAdd(void* prim, u32 key)
+{
+    s32 idx = (key > PC_FAR_OT_BASE) ? (s32)((key - PC_FAR_OT_BASE) >> PC_FAR_OT_SHIFT) : 0;
+
+    if (idx >= PC_FAR_OT_SIZE)
+        idx = PC_FAR_OT_SIZE - 1;
+    addPrim(&s_pcFarOt[idx], prim);
+}
+
+#define SH_ADDPRIM_MESH(tag, sd, shift, prim)                                    \
+    do {                                                                        \
+        if (g_PsxActorDepth)                                                    \
+            PsyX_SetNextPrimSzActor((sd)->field_18C[(sd)->field_380.s_0.field_10], \
+                (sd)->field_18C[(sd)->field_380.s_0.field_11],                  \
+                (sd)->field_18C[(sd)->field_380.s_0.field_12],                  \
+                (sd)->field_18C[(sd)->field_380.s_0.field_13 == 0xFF            \
+                    ? (sd)->field_380.s_0.field_12 : (sd)->field_380.s_0.field_13], \
+                (sd)->field_380.s_0.field_13 == 0xFF ? 3 : 4);                  \
+        if (s_pcFarOtActive && (sd)->field_380.s_0.field_18 == SH_OT_LAST_DEPTH(shift)) \
+            Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->field_18C[(sd)->field_380.s_0.field_10], \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_11],              \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_12],              \
+                (u16)(sd)->field_18C[(sd)->field_380.s_0.field_13 == 0xFF        \
+                    ? (sd)->field_380.s_0.field_12 : (sd)->field_380.s_0.field_13])); \
+        else                                                                    \
+            addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim)); \
+    } while (0)
+extern int  g_PsxActorDepth;
+extern void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, unsigned short s2,
+                                    unsigned short s3, int n);
+/* A triangle repeats its last corner (i2 == i3). */
+#define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3)               \
+    do {                                                                        \
+        if (g_PsxActorDepth)                                                    \
+            PsyX_SetNextPrimSzActor((sd)->screenZ_168[i0], (sd)->screenZ_168[i1], \
+                                    (sd)->screenZ_168[i2], (sd)->screenZ_168[i3], \
+                                    (i2) == (i3) ? 3 : 4);                      \
+        if (s_pcFarOtActive && (depth) == SH_OT_LAST_DEPTH(shift))              \
+            Pc_FarOtAdd((prim), Pc_FarKey((u16)(sd)->screenZ_168[i0], (u16)(sd)->screenZ_168[i1], \
+                                          (u16)(sd)->screenZ_168[i2], (u16)(sd)->screenZ_168[i3])); \
+        else                                                                    \
+            addPrim(&(ot)[((depth) >> (shift)) >> 2], (prim));                  \
+    } while (0)
+#define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift)                     \
+    do {                                                                        \
+        if (g_PsxWholeMapFar && SH_WHOLEMAP_FAR_POLY(depth, shift))             \
+            PsyX_SetNextPrimSz((u16)(sd)->screenZ_168[i0], (u16)(sd)->screenZ_168[i1], \
+                               (u16)(sd)->screenZ_168[i2], (u16)(sd)->screenZ_168[i3], \
+                               (shift));                                        \
+    } while (0)
 #else
 #define SH_CLAMP_OT_DEPTH(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FARCAP(cap) ((void)0)
 #define SH_WHOLEMAP_DEPTH_RESCUE(depth, shift) ((void)0)
 #define SH_WHOLEMAP_FAR_POLY(depth, shift) (0)
+#define SH_PRECISE_NCLIP(depth, shift) (0)
+#define SH_WHOLEMAP_LIT_SZ(sd, i0, i1, i2, i3, depth, shift) ((void)0)
+#define SH_ADDPRIM_MESH(tag, sd, shift, prim) addPrim(&(tag)[((sd)->field_380.s_0.field_18 >> (shift)) >> 2], (prim))
+#define SH_ADDPRIM_LIT(ot, depth, shift, prim, sd, i0, i1, i2, i3) addPrim(&(ot)[((depth) >> (shift)) >> 2], (prim))
 #endif
 
 #ifdef SH_PC_PORT
@@ -101,16 +314,24 @@ extern float g_PsxPixelAspect;
  * MakeVertex resolves the prim field BY ADDRESS at draw. Address-exact and
  * deterministic — no slot/ring/closest matching. No-op when PGXP is off or the
  * source slot is untracked (-> clean affine). */
+/* Only PGXP or the per-pixel flashlight ever store shadow entries, so with
+ * both off every copy is a lookup that misses; skip the calls entirely. */
+extern int g_PsxUsePgxp;
+extern int g_PsyX_UsePerPixelFlashlight;
 #define SH_PGXP_PROP4(sd, p, i0, i1, i2, i3) do {        \
+    if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) {  \
     Shadow_Copy(&(p)->x0, &(sd)->screenXy_0[(i0)]);      \
     Shadow_Copy(&(p)->x1, &(sd)->screenXy_0[(i1)]);      \
     Shadow_Copy(&(p)->x2, &(sd)->screenXy_0[(i2)]);      \
     Shadow_Copy(&(p)->x3, &(sd)->screenXy_0[(i3)]);      \
+    }                                                    \
 } while (0)
 #define SH_PGXP_PROP3(sd, p, i0, i1, i2) do {            \
+    if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) {  \
     Shadow_Copy(&(p)->x0, &(sd)->screenXy_0[(i0)]);      \
     Shadow_Copy(&(p)->x1, &(sd)->screenXy_0[(i1)]);      \
     Shadow_Copy(&(p)->x2, &(sd)->screenXy_0[(i2)]);      \
+    }                                                    \
 } while (0)
 #endif
 
@@ -121,38 +342,106 @@ extern float g_PsxPixelAspect;
  * in the otherwise-unused pad2 texcoord short instead (PsyCross's GT4
  * parser reads it into v0's fog). Without this, v0 borrowed v1's fog,
  * giving every floor quad one wrong corner -> visible grid seams. */
+/* Fog 0..127 conversions round rather than truncate. The ramp saturates at
+ * 255 (func_80055A50 returns 255 past its range), so truncation produced 126,
+ * not 127: distant geometry kept ~0.8% of its own colour forever and read as a
+ * faint shape "one shade off" the fog instead of dissolving into it. PSX culled
+ * that geometry at the fog far distance so it never showed; the port draws
+ * further, which is what exposed it. Rounding makes the far end exactly full
+ * fog, so distant objects fade out completely. */
 #define PC_FACE_FOG_VERTS(sd) do { \
     s32 _fa; \
     _fa = (sd)->field_252[(sd)->field_380.s_0.field_10] * 16 + (sd)->field_380.s_0.field_4; \
     if (_fa > 0x1000) _fa = 0x1000; if (_fa < 0) _fa = 0; \
-    poly3->pad2 = (u8)((_fa * 127) >> 12); \
+    poly3->pad2 = (u8)((_fa * 127 + 2048) >> 12); \
     _fa = (sd)->field_252[(sd)->field_380.s_0.field_11] * 16 + (sd)->field_380.s_0.field_4; \
     if (_fa > 0x1000) _fa = 0x1000; if (_fa < 0) _fa = 0; \
-    poly3->p1 = (u8)((_fa * 127) >> 12); \
+    poly3->p1 = (u8)((_fa * 127 + 2048) >> 12); \
     _fa = (sd)->field_252[(sd)->field_380.s_0.field_12] * 16 + (sd)->field_380.s_0.field_4; \
     if (_fa > 0x1000) _fa = 0x1000; if (_fa < 0) _fa = 0; \
-    poly3->p2 = (u8)((_fa * 127) >> 12); \
+    poly3->p2 = (u8)((_fa * 127 + 2048) >> 12); \
     _fa = (sd)->field_252[(sd)->field_380.s_0.field_13] * 16 + (sd)->field_380.s_0.field_4; \
     if (_fa > 0x1000) _fa = 0x1000; if (_fa < 0) _fa = 0; \
-    poly3->p3 = (u8)((_fa * 127) >> 12); \
+    poly3->p3 = (u8)((_fa * 127 + 2048) >> 12); \
 } while(0)
 
 /* Compute fog factor (0-127) from a single screenZ value. Used for character
  * prims which don't have a precomputed field_252[] fog ramp array. Reads the
  * world's fog ramp at the index derived from screenZ. */
+/* Must produce the SAME number the world faces get for the same depth. The
+ * game's fog is ramp*16 + fog.intensity everywhere it computes one -- the face
+ * depth cue (0x1000 - ramp*16 - intensity), func_80055A50's callers at 1944 and
+ * 5255, PC_FACE_FOG_VERTS above -- and this macro alone left the intensity term
+ * out. fog.intensity is a live per-area bias (Q12(1.0) - func_800559A8), so
+ * every character, lamp post, sign and object went through here fogged LESS
+ * than the world around it by intensity*127/4096: at a distance where the
+ * street had already dissolved into the fog, the objects standing on it had
+ * not, and read as separate shapes against it everywhere outdoors. With the
+ * term the two formulas are identical (for intensity 0 this reduces exactly to
+ * the old (fb*127+128)>>8). */
 #define PC_SCREEN_Z_TO_FOG(z) ({ \
-    s32 _z = (s32)(z); s32 _fb; \
-    if (!g_WorldEnvWork.isFogEnabled) { _fb = 0; } \
-    else if (_z < (1 << g_WorldEnvWork.fog.depthShift)) { \
-        s32 _idx = (_z << 7) >> g_WorldEnvWork.fog.depthShift; \
-        if (_idx < 0) _idx = 0; if (_idx > 127) _idx = 127; \
-        _fb = g_WorldEnvWork.fogRamp[_idx]; \
-    } else { _fb = 255; } \
-    (u8)((_fb * 127) >> 8); \
+    s32 _z = (s32)(z); s32 _fa; \
+    if (!g_WorldEnvWork.isFogEnabled) { _fa = 0; } \
+    else { \
+        s32 _fb; \
+        if (_z < (1 << g_WorldEnvWork.fog.depthShift)) { \
+            s32 _idx = (_z << 7) >> g_WorldEnvWork.fog.depthShift; \
+            if (_idx < 0) _idx = 0; if (_idx > 127) _idx = 127; \
+            _fb = g_WorldEnvWork.fogRamp[_idx]; \
+        } else { _fb = 255; } \
+        _fa = _fb * 16 + g_WorldEnvWork.fog.intensity; \
+        if (_fa > 0x1000) _fa = 0x1000; if (_fa < 0) _fa = 0; \
+    } \
+    (u8)((_fa * 127 + 2048) >> 12); \
 })
+/* Which vertex decides the far cull. PSX drops a world face once its FARTHEST
+ * vertex passes the fog far distance, which the maps set one metre past where
+ * the ramp reaches full fog. The drawn world therefore ends at the far edge of
+ * the last surviving face, up to a whole face-length short of full fog: on the
+ * town maps (near 13.5 m, road and wall quads several metres deep) that edge
+ * sits at 75-95% fog, and a dark texture there is the fog colour scaled by
+ * 0.96-0.99 -- the (107,99,114) and (104,97,112) against a (108,100,116) void
+ * that every VOIDPROBE run measured. PSX's 15-bit framebuffer folded that
+ * one-unit step away; an 8-bit one shows it as the outline of every road end,
+ * wall top and lamp post at the draw distance. No shader curve can close it,
+ * because the fragment really is short of full fog. Cull on the NEAREST vertex
+ * instead: a face is dropped only once all of it is past the far distance, so
+ * the far edge of whatever is drawn always lies beyond full fog, where its fog
+ * byte is 127 and the shader writes exactly the void colour. The extra faces
+ * are fully fogged, so nothing new becomes visible; no-fog maps keep the PSX
+ * test. The triangle sentinel (4th index 0xFF) is skipped, as the loops that
+ * do not rewrite it would otherwise read past the vertex pool. */
+#define PC_FACE_CULL_DEPTH(sd, maxz) ({ \
+    s32 _cd = (maxz); \
+    if (g_WorldEnvWork.isFogEnabled) { \
+        s32 _mn = (sd)->field_18C[(sd)->field_380.s_0.field_10]; \
+        s32 _tz = (sd)->field_18C[(sd)->field_380.s_0.field_11]; if (_tz < _mn) _mn = _tz; \
+        _tz = (sd)->field_18C[(sd)->field_380.s_0.field_12]; if (_tz < _mn) _mn = _tz; \
+        if ((sd)->field_380.s_0.field_13 != 0xFF) { \
+            _tz = (sd)->field_18C[(sd)->field_380.s_0.field_13]; if (_tz < _mn) _mn = _tz; \
+        } \
+        if (_mn < _cd) _cd = _mn; \
+    } \
+    _cd; })
+
+/* Same rule for lit objects (lamp posts, signs, fences), whose loops cull on
+ * the face's AVERAGE depth: a post whose top is past the far distance lost its
+ * upper faces while the lower ones were still at 90% fog. */
+#define PC_OBJ_CULL_DEPTH(sd, avgz, quad) ({ \
+    s32 _cd = (avgz); \
+    if (g_WorldEnvWork.isFogEnabled) { \
+        s32 _mn = (sd)->screenZ_168[(sd)->u.s_1.field_0]; \
+        s32 _tz = (sd)->screenZ_168[(sd)->u.s_1.field_1]; if (_tz < _mn) _mn = _tz; \
+        _tz = (sd)->screenZ_168[(sd)->u.s_1.field_2]; if (_tz < _mn) _mn = _tz; \
+        if (quad) { _tz = (sd)->screenZ_168[(sd)->u.s_1.field_3]; if (_tz < _mn) _mn = _tz; } \
+        if (_mn < _cd) _cd = _mn; \
+    } \
+    _cd; })
 #else
 #define FOG_FAR_DIST() (g_WorldEnvWork.fog.farDistance)
 #define VTXCOL_LDDP(dp) gte_lddp(dp)
+#define PC_FACE_CULL_DEPTH(sd, maxz) (maxz)
+#define PC_OBJ_CULL_DEPTH(sd, avgz, quad) (avgz)
 #endif
 
 // ========================================
@@ -189,6 +478,67 @@ void WorldEnv_Init(void) // 0x80055028
 
     WorldEnv_FogDistanceSet(Q12(32.0f), Q12(34.0f));
 }
+
+#ifdef SH_PC_PORT
+/* "This room is lit by the flashlight rather than by its own lighting."
+ *
+ * Not a PC invention — it is the game's own dark-room test, lifted verbatim
+ * from the two places that ask the same question (events_main.c:217 gating
+ * button events, game_sys_states.c:835 gating the map screen), minus their
+ * shared `&& !isFlashlightOn_15` term, which asks something different: those
+ * two want "dark AND unlit", this wants "dark" on its own.
+ *
+ * field_1C[0]/[1] are the two light slots; either one in dynamic mode means the
+ * room is driven by the flashlight. Deliberately NOT field_2 (the per-room
+ * glow-halo enable) — that reads 0 in genuinely dark rooms like map3_s05, which
+ * is the trap the comment at the call site warns about. */
+static int RoomIsFlashlightLitRaw(void)
+{
+    return (g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & (1 << 1)) &&
+           ((g_SysWork.field_2388.field_1C[0].effectsInfo_0.field_0.s_field_0.field_0 & (1 << 0)) ||
+            (g_SysWork.field_2388.field_1C[1].effectsInfo_0.field_0.s_field_0.field_0 & (1 << 0)));
+}
+
+/* Whether a room lights itself is a property of the ROOM. It must not be able
+ * to change between one frame and the next, because it gates a BINARY
+ * whole-scene dim (the fragment shader multiplies the entire frame by 0.15
+ * while the cone is active). One frame where the raw bits happen to disagree
+ * therefore lights the whole scene for exactly that frame, which is the
+ * "everything goes lighter and greyer for a frame" flicker over the sky. It
+ * shows up worst with the console open because the console re-presents frames
+ * without the environment update that maintains those bits having run.
+ *
+ * So hold the last stable answer and only adopt a new one once it has agreed
+ * with itself for several consecutive frames. Transients cannot reach the dim;
+ * a genuine room change still takes effect well inside its own fade. */
+static int RoomIsFlashlightLit(void)
+{
+    static int s_state = -1;
+    static int s_cand  = -1;
+    static int s_agree = 0;
+
+    int raw = RoomIsFlashlightLitRaw();
+
+    if (s_state < 0)
+    {
+        s_state = raw;
+        s_cand  = raw;
+        s_agree = 0;
+    }
+    else if (raw != s_cand)
+    {
+        s_cand  = raw;
+        s_agree = 0;
+    }
+    else if (raw != s_state && ++s_agree >= 6)
+    {
+        s_state = raw;
+        s_agree = 0;
+    }
+
+    return s_state;
+}
+#endif
 
 void Gfx_2dEffectsDraw(void) // 0x800550D0
 {
@@ -243,8 +593,38 @@ void Gfx_2dEffectsDraw(void) // 0x800550D0
          * the dim while the camera had already stood down for them. One predicate
          * means the camera and the lighting hand back on the same frame. Falls
          * back to the game's normal PSX flashlight rendering (glow halo below). */
-        if (g_PsyX_UsePerPixelFlashlight && g_SysWork.field_2388.isFlashlightOn_15
-            && !Pc_ScriptOwnsShot())
+        /* ...and on the ROOM being dark, using the game's own test for it — the
+         * same one events_main.c:217 and game_sys_states.c:835 use to decide the
+         * map is too dark to read. Without this the *= 0.15 dim fires in rooms
+         * the game lit itself, so simply having the flashlight out turned a lit
+         * room to night: reported against the Unknown Liquid pickup in the
+         * hospital director's office (map3_s01, "Hospital - 1F and basement
+         * after Kaufmann"), which is a daylit room. On PSX the flashlight never
+         * darkened its surroundings, it only added a glow; the fall-through
+         * below is that original glow-halo path. */
+        int roomLit = RoomIsFlashlightLit();
+        int dimOn   = g_PsyX_UsePerPixelFlashlight && g_SysWork.field_2388.isFlashlightOn_15
+                      && !Pc_ScriptOwnsShot() && roomLit;
+
+        /* Reports every flip of the whole-scene dim, term by term, so a single
+         * run names which one is unstable if any still is. */
+        {
+            static int s_prevDim = -1;
+            static int s_dimLogs = 0;
+
+            if (dimOn != s_prevDim && s_dimLogs < 40)
+            {
+                s_dimLogs++;
+                SH_DBG("[FLICKER] dim=%d master=%d flashlight=%d scripted=%d roomlit=%d raw=%d",
+                       dimOn, g_PsyX_UsePerPixelFlashlight,
+                       (int)g_SysWork.field_2388.isFlashlightOn_15,
+                       Pc_ScriptOwnsShot(), roomLit, RoomIsFlashlightLitRaw());
+            }
+
+            s_prevDim = dimOn;
+        }
+
+        if (dimOn)
         {
             s32 lx = Q12_TO_Q8(g_WorldEnvWork.field_60.vx);
             s32 ly = Q12_TO_Q8(g_WorldEnvWork.field_60.vy);
@@ -355,13 +735,9 @@ void Gfx_2dEffectsDraw(void) // 0x800550D0
         setSemiTrans(poly, true);
 #ifdef SH_PC_PORT
         {
-            const float psxAspect = 320.0f / 240.0f;
-            const float winAspect = g_PcConfig.windowHeight > 0
-                ? (float)g_PcConfig.windowWidth / (float)g_PcConfig.windowHeight
-                : psxAspect;
-            const float horScale  = winAspect / psxAspect;
-            const s16 halfW = (s16)(160.0f * horScale + 10.0f);
-            setXY4(poly, -halfW, -120, halfW, -120, -halfW, 120, halfW, 120);
+            const s16 halfW = Pc_OverlayQuadHalfW();
+            const s16 halfH = Pc_OverlayQuadHalfH();
+            setXY4(poly, -halfW, -halfH, halfW, -halfH, -halfW, halfH, halfW, halfH);
         }
 #else
         setXY4(poly,
@@ -397,13 +773,9 @@ void Gfx_2dEffectsDraw(void) // 0x800550D0
          * uniform across the full window.  At 1920x1080 margin ≈ 53 PSX
          * units, requiring halfW ≈ 213 instead of the original 180. */
         {
-            const float psxAspect = 320.0f / 240.0f;
-            const float winAspect = g_PcConfig.windowHeight > 0
-                ? (float)g_PcConfig.windowWidth / (float)g_PcConfig.windowHeight
-                : psxAspect;
-            const float horScale  = winAspect / psxAspect;
-            const s16 halfW = (s16)(160.0f * horScale + 10.0f); /* +10 = PSX edge pad */
-            setXY4(poly, -halfW, -120, halfW, -120, -halfW, 120, halfW, 120);
+            const s16 halfW = Pc_OverlayQuadHalfW();
+            const s16 halfH = Pc_OverlayQuadHalfH();
+            setXY4(poly, -halfW, -halfH, halfW, -halfH, -halfW, halfH, halfW, halfH);
         }
 #else
         setXY4(poly,
@@ -580,6 +952,20 @@ void func_800554C4(s32 arg0, s16 arg1, GsCOORDINATE2* coord0, GsCOORDINATE2* coo
     {
         Vw_CoordHierarchyMatrixCompute(coord1, &mat);
 
+#ifdef SH_PC_PORT
+        /* A replacement model's own flashlight can sit elsewhere on the chest
+         * (Heather's is on her right, Harry's on his left). */
+        if (coord1 == &g_SysWork.playerBoneCoords[HarryBone_Torso])
+        {
+            s32 off[3];
+            if (Pc_SkinChara_HeroLightOffset(off))
+            {
+                x += off[0];
+                y += off[1];
+                z += off[2];
+            }
+        }
+#endif
         tempSvec.vx = Q12_TO_Q8(x);
         tempSvec.vy = Q12_TO_Q8(y);
         tempSvec.vz = Q12_TO_Q8(z);
@@ -697,6 +1083,24 @@ void func_80055814(s32 arg0) // 0x80055814
     g_WorldEnvWork.fog.intensity = Q12(1.0f) - func_800559A8(arg0);
 }
 
+#ifdef SH_PC_PORT
+/* Fog-distance scale, console `fogdist`. 100 = stock. Applied INSIDE the one
+ * function every fog-distance write goes through, so it covers streets and the
+ * black indoor fog alike (a dark room's "wall of black" IS its fog far plane --
+ * the fog colour there is black). The raw arguments are remembered so a console
+ * change can re-run the setter immediately instead of waiting for the next room
+ * transition to call it. */
+int g_PcFogDistScalePct = 100;
+static q19_12 s_lastFogNearRaw = 0;
+static q19_12 s_lastFogFarRaw  = 0;
+
+void Pc_FogDistanceReapply(void)
+{
+    if (s_lastFogFarRaw > 0)
+        WorldEnv_FogDistanceSet(s_lastFogNearRaw, s_lastFogFarRaw);
+}
+#endif
+
 void WorldEnv_FogDistanceSet(q19_12 nearDist, q19_12 farDist) // 0x80055840
 {
     s32 temp_lo;
@@ -708,6 +1112,17 @@ void WorldEnv_FogDistanceSet(q19_12 nearDist, q19_12 farDist) // 0x80055840
     s32 var_t0;
     s32 var_v1;
     s32 temp;
+
+#ifdef SH_PC_PORT
+    s_lastFogNearRaw = nearDist;
+    s_lastFogFarRaw  = farDist;
+
+    if (g_PcFogDistScalePct != 100 && g_PcFogDistScalePct > 0)
+    {
+        nearDist = (q19_12)(((s64)nearDist * g_PcFogDistScalePct) / 100);
+        farDist  = (q19_12)(((s64)farDist  * g_PcFogDistScalePct) / 100);
+    }
+#endif
 
     nearDist = Q12_TO_Q8(nearDist);
 
@@ -821,6 +1236,18 @@ u8 func_80055A50(s32 arg0) // 0x80055A50
  * func_80055A90 already applies — so distant blood stays vivid while the world around it
  * grays out. Multiplying the additive layer color by this (>>8) fades it toward black at
  * the SAME rate as world geometry (same fogRamp), so it disappears into the fog. */
+/* Fog colour for AVERAGE-blended PC prims (the bullet decals). An average
+ * blend shows (background + F)/2, so at distance "invisible" means F matching
+ * the fogged background -- the FOG COLOUR -- not F going to zero, which turns
+ * the prim into a permanent half-darkening: the solid unchangeable black hole
+ * the decals showed at any range. */
+void Pc_FogColorGet(int* r, int* g, int* b)
+{
+    *r = g_WorldEnvWork.fog.color.r;
+    *g = g_WorldEnvWork.fog.color.g;
+    *b = g_WorldEnvWork.fog.color.b;
+}
+
 int Pc_BloodFogKeep(s32 z)
 {
     s32 idx;
@@ -1345,6 +1772,23 @@ void Lm_MaterialsLoadWithFilter(s_LmHeader* lmHdr, s_ActiveChunkTextures* active
 {
     s_Material* curMat;
 
+#ifdef SH_PC_PORT
+    /* Same stale-header guard as Lm_MaterialFlagsApply: this walk writes
+     * curMat->texture and stamps Material_FsImageApply through the materials
+     * pointer -- garbage bounds/pointer = heap stomp. */
+    if (lmHdr == NULL || lmHdr->magic != LM_HEADER_MAGIC)
+    {
+        static int s_lmGarbageLog2 = 0;
+        if (s_lmGarbageLog2 < 8)
+        {
+            s_lmGarbageLog2++;
+            SH_DBG("[LM-GARBAGE] Lm_MaterialsLoadWithFilter on invalid header %p (magic=0x%02X) -- skipped",
+                   (void*)lmHdr, lmHdr ? (unsigned)lmHdr->magic : 0u);
+        }
+        return;
+    }
+#endif
+
     for (curMat = &lmHdr->materials[0]; curMat < &lmHdr->materials[lmHdr->materialCount]; curMat++)
     {
         if (curMat->field_C == 0 && curMat->texture == NULL &&
@@ -1453,6 +1897,26 @@ void Lm_MaterialFlagsApply(s_LmHeader* lmHdr) // 0x80056954
     s32         matFlags;
     s_Material* curMat;
 
+#ifdef SH_PC_PORT
+    /* The materials walk below trusts materialCount and the materials pointer.
+     * A stale/freed/reused lmHdr (registry eviction, buffer round-trip) hands
+     * this loop garbage BOUNDS and garbage POINTERS -- and the field_12 commit
+     * writes through them: a heap stomp that lands in whatever now owns that
+     * memory (the reformat's prim arrays among the candidates -- the Nowhere
+     * corruption class). Same guard Lm_MaterialRefCountDec already carries. */
+    if (lmHdr == NULL || lmHdr->magic != LM_HEADER_MAGIC)
+    {
+        static int s_lmGarbageLog = 0;
+        if (s_lmGarbageLog < 8)
+        {
+            s_lmGarbageLog++;
+            SH_DBG("[LM-GARBAGE] Lm_MaterialFlagsApply on invalid header %p (magic=0x%02X) -- skipped",
+                   (void*)lmHdr, lmHdr ? (unsigned)lmHdr->magic : 0u);
+        }
+        return;
+    }
+#endif
+
     for (i = 0, curMat = lmHdr->materials; i < lmHdr->materialCount; i++, curMat++)
     {
 #ifdef SH_PC_PORT
@@ -1549,7 +2013,18 @@ void Model_MaterialFlagsApply(s_ModelHeader* modelHdr, s32 arg1, const s_Materia
                 }
                 if (matFlags & MaterialFlag_1)
                 {
+#ifdef SH_PC_PORT
+                    /* The sum below encodes an unowned pool slot whenever the
+                     * prim's carried base disagrees with field_12 (invisible
+                     * Nowhere elevator + rainbow triangle); validate against
+                     * the pool and clamp to the material's own base. */
+                    curPrim->field_2 = HiresOverride_RestampValidate(
+                        (u16)(mat->field_10 + (curPrim->field_2 - mat->field_12)),
+                        mat->field_10, (u16)curPrim->field_2, mat->field_12,
+                        (const char*)&mat->name);
+#else
                     curPrim->field_2 = mat->field_10 + (curPrim->field_2 - mat->field_12);
+#endif
                 }
                 if (matFlags & MaterialFlag_2)
                 {
@@ -1820,6 +2295,12 @@ static void CharaPrimProbe_Note(const s_ModelInfo* modelInfo, const char* what)
 }
 #endif
 
+#ifdef SH_PC_PORT
+/* Dark Harry easter egg: 1 while the apparition is the character being
+ * drawn. Consume-once, set and cleared around the draw in world_draw.c. */
+int g_PcCharaGhostDraw = 0;
+#endif
+
 void func_80057090(s_ModelInfo* modelInfo, GsOT* arg1, s32 arg2, MATRIX* viewMat, MATRIX* worldMat, u16 arg5) // 0x80057090
 {
     s32            temp_a0;
@@ -1857,6 +2338,9 @@ void func_80057090(s_ModelInfo* modelInfo, GsOT* arg1, s32 arg2, MATRIX* viewMat
 
     otTag = &arg1->org[func_800571D0(modelHdr->field_B_1)];
     temp_a0 = modelHdr->field_B_4;
+#ifdef SH_PC_PORT
+    s_pcOtTagBase = func_800571D0(modelHdr->field_B_1);
+#endif
 
 #ifdef SH_PC_PORT
     /* v7 high-poly model: draw the dense wide geometry instead of the stock
@@ -1969,6 +2453,9 @@ void func_80057344(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
 
     gte_lddqa(g_WorldEnvWork.field_4C);
     gte_lddqb_0();
+#ifdef SH_PC_PORT
+    Pc_PpLit_Light(mat);
+#endif
 
     for (curMeshHdr = modelHdr->meshHdrs; curMeshHdr < &modelHdr->meshHdrs[modelHdr->meshCount]; curMeshHdr++)
     {
@@ -1995,6 +2482,29 @@ void func_80057344(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
                 break;
         }
 
+#ifdef SH_PC_PORT
+        if (g_WorldEnvWork.field_0 != 0)
+            Pc_PpLit_WorldMesh(curMeshHdr, normalOffset, mat);
+#endif
+
+#ifdef SH_PC_PORT
+        {
+            extern int    g_PsxWholeMapProbe;
+            extern double g_wmTXform, g_wmTMesh;
+            if (g_PsxWholeMapProbe == 1)
+            {
+                const double f  = 1000.0 / (double)SDL_GetPerformanceFrequency();
+                Uint64       t0 = SDL_GetPerformanceCounter();
+                Uint64       t1;
+                func_80057B7C(curMeshHdr, vertOffset, scratchData, mat);
+                t1 = SDL_GetPerformanceCounter();
+                Gfx_MeshDraw(curMeshHdr, scratchData, otTag, arg2);
+                g_wmTXform += (double)(t1 - t0) * f;
+                g_wmTMesh  += (double)(SDL_GetPerformanceCounter() - t1) * f;
+                continue;
+            }
+        }
+#endif
         func_80057B7C(curMeshHdr, vertOffset, scratchData, mat);
 
         Gfx_MeshDraw(curMeshHdr, scratchData, otTag, arg2);
@@ -2470,12 +2980,16 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
          * triangle" culling reported across multiple test sessions
          * since the pixel-aspect fix landed. */
         const s32   psxHalfW     = g_GameWork.gsScreenWidth >> 1;
-        const float visibleHalfW = (g_PcConfig.windowHeight > 0)
+        /* /hfov: PsyCross DIVIDES its Hor+ ortho half-width by g_PsxWorldHScale,
+         * so hfov<1 shows more world than this bound allowed and floor/wall polys
+         * were culled at the far screen edges (user-reported, recurring). */
+        const float visibleHalfW = ((g_PcConfig.windowHeight > 0)
             ? ((float)g_GameWork.gsScreenHeight * (float)g_PcConfig.windowWidth /
-               (2.0f * (float)g_PcConfig.windowHeight)) * g_PsxPixelAspect
-            : (float)psxHalfW;
-        s32 halfW = (s32)(visibleHalfW + 16.5f);
+               (2.0f * (float)g_PcConfig.windowHeight)) * GR_LivePixelAspect()
+            : (float)psxHalfW) / (g_PsxWorldHScale > 0.01f ? g_PsxWorldHScale : 1.0f);
+        s32 halfW = (s32)(visibleHalfW + 64.5f); /* generous by policy */
         if (halfW < psxHalfW) halfW = psxHalfW;
+        if (g_PcConfig.disableCulling) halfW = 0x3FFF;
         scratchData->field_380.s_0.field_0 = halfW;
     }
 #else
@@ -2554,13 +3068,13 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
                     SH_CLAMP_OT_DEPTH(scratchData->field_380.s_0.field_18, arg3);
 
-                    if (scratchData->field_380.s_0.field_18 > scratchData->field_380.s_0.field_1C)
+                    if (PC_FACE_CULL_DEPTH(scratchData, scratchData->field_380.s_0.field_18) > scratchData->field_380.s_0.field_1C)
                     {
                         continue;
                     }
 
 #ifdef SH_PC_PORT
-                    if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+                    if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
                     {
                         /* Far poly: integer NCLIP collapses sub-pixel-tall distant
                          * ground to zero area and culls it. Re-test on the PGXP
@@ -2637,15 +3151,21 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r0);
+#endif
+#ifdef SH_PC_PORT
+                        *(u32*)&poly3->r0 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_14]);
+#else
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_10] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_14] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
                         gte_dpcl();
                         gte_strgb(&poly3->r0);
+#endif
 
                         var_t3  = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_11] * 16;
                         var_t3 -= scratchData->field_380.s_0.field_4;
@@ -2654,15 +3174,21 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r1);
+#endif
+#ifdef SH_PC_PORT
+                        *(u32*)&poly3->r1 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_15]);
+#else
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_11] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_15] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
                         gte_dpcl();
                         gte_strgb(&poly3->r1);
+#endif
 
                         var_t3  = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_12] * 0x10;
                         var_t3 -= scratchData->field_380.s_0.field_4;
@@ -2671,15 +3197,21 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r2);
+#endif
+#ifdef SH_PC_PORT
+                        *(u32*)&poly3->r2 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_16]);
+#else
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_12] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_16] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
                         gte_dpcl();
                         gte_strgb(&poly3->r2);
+#endif
 
                         var_t3  = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_13] * 0x10;
                         var_t3 -= scratchData->field_380.s_0.field_4;
@@ -2688,15 +3220,26 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             var_t3 = 0;
                         }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                         gte_lddp(var_t3);
                         gte_ldrgb(&scratchData->field_380.s_0.field_C);
                         gte_dpcs();
                         gte_strgb(&poly1->r3);
+#endif
+#ifdef SH_PC_PORT
+                        *(u32*)&poly3->r3 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_17]);
+#else
                         VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_13] << 4);
                         gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_17] << 5);
                         gte_ldrgb(&scratchData->field_380.s_0.field_8);
                         gte_dpcl();
                         gte_strgb(&poly3->r3);
+#endif
+#ifdef SH_PC_PORT
+                        if (g_PsyX_PpLitActive)
+                            Pc_PpLit_WorldPrim(poly3, scratchData->field_380.s_0.field_14, scratchData->field_380.s_0.field_15,
+                                               scratchData->field_380.s_0.field_16, scratchData->field_380.s_0.field_17);
+#endif
 
                         *(s32*)&poly3->u0 = *(s32*)&prim->field_0;
                         *(s32*)&poly3->u1 = *(s32*)&prim->field_4 & 0xFFFFFF;
@@ -2712,7 +3255,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             /* PC: Skip fog overlay + SetPriority packets.
                              * Encode fog factor for shader fog blending. */
                             PC_FACE_FOG_VERTS(scratchData);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                             poly3 = (PACKET*)(poly1 + 1) + 0xC + 0xC;
                             poly1  = poly3 + 1;
@@ -2720,16 +3263,16 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             packet1 = poly1 + 1;
 
                             SetPriority(packet1, 0, 0);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, packet1);
 
                             setSemiTrans(poly1, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly1);
 
                             packet1 = (PACKET*)(poly1 + 1) + 0xC;
                             SetPriority(packet1, 1, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, packet1);
 
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                             poly3 = (PACKET*)(poly1 + 1) + 0xC + 0xC;
                             poly1  = poly3 + 1;
@@ -2741,11 +3284,11 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                             /* PC: Render opaque, skip fog overlay.
                              * Encode per-vertex fog for shader blending. */
                             PC_FACE_FOG_VERTS(scratchData);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 #else
                             setSemiTrans(poly3, 1);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
-                            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly1);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
+                            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly1);
 #endif
                             poly3 = poly1 + 1;
                             poly1  = poly3 + 1;
@@ -2804,13 +3347,13 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
                 SH_CLAMP_OT_DEPTH(scratchData->field_380.s_0.field_18, arg3);
 
-                if (scratchData->field_380.s_0.field_18 > scratchData->field_380.s_0.field_1C)
+                if (PC_FACE_CULL_DEPTH(scratchData, scratchData->field_380.s_0.field_18) > scratchData->field_380.s_0.field_1C)
                 {
                     continue;
                 }
 
 #ifdef SH_PC_PORT
-                if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+                if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
                 {
                     /* Far poly: precise backface re-test (see loop A). */
                     s32 _n012 = 0, _n312 = 0;
@@ -2878,29 +3421,50 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
                     *(s32*)&scratchData->field_380.s_0.field_14 = *(s32*)&prim->field_10;
 
+#ifdef SH_PC_PORT
+                    *(u32*)&poly3->r0 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_14]);
+#else
                     VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_10] << 4);
                     gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_14] << 5);
                     gte_ldrgb(&scratchData->field_380.s_0.field_8);
                     gte_dpcl();
                     gte_strgb(&poly3->r0);
+#endif
 
+#ifdef SH_PC_PORT
+                    *(u32*)&poly3->r1 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_15]);
+#else
                     VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_11] << 4);
                     gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_15] << 5);
                     gte_ldrgb(&scratchData->field_380.s_0.field_8);
                     gte_dpcl();
                     gte_strgb(&poly3->r1);
+#endif
 
+#ifdef SH_PC_PORT
+                    *(u32*)&poly3->r2 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_16]);
+#else
                     VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_12] << 4);
                     gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_16] << 5);
                     gte_ldrgb(&scratchData->field_380.s_0.field_8);
                     gte_dpcl();
                     gte_strgb(&poly3->r2);
+#endif
 
+#ifdef SH_PC_PORT
+                    *(u32*)&poly3->r3 = Pc_MeshDpclNoDepth(&scratchData->field_380.s_0.field_8, scratchData->field_2B8[scratchData->field_380.s_0.field_17]);
+#else
                     VTXCOL_LDDP(scratchData->field_252[scratchData->field_380.s_0.field_13] << 4);
                     gte_ldsv_(scratchData->field_2B8[scratchData->field_380.s_0.field_17] << 5);
                     gte_ldrgb(&scratchData->field_380.s_0.field_8);
                     gte_dpcl();
                     gte_strgb(&poly3->r3);
+#endif
+#ifdef SH_PC_PORT
+                    if (g_PsyX_PpLitActive)
+                        Pc_PpLit_WorldPrim(poly3, scratchData->field_380.s_0.field_14, scratchData->field_380.s_0.field_15,
+                                           scratchData->field_380.s_0.field_16, scratchData->field_380.s_0.field_17);
+#endif
 
                     *(s32*)&poly3->u0 = *(s32*)&prim->field_0;
                     *(s32*)&poly3->u1 = *(s32*)&prim->field_4 & 0xFFFFFF;
@@ -2911,7 +3475,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 #ifdef SH_PC_PORT
                     PC_FACE_FOG_VERTS(scratchData);
 #endif
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
                     poly3++;
                 }
             }
@@ -2975,13 +3539,13 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
             SH_CLAMP_OT_DEPTH(scratchData->field_380.s_0.field_18, arg3);
 
-            if (scratchData->field_380.s_0.field_18 > scratchData->field_380.s_0.field_1C)
+            if (PC_FACE_CULL_DEPTH(scratchData, scratchData->field_380.s_0.field_18) > scratchData->field_380.s_0.field_1C)
             {
                 continue;
             }
 
 #ifdef SH_PC_PORT
-            if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+            if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
             {
                 /* Far poly: precise backface re-test (see loop A). */
                 s32 _n012 = 0, _n312 = 0;
@@ -3058,14 +3622,20 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r0);
+#endif
+#ifdef SH_PC_PORT
+                *(u32*)&poly3->r0 = *(u32*)&scratchData->field_380.s_0.field_8;
+#else
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly3->r0);
+#endif
 
                 temp4    = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_11] * 0x10;
                 var_t3_2 = temp4 - scratchData->field_380.s_0.field_4;
@@ -3074,14 +3644,20 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r1);
+#endif
+#ifdef SH_PC_PORT
+                *(u32*)&poly3->r1 = *(u32*)&scratchData->field_380.s_0.field_8;
+#else
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly3->r1);
+#endif
 
                 temp4    = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_12] * 0x10;
                 var_t3_2 = temp4 - scratchData->field_380.s_0.field_4;
@@ -3090,14 +3666,20 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r2);
+#endif
+#ifdef SH_PC_PORT
+                *(u32*)&poly3->r2 = *(u32*)&scratchData->field_380.s_0.field_8;
+#else
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly3->r2);
+#endif
 
                 temp4    = 0x1000 - scratchData->field_252[scratchData->field_380.s_0.field_13] * 0x10;
                 var_t3_2 = temp4 - scratchData->field_380.s_0.field_4;
@@ -3106,14 +3688,20 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     var_t3_2 = 0;
                 }
 
+#ifndef SH_PC_PORT /* PC never draws the PSX fog overlay poly; its colour is wasted GTE work */
                 gte_lddp(var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_C);
                 gte_dpcs();
                 gte_strgb(&poly2->r3);
+#endif
+#ifdef SH_PC_PORT
+                *(u32*)&poly3->r3 = *(u32*)&scratchData->field_380.s_0.field_8;
+#else
                 VTXCOL_LDDP(0x1000 - var_t3_2);
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly3->r3);
+#endif
 
                 *(s32*)&poly3->u0 = *(s32*)&prim->field_0;
                 *(s32*)&poly3->u1 = *(s32*)&prim->field_4 & 0xFFFFFF;
@@ -3129,7 +3717,7 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     /* PC: Skip fog overlay + SetPriority (no mask bit support).
                      * Encode fog factor in p1 for shader fog blending. */
                     PC_FACE_FOG_VERTS(scratchData);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                     poly3  = (PACKET*)(poly2 + 1) + 0xC + 0xC;
                     poly2 = poly3 + 1;
@@ -3138,14 +3726,14 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
 
                     SetPriority(packet0, 0, 0);
 
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet0);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, packet0);
                     setSemiTrans(poly2, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly2);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly2);
 
                     packet0 = (PACKET*)(poly2 + 1) + 0xC;
                     SetPriority(packet0, 1, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], packet0);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, packet0);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 
                     poly3  = (PACKET*)(poly2 + 1) + 0xC + 0xC;
                     poly2 = poly3 + 1;
@@ -3157,11 +3745,11 @@ void Gfx_MeshDraw(s_MeshHeader* meshHdr, s_GteScratchData* scratchData, GsOT_TAG
                     /* PC: Render opaque, skip fog overlay.
                      * Encode per-vertex fog for shader blending. */
                     PC_FACE_FOG_VERTS(scratchData);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
 #else
                     setSemiTrans(poly3, 1);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly3);
-                    addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly2);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly3);
+                    SH_ADDPRIM_MESH(tag, scratchData, arg3, poly2);
 #endif
                     poly3  = poly2 + 1;
                     poly2 = poly3 + 1;
@@ -3187,6 +3775,7 @@ __block1530:
     {
     static int _b1530Log = 0;
     int _b1530Total = 0, _b1530ZeroZ = 0, _b1530FarZ = 0, _b1530Nclip = 0, _b1530Emitted = 0;
+    const s32 _pcFarCol[3] = { (s32)CFC2(21), (s32)CFC2(22), (s32)CFC2(23) };
 #endif
 
     for (; prim < &meshHdr->primitives[meshHdr->primitiveCount]; prim++)
@@ -3237,7 +3826,7 @@ __block1530:
 
         SH_CLAMP_OT_DEPTH(scratchData->field_380.s_0.field_18, arg3);
 
-        if (scratchData->field_380.s_0.field_18 > scratchData->field_380.s_0.field_1C)
+        if (PC_FACE_CULL_DEPTH(scratchData, scratchData->field_380.s_0.field_18) > scratchData->field_380.s_0.field_1C)
         {
 #ifdef SH_PC_PORT
             _b1530FarZ++;
@@ -3246,7 +3835,7 @@ __block1530:
         }
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+        if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
         {
             /* Far poly: precise backface re-test (see loop A). */
             s32 _n012 = 0, _n312 = 0;
@@ -3316,10 +3905,14 @@ __block1530:
 
             if (scratchData->field_2B8[scratchData->field_380.s_0.field_14] >= 8)
             {
+#ifdef SH_PC_PORT
+                *(u32*)&poly0->r0 = Pc_MeshDpcs(&scratchData->field_380.s_0.field_8, 0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_14] << 5), _pcFarCol);
+#else
                 gte_lddp(0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_14] << 5));
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly0->r0);
+#endif
             }
             else
             {
@@ -3328,10 +3921,14 @@ __block1530:
 
             if (scratchData->field_2B8[scratchData->field_380.s_0.field_15] >= 8)
             {
+#ifdef SH_PC_PORT
+                *(u32*)&poly0->r1 = Pc_MeshDpcs(&scratchData->field_380.s_0.field_8, 0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_15] << 5), _pcFarCol);
+#else
                 gte_lddp(0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_15] << 5));
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly0->r1);
+#endif
             }
             else
             {
@@ -3340,10 +3937,14 @@ __block1530:
 
             if (scratchData->field_2B8[scratchData->field_380.s_0.field_16] >= 8)
             {
+#ifdef SH_PC_PORT
+                *(u32*)&poly0->r2 = Pc_MeshDpcs(&scratchData->field_380.s_0.field_8, 0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_16] << 5), _pcFarCol);
+#else
                 gte_lddp(0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_16] << 5));
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly0->r2);
+#endif
             }
             else
             {
@@ -3352,10 +3953,14 @@ __block1530:
 
             if (scratchData->field_2B8[scratchData->field_380.s_0.field_17] >= 8)
             {
+#ifdef SH_PC_PORT
+                *(u32*)&poly0->r3 = Pc_MeshDpcs(&scratchData->field_380.s_0.field_8, 0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_17] << 5), _pcFarCol);
+#else
                 gte_lddp(0x1000 - (scratchData->field_2B8[scratchData->field_380.s_0.field_17] << 5));
                 gte_ldrgb(&scratchData->field_380.s_0.field_8);
                 gte_dpcs();
                 gte_strgb(&poly0->r3);
+#endif
             }
             else
             {
@@ -3379,7 +3984,7 @@ __block1530:
 
             setlen(poly0, 12);
 
-            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly0);
+            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly0);
 #ifdef SH_PC_PORT
             _b1530Emitted++;
 #endif
@@ -3460,7 +4065,7 @@ __block19CC:
 
         SH_CLAMP_OT_DEPTH(scratchData->field_380.s_0.field_18, arg3);
 
-        if (scratchData->field_380.s_0.field_18 > scratchData->field_380.s_0.field_1C)
+        if (PC_FACE_CULL_DEPTH(scratchData, scratchData->field_380.s_0.field_18) > scratchData->field_380.s_0.field_1C)
         {
 #ifdef SH_PC_PORT
             pc_primIdx++;
@@ -3479,7 +4084,7 @@ __block19CC:
 #endif
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(scratchData->field_380.s_0.field_18, arg3))
+        if (SH_PRECISE_NCLIP(scratchData->field_380.s_0.field_18, arg3))
         {
             /* Far poly: precise backface re-test (see loop A). */
             s32 _n012 = 0, _n312 = 0;
@@ -3555,7 +4160,7 @@ __block19CC:
 
             setlen(poly4, 9);
 
-            addPrim(&tag[(scratchData->field_380.s_0.field_18 >> arg3) >> 2], poly4);
+            SH_ADDPRIM_MESH(tag, scratchData, arg3, poly4);
 
             poly4++;
 #ifdef SH_PC_PORT
@@ -3645,12 +4250,16 @@ void func_80059E34(u32 arg0, s_MeshHeader* meshHdr, s_GteScratchData* scratchDat
      * even with the other fix in place. */
     {
         const s32   psxHalfW     = g_GameWork.gsScreenWidth >> 1;
-        const float visibleHalfW = (g_PcConfig.windowHeight > 0)
+        /* /hfov: PsyCross DIVIDES its Hor+ ortho half-width by g_PsxWorldHScale,
+         * so hfov<1 shows more world than this bound allowed and floor/wall polys
+         * were culled at the far screen edges (user-reported, recurring). */
+        const float visibleHalfW = ((g_PcConfig.windowHeight > 0)
             ? ((float)g_GameWork.gsScreenHeight * (float)g_PcConfig.windowWidth /
-               (2.0f * (float)g_PcConfig.windowHeight)) * g_PsxPixelAspect
-            : (float)psxHalfW;
-        s32 halfW = (s32)(visibleHalfW + 16.5f);
+               (2.0f * (float)g_PcConfig.windowHeight)) * GR_LivePixelAspect()
+            : (float)psxHalfW) / (g_PsxWorldHScale > 0.01f ? g_PsxWorldHScale : 1.0f);
+        s32 halfW = (s32)(visibleHalfW + 64.5f); /* generous by policy */
         if (halfW < psxHalfW) halfW = psxHalfW;
+        if (g_PcConfig.disableCulling) halfW = 0x3FFF;
         scratchData->field_380.s_0.field_0 = halfW;
     }
 #else
@@ -3685,7 +4294,7 @@ void func_80059E34(u32 arg0, s_MeshHeader* meshHdr, s_GteScratchData* scratchDat
         SH_CLAMP_OT_DEPTH(var_t2, arg3);
 
 #ifdef SH_PC_PORT
-        if (SH_WHOLEMAP_FAR_POLY(var_t2, arg3))
+        if (SH_PRECISE_NCLIP(var_t2, arg3))
         {
             /* Far poly: precise backface re-test (see Gfx_MeshDraw loop A). */
             s32 _n012 = 0, _n312 = 0;
@@ -3852,6 +4461,9 @@ void func_8005A21C(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
 #ifndef SH_PC_PORT
     modelHdr     = modelInfo->modelHdr;
 #endif
+#ifdef SH_PC_PORT
+    Pc_PpLit_Light(mat);
+#endif
     vertOffset   = modelHdr->vertexOffset;
     normalOffset = modelHdr->normalOffset;
 
@@ -3863,10 +4475,38 @@ void func_8005A21C(s_ModelInfo* modelInfo, GsOT_TAG* otTag, bool arg2, MATRIX* m
         {
             func_8005AA08(curMeshHdr, normalOffset, (s_GteScratchData2*)scratchData);
         }
+#ifdef SH_PC_PORT
+        Pc_PpLit_CharaMesh(curMeshHdr, normalOffset, mat);
+#endif
 
         func_8005AC50(curMeshHdr, (s_GteScratchData2*)scratchData, otTag, (s32)(intptr_t)arg2);
     }
 }
+
+#ifdef SH_PC_PORT
+/* func_8005A21C's transform and vertex lighting without its prims. A part
+ * reads the seam vertices it shares with a neighbour from the scratch slots
+ * that neighbour filled when it drew; when a skinned replacement draws the
+ * neighbour instead, a stock part kept beside it (Cybil's gun hands) needs
+ * the slots filled this way, or it reads stale ones and stretches across the
+ * screen. Expects the part's lighting prelude already run (Pc_SkinChara_Bone). */
+void Pc_PartFillScratch(s_ModelInfo* modelInfo, MATRIX* viewMat)
+{
+    s_ModelHeader*    modelHdr = modelInfo->modelHdr;
+    s_MeshHeader*     curMeshHdr;
+    s_GteScratchData* scratchData = PSX_SCRATCH_ADDR(0);
+
+    if (modelHdr == NULL || modelHdr->meshHdrs == NULL || modelInfo->field_0 < 0 || !modelHdr->field_B_0 ||
+        (modelHdr->field_B_4 & 0xFF) != 0)
+        return;
+    for (curMeshHdr = modelHdr->meshHdrs; curMeshHdr < &modelHdr->meshHdrs[modelHdr->meshCount]; curMeshHdr++)
+    {
+        func_8005A900(curMeshHdr, modelHdr->vertexOffset, scratchData, viewMat);
+        if (g_WorldEnvWork.field_0 != 0)
+            func_8005AA08(curMeshHdr, modelHdr->normalOffset, (s_GteScratchData2*)scratchData);
+    }
+}
+#endif
 
 void func_8005A42C(s_GteScratchData* scratchData, q19_12 alpha) // 0x8005A42C
 {
@@ -4227,13 +4867,15 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
                        scratchData->screenZ_168[scratchData->u.s_1.field_2] + scratchData->screenZ_168[scratchData->u.s_1.field_2]) >> 2;
 
             SH_WHOLEMAP_DEPTH_RESCUE(temp_t4, arg3);
-            if (temp_t4 <= 0 || var_t9 < temp_t4)
+            if (temp_t4 <= 0 || var_t9 < PC_OBJ_CULL_DEPTH(scratchData, temp_t4, 0))
             {
 #ifdef SH_PC_PORT
                 _dbgPrimDepthFail++;
 #endif
                 continue;
             }
+            /* The average may now exceed the far distance; keep the OT bucket in range. */
+            SH_CLAMP_OT_DEPTH(temp_t4, arg3);
 
             gte_NormalClip(*(s32*)&scratchData->screenXy_0[scratchData->u.s_1.field_0],
                            *(s32*)&scratchData->screenXy_0[scratchData->u.s_1.field_1],
@@ -4291,6 +4933,11 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             }
 
             poly.gt3->code = ((prim->field_6.flags >> 15) * 2) | 0x34;
+#ifdef SH_PC_PORT
+            if (g_PsyX_PpLitActive)
+                Pc_PpLit_CharaPrim(poly.gt3, scratchData->u.s_1.field_4, scratchData->u.s_1.field_5,
+                                   scratchData->u.s_1.field_6, scratchData->u.s_1.field_6);
+#endif
 
             *(s32*)&poly.gt3->u0 = *(s32*)&prim->field_0 + scratchData->u.s_1.field_8;
             *(s32*)&poly.gt3->u1 = *(s32*)&prim->field_4 & 0xFFFFFF;
@@ -4301,6 +4948,12 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
              * with distance. Without this, distant characters render as the
              * solid color from gte_nct (which collapses to the background
              * color = black when fog dampens light contribution to ~0). */
+            /* v0's fog rides the unused trailing pad2 short, marked with bit 15,
+             * the same scheme the GT4 case below uses. v0's own colour-word pad
+             * is the GPU command code, so without this the renderer had to give
+             * v0 its neighbour's fog and every triangle came out with one corner
+             * fogged for the wrong distance. */
+            poly.gt3->pad2 = 0x8000 | PC_SCREEN_Z_TO_FOG(scratchData->screenZ_168[scratchData->u.s_1.field_0]);
             poly.gt3->p1 = PC_SCREEN_Z_TO_FOG(scratchData->screenZ_168[scratchData->u.s_1.field_1]);
             poly.gt3->p2 = PC_SCREEN_Z_TO_FOG(scratchData->screenZ_168[scratchData->u.s_1.field_2]);
 #endif
@@ -4308,7 +4961,18 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             setlen(poly.gt3, 9);
 
             SH_CLAMP_OT_DEPTH(temp_t4, arg3);
-            addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt3);
+#ifdef SH_PC_PORT
+            /* Dark Harry easter egg (pc_dark_harry.c): the apparition is
+             * drawn see-through. Set by the chara draw for that one NPC
+             * slot and cleared straight after, so nothing else is
+             * affected. Delete with the rest of the feature. */
+            if (g_PcCharaGhostDraw)
+                setSemiTrans(poly.gt3, 1);
+            SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
+                               scratchData->u.s_1.field_2, scratchData->u.s_1.field_2, temp_t4, arg3);
+#endif
+            SH_ADDPRIM_LIT(ot, temp_t4, arg3, poly.gt3, scratchData, scratchData->u.s_1.field_0,
+                           scratchData->u.s_1.field_1, scratchData->u.s_1.field_2, scratchData->u.s_1.field_2);
             poly.gt3++;
 #ifdef SH_PC_PORT
             _dbgPrimPass++;
@@ -4320,13 +4984,15 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
                        scratchData->screenZ_168[scratchData->u.s_1.field_2] + scratchData->screenZ_168[scratchData->u.s_1.field_3]) >> 2;
 
             SH_WHOLEMAP_DEPTH_RESCUE(temp_t4, arg3);
-            if (temp_t4 <= 0 || var_t9 < temp_t4)
+            if (temp_t4 <= 0 || var_t9 < PC_OBJ_CULL_DEPTH(scratchData, temp_t4, 1))
             {
 #ifdef SH_PC_PORT
                 _dbgPrimDepthFail++;
 #endif
                 continue;
             }
+            /* The average may now exceed the far distance; keep the OT bucket in range. */
+            SH_CLAMP_OT_DEPTH(temp_t4, arg3);
 
             gte_ldsxy3(*(s32*)&scratchData->screenXy_0[scratchData->u.s_1.field_0],
                        *(s32*)&scratchData->screenXy_0[scratchData->u.s_1.field_1],
@@ -4395,6 +5061,11 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             }
 
             poly.gt4->code = ((prim->field_6.flags >> 15) * 2) | 0x3C;
+#ifdef SH_PC_PORT
+            if (g_PsyX_PpLitActive)
+                Pc_PpLit_CharaPrim(poly.gt4, scratchData->u.s_1.field_4, scratchData->u.s_1.field_5,
+                                   scratchData->u.s_1.field_6, scratchData->u.s_1.field_7);
+#endif
 
             *(s32*)&poly.gt4->u0 = *(s32*)&prim->field_0 + scratchData->u.s_1.field_8;
             *(s32*)&poly.gt4->u1 = *(s32*)&prim->field_4 & 0xFFFFFF;
@@ -4414,7 +5085,18 @@ void func_8005AC50(s_MeshHeader* meshHdr, s_GteScratchData2* scratchData, GsOT_T
             setlen(poly.gt4, 12);
 
             SH_CLAMP_OT_DEPTH(temp_t4, arg3);
-            addPrim(&ot[(temp_t4 >> arg3) >> 2], poly.gt4);
+#ifdef SH_PC_PORT
+            /* Dark Harry easter egg (pc_dark_harry.c): the apparition is
+             * drawn see-through. Set by the chara draw for that one NPC
+             * slot and cleared straight after, so nothing else is
+             * affected. Delete with the rest of the feature. */
+            if (g_PcCharaGhostDraw)
+                setSemiTrans(poly.gt4, 1);
+            SH_WHOLEMAP_LIT_SZ(scratchData, scratchData->u.s_1.field_0, scratchData->u.s_1.field_1,
+                               scratchData->u.s_1.field_2, scratchData->u.s_1.field_3, temp_t4, arg3);
+#endif
+            SH_ADDPRIM_LIT(ot, temp_t4, arg3, poly.gt4, scratchData, scratchData->u.s_1.field_0,
+                           scratchData->u.s_1.field_1, scratchData->u.s_1.field_2, scratchData->u.s_1.field_3);
             poly.gt4++;
 #ifdef SH_PC_PORT
             _dbgPrimPass++;
@@ -4500,7 +5182,14 @@ static bool Pc_MaterialNeedsVramSlot(const s_Material* mat)
 s_Texture* Texture_Get(s_Material* mat, s_ActiveChunkTextures* activeTexs, void* fsBuffer9, e_FsFile fileIdx, s32 arg4)
 {
     s8         filename[12];
-    s8         debugStr[12];
+    /* 13, not 12. The missing-TIM path below writes debugStr[12] = 0 as the
+     * terminator for a 12-character name, which is one past the end of a
+     * 12-byte array. PSX tolerated it -- the byte landed in stack padding --
+     * but the NDK builds with -fstack-protector, where that byte IS the
+     * canary slot, so the next return aborts the process with
+     * "stack corruption detected". The write is kept as it was; the buffer
+     * is the thing that was wrong. */
+    s8         debugStr[13];
     s32        fileId;
     s32        i;
     s32        smallestQueueIdx;
@@ -4820,6 +5509,9 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
     PACKET*           packet2;
     POLY_GT4*         poly_gt4;
     POLY_G4*          poly_g4;
+#ifdef SH_PC_PORT
+    s32               pcBillboardSz;
+#endif
 
     temp_fp = &D_800AE4DC[arg0];
     sp4A0   = temp_fp->field_A | (temp_fp->field_9 << 8);
@@ -4969,6 +5661,9 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
     {
         temp_v0_2 = RotTransPers((SVECTOR*)&curPtr->position.vx, &field_1C, &field_24, &field_24);
         temp_a0   = temp_v0_2 << 2;
+#ifdef SH_PC_PORT
+        pcBillboardSz = temp_a0;
+#endif
 
 #ifdef SH_PC_PORT
         /* Whole-town far billboards: beyond ~256u the GTE SZ3 register pegs at
@@ -4981,6 +5676,7 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
             extern int g_PsxWholeMapLastSz;
             if (g_PsxWholeMapLastSz > temp_a0)
                 temp_a0 = g_PsxWholeMapLastSz;
+            pcBillboardSz = temp_a0;
         }
 #endif
 
@@ -5025,7 +5721,7 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
                 {
                     s32 fogAmt = (func_80055A50(temp_v0_2 << 6) * 16) + g_WorldEnvWork.fog.intensity;
                     if (fogAmt > 0x1000) fogAmt = 0x1000;
-                    poly_gt4->p1 = (u8)((fogAmt * 127) >> 12);
+                    poly_gt4->p1 = (u8)((fogAmt * 127 + 2048) >> 12);
                     poly_gt4->p2 = poly_gt4->p1;
                     poly_gt4->p3 = poly_gt4->p1;
                 }
@@ -5043,7 +5739,14 @@ void Gfx_BillboardDraw(s32 arg0, q19_12 posX, q19_12 posY, q19_12 posZ, GsOT* ot
                  * corners go affine, warping the quad ("tree-foliage spikes").
                  * Billboards are camera-facing flat quads, so affine is correct. */
                 PsyX_SetNextPrimAffine();
-                addPrim(&ot_arg4->org[MIN(temp_v0_2 >> arg5, ORDERING_TABLE_SIZE - 1)], poly_gt4);
+                /* The far town is depth-tested; a billboard left on its OT
+                 * bucket seed would sit at ~64u and cover every far block. */
+                if (Pc_WholeMapDrawActive())
+                    PsyX_SetNextPrimDepthSz((unsigned int)pcBillboardSz);
+                if (s_pcFarOtActive && (temp_v0_2 >> arg5) >= ORDERING_TABLE_SIZE - 1)
+                    Pc_FarOtAdd(poly_gt4, (u32)pcBillboardSz);
+                else
+                    addPrim(&ot_arg4->org[MIN(temp_v0_2 >> arg5, ORDERING_TABLE_SIZE - 1)], poly_gt4);
                 poly_gt4++;
             }
 #else
@@ -5116,3 +5819,906 @@ s32 WorldEnv_LightRotationAndIntensityGet(SVECTOR* rot)
     *rot = g_WorldEnvWork.field_58;
     return g_WorldEnvWork.field_54;
 }
+
+#ifdef SH_PC_PORT
+/* ========================================================================
+ * Whole-map fast far path.
+ *
+ * A whole-town frame pushed ~100k world quads through the PSX pipeline:
+ * emulated GTE transform and colour, packet build, OT walk and the PGXP
+ * shadow tables, about 1 us per quad. Distant chunks are static, so their
+ * geometry is cached once in world space (with the colours the mesh drawer
+ * would compute, by the same GTE steps) and each frame only projects, culls
+ * and buckets it in float. The quads reach PsyCross as DR_PSYX_FARQUADS
+ * packets in the same OT buckets / far list the PSX path uses, so draw order,
+ * texturing, hi-res packs and fog are unchanged. Only plain unlit-chain models
+ * (the Gfx_MeshDraw path) are cached; lit, chained, wide-LM models and
+ * billboards still take the PSX path.
+ * ====================================================================== */
+
+typedef struct
+{
+    const s_Primitive* prim;
+    float              wx[4], wy[4], wz[4];
+    u8                 rgb[4][4];
+    u8                 otBase; /* func_800571D0(field_B_1): the model's OT bucket offset */
+} PcFarPrim;
+
+typedef struct
+{
+    const s_IpdHeader* ipd;
+    PcFarPrim*         prims;
+    s32                count;
+    u32                lightKey;
+    u32                sig;
+    /* GPU copy (wholemap gpu): mesh handle, its texture ranges, and the local
+     * origin its positions are relative to (float precision stays at cell scale). */
+    u32                gpu;
+    PsyX_FarMeshRange* ranges;
+    s32                rangeCount;
+    float              orgX, orgZ;
+    u32                lastFrame;
+} PcFarChunk;
+
+#define PC_FAR_CHUNK_MAX      256
+#define PC_FAR_BUILDS_PER_FRM 6
+
+static PcFarChunk s_pcFarChunks[PC_FAR_CHUNK_MAX];
+static s32        s_pcFarChunkCount;
+static u32        s_pcFarFrame;
+static s32        s_pcFarBuildBudget;
+static s32        s_pcFarArg;
+static s32        s_pcFarNearHead[ORDERING_TABLE_SIZE];
+static s32        s_pcFarListHead[PC_FAR_OT_SIZE];
+static float      s_pcFarR[9], s_pcFarT[3], s_pcFarCam[3];
+static float      s_pcFarOfx, s_pcFarOfy, s_pcFarH, s_pcFarHalfW, s_pcFarHalfH;
+static float      s_pcWorldSlot[256][3];
+static const void* s_pcFarMapKey;
+
+/* Console `wholemap fast 0|1`. */
+int g_PcWholeMapFast = 1;
+/* Console `wholemap gpu 0|1`: far chunks drawn from GPU-resident meshes
+ * (projected, culled and fogged in the shader) instead of per-frame CPU quads. */
+int g_PcWholeMapGpu = 1;
+static double s_pcFarEye[3];
+static double s_pcFarRd[9], s_pcFarTd[3], s_pcFarCamd[3];
+static s32    s_pcFarGpuQueued;
+
+/* [WMPROBE] far-path tallies for the probe frame: where the far prims go, and
+ * which models the cache refuses (those stay on the PSX path every frame). */
+extern int g_PsxWholeMapProbe;
+static u32 s_pcFarPrbChunks, s_pcFarPrbUnbuilt, s_pcFarPrbBuilds, s_pcFarPrbCached;
+static u32 s_pcFarPrbClip, s_pcFarPrbBack, s_pcFarPrbEmit;
+static u32 s_pcFarPrbLit, s_pcFarPrbWide, s_pcFarPrbB4[4];
+
+extern MATRIX D_800C3868;
+extern MATRIX VbWvsMatrix;
+
+static u32 Pc_FarLightKey(void)
+{
+    u32 h = 2166136261u;
+#define PC_FAR_MIX(v) (h = (h ^ (u32)(v)) * 16777619u)
+    PC_FAR_MIX(g_WorldEnvWork.field_0);
+    PC_FAR_MIX(g_WorldEnvWork.isFogEnabled);
+    PC_FAR_MIX(g_WorldEnvWork.field_3);
+    PC_FAR_MIX(g_WorldEnvWork.field_20);
+    PC_FAR_MIX(*(u32*)&g_WorldEnvWork.worldTintColor & 0xFFFFFF);
+    PC_FAR_MIX(g_WorldEnvWork.field_4C);
+    if (g_WorldEnvWork.field_0 != 0)
+    {
+        /* The point light follows the player; its effect on geometry this far
+         * away is flat, so 16u of travel is plenty of resolution. */
+        PC_FAR_MIX(g_WorldEnvWork.field_54);
+        PC_FAR_MIX(*(u32*)&g_WorldEnvWork.field_58.vx);
+        PC_FAR_MIX(g_WorldEnvWork.field_58.vz);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vx >> 16);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vy >> 16);
+        PC_FAR_MIX(g_WorldEnvWork.field_60.vz >> 16);
+    }
+#undef PC_FAR_MIX
+    return h;
+}
+
+/* The cache is found by IPD buffer address, but streaming reuses a buffer for
+ * another cell, and a texture re-claim moves a chunk's pages/CLUTs in VRAM
+ * (Lm_MaterialFlagsApply rebakes the prims). Either leaves a cached copy
+ * drawing the old cell or the old texture slots: garbled far storefronts and
+ * missing buildings after a reload or a long free-cam flight. The committed
+ * material state (field_F/12/16) is what the prims were last baked from. */
+static u32 Pc_FarChunkSig(const s_IpdHeader* ipd)
+{
+    const s_LmHeader* lm = ipd->lmHdr;
+    u32               h  = 2166136261u;
+    s32               i;
+#define PC_FAR_MIX(v) (h = (h ^ (u32)(v)) * 16777619u)
+    PC_FAR_MIX((u8)ipd->cellX);
+    PC_FAR_MIX((u8)ipd->cellZ);
+    PC_FAR_MIX((uintptr_t)lm);
+    if (lm != NULL && lm->magic == LM_HEADER_MAGIC)
+    {
+        PC_FAR_MIX(lm->materialCount);
+        for (i = 0; i < lm->materialCount; i++)
+        {
+            const s_Material* m = &lm->materials[i];
+            PC_FAR_MIX(m->field_F);
+            PC_FAR_MIX(m->field_12);
+            PC_FAR_MIX(m->field_16.u16);
+            PC_FAR_MIX(m->texture != NULL);
+        }
+    }
+#undef PC_FAR_MIX
+    return h;
+}
+
+static int Pc_FarModelEligible(const s_ModelHeader* modelHdr)
+{
+    s32 b4;
+
+    if (modelHdr == NULL || modelHdr->meshHdrs == NULL || modelHdr->field_B_0)
+        return 0;
+    if (Pc_WideLm_IsWide(modelHdr))
+        return 0;
+    b4 = modelHdr->field_B_4;
+    if ((b4 & 0xFF) && b4 >= 0 && b4 < 4)
+        return 0;
+    return 1;
+}
+
+/* The mesh drawer's per-vertex colour, by its four loops (Gfx_MeshDraw): lit
+ * with fog (dpcl by intensity), lit without fog (dpcs, black below 8), unlit
+ * with fog (dpcs at 0 = the tint), unlit without fog (the flat tint). */
+static void Pc_FarVertexColor(const CVECTOR* tint, u8 inten, u8* out)
+{
+    CVECTOR c;
+
+    if (g_WorldEnvWork.field_0 != 0 && g_WorldEnvWork.isFogEnabled)
+    {
+        gte_lddp(0);
+        gte_ldsv_(inten << 5);
+        gte_ldrgb(tint);
+        gte_dpcl();
+        gte_strgb(&c);
+    }
+    else if (g_WorldEnvWork.field_0 != 0)
+    {
+        if (inten >= 8)
+        {
+            gte_lddp(0x1000 - (inten << 5));
+            gte_ldrgb(tint);
+            gte_dpcs();
+            gte_strgb(&c);
+        }
+        else
+        {
+            *(s32*)&c = 0;
+        }
+    }
+    else if (g_WorldEnvWork.isFogEnabled)
+    {
+        gte_lddp(0);
+        gte_ldrgb(tint);
+        gte_dpcs();
+        gte_strgb(&c);
+    }
+    else
+    {
+        c = *tint;
+    }
+    out[0] = c.r;
+    out[1] = c.g;
+    out[2] = c.b;
+    out[3] = 0;
+}
+
+static u32 Pc_FarPrimKey(const PcFarPrim* fp)
+{
+    return ((u32)fp->prim->field_6.bits.field_6_0 << 16) | (u16)fp->prim->field_2;
+}
+
+static const PcFarPrim* s_pcFarSortPrims;
+
+static int Pc_FarPrimKeyCmp(const void* a, const void* b)
+{
+    const u32 ka = Pc_FarPrimKey(&s_pcFarSortPrims[*(const s32*)a]);
+    const u32 kb = Pc_FarPrimKey(&s_pcFarSortPrims[*(const s32*)b]);
+    if (ka != kb)
+        return (ka < kb) ? -1 : 1;
+    return *(const s32*)a - *(const s32*)b;
+}
+
+static void Pc_FarPlane(const float* a, const float* b, const float* c, float* out)
+{
+    const float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const float vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    float       nx = uy * vz - uz * vy;
+    float       ny = uz * vx - ux * vz;
+    float       nz = ux * vy - uy * vx;
+    const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+
+    /* Unit length keeps the shader's plane-distance sign exact at town scale; a
+     * zero normal (a triangle's collapsed second half) reads as "not front". */
+    if (len > 0.0f)
+    {
+        nx /= len;
+        ny /= len;
+        nz /= len;
+    }
+    out[0] = nx;
+    out[1] = ny;
+    out[2] = nz;
+    out[3] = nx * a[0] + ny * a[1] + nz * a[2];
+}
+
+/* One upload per (re)build: quads sorted by texture so each texture is one
+ * index range, 4 vertices + 6 indices each, in the order EmitFarChain used. */
+static void Pc_FarChunkUploadGpu(PcFarChunk* fc)
+{
+    PsyX_FarMeshVertex* verts;
+    u32*                idx;
+    s32*                order;
+    s32                 i;
+    s32                 r = 0;
+
+    free(fc->ranges);
+    fc->ranges     = NULL;
+    fc->rangeCount = 0;
+    if (fc->count <= 0)
+        return;
+
+    verts      = (PsyX_FarMeshVertex*)calloc((size_t)fc->count * 4, sizeof(PsyX_FarMeshVertex));
+    idx        = (u32*)malloc(sizeof(u32) * 6 * (size_t)fc->count);
+    order      = (s32*)malloc(sizeof(s32) * (size_t)fc->count);
+    fc->ranges = (PsyX_FarMeshRange*)malloc(sizeof(PsyX_FarMeshRange) * (size_t)fc->count);
+    if (verts == NULL || idx == NULL || order == NULL || fc->ranges == NULL)
+    {
+        free(verts);
+        free(idx);
+        free(order);
+        free(fc->ranges);
+        fc->ranges = NULL;
+        return;
+    }
+
+    for (i = 0; i < fc->count; i++)
+        order[i] = i;
+    s_pcFarSortPrims = fc->prims;
+    qsort(order, (size_t)fc->count, sizeof(s32), Pc_FarPrimKeyCmp);
+
+    for (i = 0; i < fc->count; i++)
+    {
+        const PcFarPrim*    fp  = &fc->prims[order[i]];
+        const s_Primitive*  p   = fp->prim;
+        PsyX_FarMeshVertex* v   = &verts[i * 4];
+        const u32           key = Pc_FarPrimKey(fp);
+        const u8*           uvs[4];
+        float               pos[4][3];
+        float               mn[3], mx[3];
+        float               pl0[4], pl1[4];
+        u8                  ulo, uhi, vlo, vhi;
+        s32                 k, c;
+
+        uvs[0] = (const u8*)&p->field_0;
+        uvs[1] = (const u8*)&p->field_4;
+        uvs[2] = (const u8*)&p->field_8;
+        uvs[3] = (const u8*)&p->field_A;
+        ulo = uhi = uvs[0][0];
+        vlo = vhi = uvs[0][1];
+        for (k = 0; k < 4; k++)
+        {
+            pos[k][0] = fp->wx[k] - fc->orgX;
+            pos[k][1] = fp->wy[k];
+            pos[k][2] = fp->wz[k] - fc->orgZ;
+            if (uvs[k][0] < ulo) ulo = uvs[k][0];
+            if (uvs[k][0] > uhi) uhi = uvs[k][0];
+            if (uvs[k][1] < vlo) vlo = uvs[k][1];
+            if (uvs[k][1] > vhi) vhi = uvs[k][1];
+        }
+        for (c = 0; c < 3; c++)
+        {
+            mn[c] = mx[c] = pos[0][c];
+            for (k = 1; k < 4; k++)
+            {
+                if (pos[k][c] < mn[c]) mn[c] = pos[k][c];
+                if (pos[k][c] > mx[c]) mx[c] = pos[k][c];
+            }
+        }
+        /* NCLIP of the PSX quad: tri 0,1,2 and tri 1,2,3 (the stock n312). */
+        Pc_FarPlane(pos[0], pos[1], pos[2], pl0);
+        Pc_FarPlane(pos[1], pos[2], pos[3], pl1);
+
+        for (k = 0; k < 4; k++)
+        {
+            v[k].page   = (short)(p->field_6.bits.field_6_0 & 0x1F);
+            v[k].clut   = (short)p->field_2;
+            v[k].u      = uvs[k][0];
+            v[k].v      = uvs[k][1];
+            v[k].bright = 2;
+            v[k].dither = 1; /* world DRAWENV dtd (main.c) */
+            v[k].r      = fp->rgb[k][0];
+            v[k].g      = fp->rgb[k][1];
+            v[k].b      = fp->rgb[k][2];
+            v[k].a      = 255;
+            v[k].p1     = 1;
+            v[k].px     = pos[k][0];
+            v[k].py     = pos[k][1];
+            v[k].pz     = pos[k][2];
+            v[k].cx     = (mn[0] + mx[0]) * 0.5f;
+            v[k].cy     = (mn[1] + mx[1]) * 0.5f;
+            v[k].cz     = (mn[2] + mx[2]) * 0.5f;
+            v[k].hx     = (mx[0] - mn[0]) * 0.5f;
+            v[k].hy     = (mx[1] - mn[1]) * 0.5f;
+            v[k].hz     = (mx[2] - mn[2]) * 0.5f;
+            v[k].ulo    = ulo;
+            v[k].vlo    = vlo;
+            v[k].uhi    = uhi;
+            v[k].vhi    = vhi;
+            memcpy(v[k].plane0, pl0, sizeof(pl0));
+            memcpy(v[k].plane1, pl1, sizeof(pl1));
+        }
+        idx[i * 6 + 0] = (u32)(i * 4 + 0);
+        idx[i * 6 + 1] = (u32)(i * 4 + 1);
+        idx[i * 6 + 2] = (u32)(i * 4 + 2);
+        idx[i * 6 + 3] = (u32)(i * 4 + 1);
+        idx[i * 6 + 4] = (u32)(i * 4 + 2);
+        idx[i * 6 + 5] = (u32)(i * 4 + 3);
+
+        if (r == 0 || ((u32)fc->ranges[r - 1].tpage << 16 | fc->ranges[r - 1].clut) != key)
+        {
+            fc->ranges[r].tpage      = (u16)(key >> 16);
+            fc->ranges[r].clut       = (u16)key;
+            fc->ranges[r].firstIndex = i * 6;
+            fc->ranges[r].indexCount = 0;
+            r++;
+        }
+        fc->ranges[r - 1].indexCount += 6;
+    }
+    fc->rangeCount = r;
+    fc->gpu        = PsyX_FarMeshUpload(fc->gpu, verts, fc->count * 4, idx, fc->count * 6);
+    free(verts);
+    free(idx);
+    free(order);
+}
+
+static void Pc_FarChunkBuild(PcFarChunk* fc, const s_IpdHeader* ipd)
+{
+    s_GteScratchData*   sd = PSX_SCRATCH_ADDR(0);
+    GsCOORDINATE2       modelCoord;
+    MATRIX              worldMat;
+    MATRIX              viewMat;
+    CVECTOR             tint;
+    s32                 cellBoundX = ipd->cellX * Q12_TO_Q8(CHUNK_CELL_SIZE);
+    s32                 cellBoundZ = ipd->cellZ * Q12_TO_Q8(CHUNK_CELL_SIZE);
+    s32                 total      = 0;
+    s32                 n          = 0;
+    s32                 b;
+    s_IpdModelInstance* inst;
+    s_MeshHeader*       mesh;
+    s_Primitive*        prim;
+
+    for (b = 0; b < ipd->modelBufferCount; b++)
+    {
+        s_IpdModelBuffer* buf = &ipd->modelBuffers[b];
+        for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+        {
+            if (!Pc_FarModelEligible(inst->modelHdr))
+                continue;
+            for (mesh = inst->modelHdr->meshHdrs; mesh < &inst->modelHdr->meshHdrs[inst->modelHdr->meshCount]; mesh++)
+                total += mesh->primitiveCount;
+        }
+    }
+
+    free(fc->prims);
+    fc->prims    = (total > 0) ? (PcFarPrim*)malloc(sizeof(PcFarPrim) * total) : NULL;
+    fc->count    = 0;
+    fc->ipd      = ipd;
+    fc->lightKey = Pc_FarLightKey();
+    fc->sig      = Pc_FarChunkSig(ipd);
+    if (fc->prims == NULL)
+        return;
+
+    tint    = g_WorldEnvWork.worldTintColor;
+    tint.cd = 0x3C;
+    if (g_WorldEnvWork.field_0 == 0)
+    {
+        gte_lddp(0x1000 - g_WorldEnvWork.field_20);
+        gte_ldrgb(&tint);
+        gte_dpcs();
+        gte_strgb(&tint);
+    }
+    SetBackColor(0, 0, 0);
+
+    modelCoord.flg   = true;
+    modelCoord.super = NULL;
+
+    for (b = 0; b < ipd->modelBufferCount; b++)
+    {
+        s_IpdModelBuffer* buf = &ipd->modelBuffers[b];
+        for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+        {
+            s_ModelHeader* modelHdr = inst->modelHdr;
+            u32            vertOffset;
+            u32            normalOffset;
+
+            u8             otBase;
+
+            if (!Pc_FarModelEligible(modelHdr))
+                continue;
+            otBase = (u8)func_800571D0(modelHdr->field_B_1);
+
+            modelCoord.workm       = inst->mat;
+            modelCoord.workm.t[0] += cellBoundX;
+            modelCoord.workm.t[2] += cellBoundZ;
+            Vw_CoordToWorldAndViewMatrices(&modelCoord, &worldMat, &viewMat);
+            if (g_WorldEnvWork.field_0 != 0)
+                func_80057228(&worldMat, g_WorldEnvWork.field_54, &g_WorldEnvWork.field_58, &g_WorldEnvWork.field_60);
+
+            vertOffset   = modelHdr->vertexOffset;
+            normalOffset = modelHdr->normalOffset;
+            gte_lddqa(g_WorldEnvWork.field_4C);
+            gte_lddqb_0();
+
+            for (mesh = modelHdr->meshHdrs; mesh < &modelHdr->meshHdrs[modelHdr->meshCount]; mesh++)
+            {
+                s32 i;
+
+                if (vertOffset != 0 || normalOffset != 0)
+                    func_8005759C(mesh, sd, vertOffset, normalOffset);
+                else
+                    func_800574D4(mesh, sd);
+
+                switch (g_WorldEnvWork.field_0)
+                {
+                    case 1:
+                        func_80057658(mesh, normalOffset, sd, &g_WorldEnvWork.field_74, &g_WorldEnvWork.field_7C);
+                        break;
+                    case 2:
+                        func_80057A3C(mesh, normalOffset, sd, &g_WorldEnvWork.field_74);
+                        break;
+                }
+
+                for (i = vertOffset; i < (s32)(vertOffset + mesh->vertexCount) && i < 256; i++)
+                {
+                    const float lx = (float)sd->screenXy_0[i].vx;
+                    const float ly = (float)sd->screenXy_0[i].vy;
+                    const float lz = (float)sd->field_18C[i];
+                    s_pcWorldSlot[i][0] = (worldMat.m[0][0] * lx + worldMat.m[0][1] * ly + worldMat.m[0][2] * lz) / 4096.0f + (float)worldMat.t[0];
+                    s_pcWorldSlot[i][1] = (worldMat.m[1][0] * lx + worldMat.m[1][1] * ly + worldMat.m[1][2] * lz) / 4096.0f + (float)worldMat.t[1];
+                    s_pcWorldSlot[i][2] = (worldMat.m[2][0] * lx + worldMat.m[2][1] * ly + worldMat.m[2][2] * lz) / 4096.0f + (float)worldMat.t[2];
+                }
+
+                for (prim = mesh->primitives; prim < &mesh->primitives[mesh->primitiveCount] && n < total; prim++)
+                {
+                    PcFarPrim* fp = &fc->prims[n++];
+                    s32        k;
+
+                    fp->prim   = prim;
+                    fp->otBase = otBase;
+                    for (k = 0; k < 4; k++)
+                    {
+                        u8 vi = prim->field_C[k];
+                        if (vi == 0xFF)
+                            vi = prim->field_C[2];
+                        fp->wx[k] = s_pcWorldSlot[vi][0];
+                        fp->wy[k] = s_pcWorldSlot[vi][1];
+                        fp->wz[k] = s_pcWorldSlot[vi][2];
+                        Pc_FarVertexColor(&tint, sd->field_2B8[prim->field_10[k]], fp->rgb[k]);
+                    }
+                }
+            }
+        }
+    }
+    fc->count = n;
+    fc->orgX  = (float)cellBoundX;
+    fc->orgZ  = (float)cellBoundZ;
+    if (g_PcWholeMapGpu)
+        Pc_FarChunkUploadGpu(fc);
+}
+
+static PcFarChunk* Pc_FarChunkFind(const s_IpdHeader* ipd)
+{
+    PcFarChunk* fc;
+    s32         i;
+    s32         lru = -1;
+
+    for (i = 0; i < s_pcFarChunkCount; i++)
+    {
+        if (s_pcFarChunks[i].ipd == ipd)
+        {
+            s_pcFarChunks[i].lastFrame = s_pcFarFrame;
+            return &s_pcFarChunks[i];
+        }
+    }
+    if (s_pcFarChunkCount < PC_FAR_CHUNK_MAX)
+    {
+        fc = &s_pcFarChunks[s_pcFarChunkCount++];
+    }
+    else
+    {
+        /* Streaming loads chunks into fresh buffers over a session, and a slot
+         * is keyed by buffer address, so dead addresses used to hold their slots
+         * until the next map change. Once all 256 were taken every new chunk
+         * fell to the PSX path for good: the town turned CPU-bound after a while
+         * of play, never on a fresh start. Reclaim the least recently drawn
+         * slot instead; one drawn this frame is never taken (its mesh is queued). */
+        for (i = 0; i < s_pcFarChunkCount; i++)
+        {
+            if (s_pcFarChunks[i].lastFrame != s_pcFarFrame &&
+                (lru < 0 || (s32)(s_pcFarChunks[i].lastFrame - s_pcFarChunks[lru].lastFrame) < 0))
+                lru = i;
+        }
+        if (lru < 0)
+            return NULL;
+        fc = &s_pcFarChunks[lru];
+        free(fc->prims);
+        free(fc->ranges);
+        PsyX_FarMeshFree(fc->gpu);
+    }
+    memset(fc, 0, sizeof(*fc));
+    fc->lastFrame = s_pcFarFrame;
+    return fc;
+}
+
+void Pc_FarFrameBegin(s32 arg, const void* mapKey)
+{
+    s32 ofx;
+    s32 ofy;
+    s32 i;
+
+    /* A new map reuses the chunk buffers for other geometry. */
+    if (s_pcFarMapKey != mapKey)
+    {
+        for (i = 0; i < s_pcFarChunkCount; i++)
+        {
+            free(s_pcFarChunks[i].prims);
+            free(s_pcFarChunks[i].ranges);
+            PsyX_FarMeshFree(s_pcFarChunks[i].gpu);
+        }
+        s_pcFarChunkCount = 0;
+        s_pcFarMapKey     = mapKey;
+    }
+
+    s_pcFarFrame++;
+    PsyX_FarQuadsReset();
+    for (i = 0; i < ORDERING_TABLE_SIZE; i++)
+        s_pcFarNearHead[i] = -1;
+    for (i = 0; i < PC_FAR_OT_SIZE; i++)
+        s_pcFarListHead[i] = -1;
+    s_pcFarArg         = arg;
+    s_pcFarBuildBudget = PC_FAR_BUILDS_PER_FRM;
+
+    for (i = 0; i < 9; i++)
+        s_pcFarR[i] = (float)VbWvsMatrix.m[i / 3][i % 3] / 4096.0f;
+    for (i = 0; i < 3; i++)
+    {
+        s_pcFarT[i]   = (float)VbWvsMatrix.t[i];
+        s_pcFarCam[i] = (float)D_800C3868.t[i];
+    }
+    ReadGeomOffset(&ofx, &ofy);
+    s_pcFarOfx = (float)ofx;
+    s_pcFarOfy = (float)ofy;
+    s_pcFarH   = (float)ReadGeomScreen();
+    {
+        const float psxHalfW     = (float)(g_GameWork.gsScreenWidth >> 1);
+        const float visibleHalfW = ((g_PcConfig.windowHeight > 0)
+            ? ((float)g_GameWork.gsScreenHeight * (float)g_PcConfig.windowWidth /
+               (2.0f * (float)g_PcConfig.windowHeight)) * GR_LivePixelAspect()
+            : psxHalfW) / (g_PsxWorldHScale > 0.01f ? g_PsxWorldHScale : 1.0f);
+        s_pcFarHalfW = visibleHalfW + 64.0f;
+        if (s_pcFarHalfW < psxHalfW)
+            s_pcFarHalfW = psxHalfW;
+        s_pcFarHalfH = (float)(g_GameWork.gsScreenHeight >> 1) + 64.0f;
+    }
+
+    s_pcFarGpuQueued = 0;
+    {
+        PsyX_FarMeshFrame f;
+        double            inv[9];
+        double            det;
+
+        for (i = 0; i < 9; i++)
+        {
+            s_pcFarRd[i] = (double)VbWvsMatrix.m[i / 3][i % 3] / 4096.0;
+            f.rot[i]     = (float)s_pcFarRd[i];
+        }
+        for (i = 0; i < 3; i++)
+        {
+            s_pcFarTd[i]   = (double)VbWvsMatrix.t[i];
+            s_pcFarCamd[i] = (double)D_800C3868.t[i];
+        }
+        /* The eye is where the view transform R*(w - cam) + T is zero. */
+        inv[0] = s_pcFarRd[4] * s_pcFarRd[8] - s_pcFarRd[5] * s_pcFarRd[7];
+        inv[1] = s_pcFarRd[2] * s_pcFarRd[7] - s_pcFarRd[1] * s_pcFarRd[8];
+        inv[2] = s_pcFarRd[1] * s_pcFarRd[5] - s_pcFarRd[2] * s_pcFarRd[4];
+        inv[3] = s_pcFarRd[5] * s_pcFarRd[6] - s_pcFarRd[3] * s_pcFarRd[8];
+        inv[4] = s_pcFarRd[0] * s_pcFarRd[8] - s_pcFarRd[2] * s_pcFarRd[6];
+        inv[5] = s_pcFarRd[2] * s_pcFarRd[3] - s_pcFarRd[0] * s_pcFarRd[5];
+        inv[6] = s_pcFarRd[3] * s_pcFarRd[7] - s_pcFarRd[4] * s_pcFarRd[6];
+        inv[7] = s_pcFarRd[1] * s_pcFarRd[6] - s_pcFarRd[0] * s_pcFarRd[7];
+        inv[8] = s_pcFarRd[0] * s_pcFarRd[4] - s_pcFarRd[1] * s_pcFarRd[3];
+        det    = s_pcFarRd[0] * inv[0] + s_pcFarRd[1] * inv[3] + s_pcFarRd[2] * inv[6];
+        for (i = 0; i < 3; i++)
+        {
+            s_pcFarEye[i] = s_pcFarCamd[i];
+            if (det != 0.0)
+                s_pcFarEye[i] -= (inv[i * 3 + 0] * s_pcFarTd[0] + inv[i * 3 + 1] * s_pcFarTd[1] +
+                                  inv[i * 3 + 2] * s_pcFarTd[2]) / det;
+        }
+        f.h            = s_pcFarH;
+        f.ofsX         = s_pcFarOfx;
+        f.ofsY         = s_pcFarOfy;
+        f.detSign      = (det < 0.0) ? -1.0f : 1.0f;
+        f.fogOn        = g_WorldEnvWork.isFogEnabled;
+        f.fogShift     = g_WorldEnvWork.fog.depthShift;
+        f.fogIntensity = g_WorldEnvWork.fog.intensity;
+        memcpy(f.fogRamp, g_WorldEnvWork.fogRamp, sizeof(f.fogRamp));
+        PsyX_FarMeshFrameBegin(&f);
+    }
+}
+
+static u8 Pc_FarFog(float z)
+{
+    u32 zi;
+    s32 fb;
+    s32 fa;
+
+    if (!g_WorldEnvWork.isFogEnabled)
+        return 0;
+    zi = (z <= 0.0f) ? 0u : (z >= 4.0e9f ? 0xFFFFFFFFu : (u32)z);
+    if (zi < (1u << g_WorldEnvWork.fog.depthShift))
+        fb = g_WorldEnvWork.fogRamp[(zi << 7) >> g_WorldEnvWork.fog.depthShift];
+    else
+        fb = 0xFF;
+    fa = fb * 16 + g_WorldEnvWork.fog.intensity;
+    if (fa > 0x1000) fa = 0x1000;
+    if (fa < 0) fa = 0;
+    return (u8)((fa * 127 + 2048) >> 12);
+}
+
+/* Returns 1 when the chunk's cacheable models were submitted here (the caller
+ * then draws only the rest through the PSX path), 0 to draw it all the old way. */
+int Pc_FarChunkSubmit(const s_IpdHeader* ipd)
+{
+    PcFarChunk* fc;
+    s32         i;
+    const u32   key = Pc_FarLightKey();
+    u32         sig;
+
+    if (!g_PcWholeMapFast || !s_pcFarOtActive)
+        return 0;
+    fc = Pc_FarChunkFind(ipd);
+    if (fc == NULL)
+        return 0;
+    sig = Pc_FarChunkSig(ipd);
+    /* Rebuilds are budgeted per frame: an unbuilt or stale chunk takes the PSX
+     * path, a built one keeps its old colours until its turn (a frame or two). */
+    if ((fc->ipd != ipd || fc->sig != sig || fc->lightKey != key) && s_pcFarBuildBudget > 0)
+    {
+        s_pcFarBuildBudget--;
+        Pc_FarChunkBuild(fc, ipd);
+        if (g_PsxWholeMapProbe == 1)
+            s_pcFarPrbBuilds++;
+    }
+    if (g_PsxWholeMapProbe == 1)
+    {
+        s32 b;
+        s_pcFarPrbChunks++;
+        if (fc->ipd != ipd || fc->sig != sig)
+            s_pcFarPrbUnbuilt++;
+        else
+            s_pcFarPrbCached += fc->count;
+        for (b = 0; b < ipd->modelBufferCount; b++)
+        {
+            const s_IpdModelBuffer*   buf = &ipd->modelBuffers[b];
+            const s_IpdModelInstance* inst;
+            for (inst = buf->modelInstances; inst < &buf->modelInstances[buf->modelInstanceCount]; inst++)
+            {
+                const s_ModelHeader* mh = inst->modelHdr;
+                const s_MeshHeader*  mesh;
+                u32                  prims = 0;
+                s32                  b4;
+                if (mh == NULL || mh->meshHdrs == NULL || Pc_FarModelEligible(mh))
+                    continue;
+                for (mesh = mh->meshHdrs; mesh < &mh->meshHdrs[mh->meshCount]; mesh++)
+                    prims += mesh->primitiveCount;
+                b4 = mh->field_B_4;
+                if (Pc_WideLm_IsWide(mh))
+                    s_pcFarPrbWide += prims;
+                else if ((b4 & 0xFF) && b4 >= 0 && b4 < 4)
+                    s_pcFarPrbB4[b4] += prims;
+                else
+                    s_pcFarPrbLit += prims;
+            }
+        }
+    }
+    if (fc->ipd != ipd || fc->sig != sig)
+        return 0;
+
+    if (g_PcWholeMapGpu)
+    {
+        float  base[3], eye[3];
+        double d[3];
+
+        if (fc->count <= 0)
+            return 1;
+        if (fc->gpu == 0)
+            Pc_FarChunkUploadGpu(fc);
+        if (fc->gpu == 0)
+            return 0;
+        d[0] = (double)fc->orgX - s_pcFarCamd[0];
+        d[1] = -s_pcFarCamd[1];
+        d[2] = (double)fc->orgZ - s_pcFarCamd[2];
+        for (i = 0; i < 3; i++)
+            base[i] = (float)(s_pcFarRd[i * 3 + 0] * d[0] + s_pcFarRd[i * 3 + 1] * d[1] +
+                              s_pcFarRd[i * 3 + 2] * d[2] + s_pcFarTd[i]);
+        eye[0] = (float)(s_pcFarEye[0] - (double)fc->orgX);
+        eye[1] = (float)s_pcFarEye[1];
+        eye[2] = (float)(s_pcFarEye[2] - (double)fc->orgZ);
+        PsyX_FarMeshQueue(fc->gpu, base, eye, fc->ranges, fc->rangeCount);
+        s_pcFarGpuQueued++;
+        if (g_PsxWholeMapProbe == 1)
+            s_pcFarPrbEmit += fc->count;
+        return 1;
+    }
+
+    for (i = 0; i < fc->count; i++)
+    {
+        const PcFarPrim* fp = &fc->prims[i];
+        float            sx[4], sy[4], vz[4];
+        float            maxz = 0.0f;
+        s32              k;
+        s32              anyIn = 0, above = 0, below = 0;
+
+        for (k = 0; k < 4; k++)
+        {
+            const float dx = fp->wx[k] - s_pcFarCam[0];
+            const float dy = fp->wy[k] - s_pcFarCam[1];
+            const float dz = fp->wz[k] - s_pcFarCam[2];
+            const float vx = s_pcFarR[0] * dx + s_pcFarR[1] * dy + s_pcFarR[2] * dz + s_pcFarT[0];
+            const float vy = s_pcFarR[3] * dx + s_pcFarR[4] * dy + s_pcFarR[5] * dz + s_pcFarT[1];
+            const float z  = s_pcFarR[6] * dx + s_pcFarR[7] * dy + s_pcFarR[8] * dz + s_pcFarT[2];
+            float       r;
+
+            if (z < 256.0f)
+                break;
+            r     = s_pcFarH / z;
+            sx[k] = s_pcFarOfx + vx * r;
+            sy[k] = s_pcFarOfy + vy * r;
+            vz[k] = z;
+            if (z > maxz)
+                maxz = z;
+            if (sx[k] + s_pcFarHalfW >= 0.0f && sx[k] < s_pcFarHalfW)
+                anyIn = 1;
+            if (sy[k] < -s_pcFarHalfH)
+                above++;
+            if (sy[k] > s_pcFarHalfH)
+                below++;
+        }
+        if (k < 4 || !anyIn || above == 4 || below == 4)
+        {
+            if (g_PsxWholeMapProbe == 1)
+                s_pcFarPrbClip++;
+            continue;
+        }
+
+        {
+            const float n012 = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+            if (n012 <= 0.0f)
+            {
+                const float n312 = (sx[1] - sx[3]) * (sy[2] - sy[3]) - (sx[2] - sx[3]) * (sy[1] - sy[3]);
+                if (n312 >= 0.0f)
+                {
+                    if (g_PsxWholeMapProbe == 1)
+                        s_pcFarPrbBack++;
+                    continue;
+                }
+            }
+        }
+
+        {
+            PsyX_FarQuad*      q;
+            s32                qi;
+            s32*               head;
+            const s_Primitive* p = fp->prim;
+            const u32          mz = (maxz >= 4.0e9f) ? 0xFFFFFFFFu : (u32)maxz;
+            const u32          ob = (mz >> s_pcFarArg) >> 2;
+
+            if (ob + fp->otBase < ORDERING_TABLE_SIZE - 1)
+                head = &s_pcFarNearHead[ob + fp->otBase];
+            else
+            {
+                s32 fi = (mz > PC_FAR_OT_BASE) ? (s32)((mz - PC_FAR_OT_BASE) >> PC_FAR_OT_SHIFT) : 0;
+                if (fi >= PC_FAR_OT_SIZE)
+                    fi = PC_FAR_OT_SIZE - 1;
+                head = &s_pcFarListHead[fi];
+            }
+
+            q = PsyX_FarQuadAlloc(&qi);
+            if (q == NULL)
+                return 1;
+            for (k = 0; k < 4; k++)
+            {
+                q->sx[k] = sx[k];
+                q->sy[k] = sy[k];
+                q->w[k]  = vz[k];
+                q->fog[k] = Pc_FarFog(vz[k]);
+                *(u32*)q->rgb[k] = *(const u32*)fp->rgb[k];
+            }
+            q->uv[0][0] = ((const u8*)&p->field_0)[0];
+            q->uv[0][1] = ((const u8*)&p->field_0)[1];
+            q->uv[1][0] = ((const u8*)&p->field_4)[0];
+            q->uv[1][1] = ((const u8*)&p->field_4)[1];
+            q->uv[2][0] = ((const u8*)&p->field_8)[0];
+            q->uv[2][1] = ((const u8*)&p->field_8)[1];
+            q->uv[3][0] = ((const u8*)&p->field_A)[0];
+            q->uv[3][1] = ((const u8*)&p->field_A)[1];
+            q->clut     = p->field_2;
+            q->tpage    = p->field_6.bits.field_6_0;
+            q->next     = *head;
+            *head       = qi;
+            if (g_PsxWholeMapProbe == 1)
+                s_pcFarPrbEmit++;
+        }
+    }
+    return 1;
+}
+
+int Pc_FarModelHandled(const s_ModelHeader* modelHdr)
+{
+    return g_PcWholeMapFast && s_pcFarOtActive && Pc_FarModelEligible(modelHdr);
+}
+
+void Pc_FarFrameEnd(GsOT* ot)
+{
+    s32 i;
+
+    if (g_PsxWholeMapProbe == 1)
+    {
+        SH_DBG("[WMPROBE] far path: chunks=%u unbuilt=%u builds=%u cachedPrims=%u clipped=%u backface=%u emitted=%u | "
+               "refused prims: lit(B_0)=%u wide=%u B_4[1]=%u B_4[2]=%u B_4[3]=%u",
+               s_pcFarPrbChunks, s_pcFarPrbUnbuilt, s_pcFarPrbBuilds, s_pcFarPrbCached, s_pcFarPrbClip,
+               s_pcFarPrbBack, s_pcFarPrbEmit, s_pcFarPrbLit, s_pcFarPrbWide,
+               s_pcFarPrbB4[1], s_pcFarPrbB4[2], s_pcFarPrbB4[3]);
+    }
+    s_pcFarPrbChunks = s_pcFarPrbUnbuilt = s_pcFarPrbBuilds = s_pcFarPrbCached = 0;
+    s_pcFarPrbClip = s_pcFarPrbBack = s_pcFarPrbEmit = 0;
+    s_pcFarPrbLit = s_pcFarPrbWide = 0;
+    s_pcFarPrbB4[0] = s_pcFarPrbB4[1] = s_pcFarPrbB4[2] = s_pcFarPrbB4[3] = 0;
+
+    /* Farthest far-list slot: the town is drawn depth-tested before anything
+     * the far list or the OT buckets paint over it. */
+    if (s_pcFarGpuQueued > 0)
+    {
+        DR_PSYX_FARMESH* fm = (DR_PSYX_FARMESH*)GsOUT_PACKET_P;
+        setlen(fm, 2);
+        fm->code[0] = 0xB6000000;
+        fm->code[1] = 0;
+        addPrim(&s_pcFarOt[PC_FAR_OT_SIZE - 1], fm);
+        GsOUT_PACKET_P = (PACKET*)(fm + 1);
+    }
+
+    for (i = 0; i < ORDERING_TABLE_SIZE; i++)
+    {
+        if (s_pcFarNearHead[i] >= 0)
+        {
+            DR_PSYX_FARQUADS* fq = (DR_PSYX_FARQUADS*)GsOUT_PACKET_P;
+            setlen(fq, 2);
+            fq->code[0] = 0xB5000000;
+            fq->code[1] = (u_int)s_pcFarNearHead[i];
+            addPrim(&ot->org[i], fq);
+            GsOUT_PACKET_P = (PACKET*)(fq + 1);
+        }
+    }
+    for (i = 0; i < PC_FAR_OT_SIZE; i++)
+    {
+        if (s_pcFarListHead[i] >= 0)
+        {
+            DR_PSYX_FARQUADS* fq = (DR_PSYX_FARQUADS*)GsOUT_PACKET_P;
+            setlen(fq, 2);
+            fq->code[0] = 0xB5000000;
+            fq->code[1] = (u_int)s_pcFarListHead[i];
+            addPrim(&s_pcFarOt[i], fq);
+            GsOUT_PACKET_P = (PACKET*)(fq + 1);
+        }
+    }
+}
+#endif

@@ -2042,7 +2042,7 @@ void func_800D947C(void) // 0x800D947C
      * sharing the backing is safe. Also restores the ceremony particles the
      * SH_F3D48_ENTRY_CORRUPT guard had to drop (flame UV cycling / missing
      * floors / misplaced Harry+Cybil run textures / results-screen meshes). */
-    D_800F3D48 = &D_800F2448;
+    D_800F3D48 = D_800F2448;
 #else
     D_800F3D48 = (s_800F3D48*)FS_BUFFER_27;
 #endif
@@ -2081,12 +2081,18 @@ void func_800D952C(void) // 0x800D952C
     s_800F3D58* ptr0;
     s_800F3D48* ptr1;
 
-    D_800F3D48 = &D_800F2448;
+    D_800F3D48 = D_800F2448;
     D_800F2438 = 80;
 
     ptr0 = &D_800F3D58;
 
-    memset(&D_800F2448, 0xA5, 0x1900);
+#ifdef SH_PC_PORT
+    /* The declaration has to stay big enough for the write, or a toolchain that
+     * checks object sizes turns this into an abort. Fail the build instead. */
+    _Static_assert(sizeof(D_800F2448) >= 0x1900,
+                   "D_800F2448 must cover the 0x1900 pool memset");
+#endif
+    memset(D_800F2448, 0xA5, 0x1900);
 
     ptr1 = D_800F3D48;
 
@@ -4157,21 +4163,6 @@ void func_800DD0EC(const VECTOR3* pos, s32 coordIdx) // 0x800DD0EC
     ptr = &D_800F48A8;
 
     ptr0 = func_800DD090();
-#ifdef SH_PC_PORT
-    /* [INCUB-ATK] the boss reaches its attack states (probe confirmed cs=3) but
-     * you see no attack. This fires only when an attack actually TRIES to spawn
-     * a projectile. slot=NULL => the D_800F3DAC pool handed out nothing (pointer
-     * stale / buffer stomped / all 30 slots stuck non-zero) = the bug. slot=OK =>
-     * projectiles spawn but don't render/damage (look downstream). If this line
-     * never appears, the attack rolls never fire. TEMP. */
-    {
-        static int _atk = 0;
-        if ((_atk++ % 8) == 0)
-            SH_DBG("[INCUB-ATK] spawn try coordIdx=%d slot=%s D_800F3DAC=%p pos=(%d,%d,%d)",
-                   (int)coordIdx, ptr0 ? "OK" : "NULL", (void*)D_800F3DAC,
-                   (int)(pos->vx >> 12), (int)(pos->vy >> 12), (int)(pos->vz >> 12));
-    }
-#endif
     if (ptr0 != NULL)
     {
         // Compute rotation matrix.

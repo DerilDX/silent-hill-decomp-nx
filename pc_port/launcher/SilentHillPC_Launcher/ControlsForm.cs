@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using SilentHillPC_Launcher;   /* Loc — this file is in the global namespace */
 
 /// <summary>
 /// Separate window for editing keyboard + controller bindings. Code-generated
@@ -96,6 +97,7 @@ public class ControlsForm : Form
         { "key_l1", "A" }, { "key_r1", "D" }, { "key_l2", "Right Shift" }, { "key_r2", "Left Shift" },
         { "key_l3", "NONE" }, { "key_r3", "NONE" }, { "key_start", "Return" }, { "key_select", "Space" },
         { "key_quicksave", "F6" }, { "key_quickload", "F8" },
+        { "key_quick_options", "F10" }, { "pad_quick_options", "NONE" },
         { "key_change_cam", "F9" }, { "pad_change_cam", "rightstick" },
         { "key_swap_shoulder", "Mouse3" }, { "key_console", "`" },
         { "key_gfx_cycle", "\\" }, { "key_gfx_prev", "[" }, { "key_gfx_next", "]" },
@@ -187,12 +189,16 @@ public class ControlsForm : Form
     private NumericUpDown numControllerSens;
     private NumericUpDown numFpsFov;
     private NumericUpDown numTpsFov;
+    private NumericUpDown numOtsFov;
     private NumericUpDown numTpsAimZoom;
+    private NumericUpDown numOtsAimZoom;
     private TrackBar trkMouseSens;
     private TrackBar trkControllerSens;
     private TrackBar trkFpsFov;
     private TrackBar trkTpsFov;
+    private TrackBar trkOtsFov;
     private TrackBar trkTpsAimZoom;
+    private TrackBar trkOtsAimZoom;
     private bool syncingSens;   /* guards the numeric <-> slider mirroring */
     private CheckBox chkAltCamControls;
     private ToolTip  tips;
@@ -345,7 +351,15 @@ public class ControlsForm : Form
         /* Height fits the sensitivity column, which is now the tallest: its last
          * slider (TPS/OTS Aim Zoom) bottoms out at styleY + 346 = 722. The bottom
          * button row is placed from ClientSize.Height, so it follows automatically. */
-        ClientSize = new Size(860, 868);
+        /* Raised from 868: the keyboard column had grown into the bottom
+         * button row, with Quick Turn overlapping Reset to Defaults, and the
+         * controller column gained a Quick Options row. The bottom row is
+         * placed from ClientSize.Height, so it follows this down. */
+        /* Height set so the bottom button row sits just under the keyboard column's
+         * last bind (Rear Look, ~y+827). The sensitivity column carries five FOV/zoom
+         * sliders (First/Third/OTS FOV, then Thirdperson + OTS Aim Zoom) at a tight
+         * 58px pitch so they fit this height without expanding the form. */
+        ClientSize = new Size(860, 877);
 
         tips = new ToolTip { AutoPopDelay = 20000, InitialDelay = 350, ReshowDelay = 80, ShowAlways = true };
 
@@ -390,9 +404,9 @@ public class ControlsForm : Form
             FlatStyle = FlatStyle.Flat,
         };
         btnAltCamHelp.Click += (s, e) => MessageBox.Show(this,
-            "Leave the box unchecked to set classic controls, check it to set controls for modern TPS/OTS modes. " +
-            "Each control style also has alternates so that you can use more than one button for the same action.",
-            "Alternate Camera Controls", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Loc.T("Leave the box unchecked to set classic controls, check it to set controls for modern TPS/OTS modes. " +
+                  "Each control style also has alternates so that you can use more than one button for the same action."),
+            Loc.T("Alternate Camera Controls"), MessageBoxButtons.OK, MessageBoxIcon.Information);
         Controls.Add(btnAltCamHelp);
 
         // Keyboard PSX binds — each gets a hidden secondary box (shown when the
@@ -417,27 +431,30 @@ public class ControlsForm : Form
         // for layouts that can't reach tilde.
         int consoleY = swapShoulderY + rowH;
         AddKeyRow("Console", "key_console", colKbX, consoleY, labelW, inputW, false);
-        tips.SetToolTip(inputs["key_console"],
-            "Developer console toggle (needs Allow debug controls = Yes). Hold to show/hide it; tap while open to type a command.");
+        tips.SetToolTip(inputs["key_console"], Loc.T("Toggles the developer console (needs Allow debug controls). Hold to show/hide; tap while open to type a command."));
+
+        // Quick options overlay — in-game settings panel, keyboard-only like the
+        // console above it.
+        int quickOptY = consoleY + rowH;
+        AddKeyRow("Quick Options", "key_quick_options", colKbX, quickOptY, labelW, inputW, false);
+        tips.SetToolTip(inputs["key_quick_options"], Loc.T("Opens the in-game quick options overlay (graphics, HUD, audio, cheats, debug). Drag its title bar to move it."));
 
         // Graphics-effect tuning keys (keyboard-only). Cycle picks which enabled
         // effect (flashlight / post-process / tonemap) is tuned; Prev/Next lower
         // and raise its intensity live. Defaults \ / [ / ].
-        int gfxCycleY = consoleY + rowH + 8;
+        int gfxCycleY = quickOptY + rowH + 8;
         AddKeyRow("Gfx: Cycle Effect", "key_gfx_cycle", colKbX, gfxCycleY, labelW, inputW, false);
         AddKeyRow("Gfx: Adjust Down",  "key_gfx_prev",  colKbX, gfxCycleY + rowH,     labelW, inputW, false);
         AddKeyRow("Gfx: Adjust Up",    "key_gfx_next",  colKbX, gfxCycleY + rowH * 2, labelW, inputW, false);
-        tips.SetToolTip(inputs["key_gfx_cycle"],
-            "Cycles which enabled graphics effect (per-pixel flashlight, post-process, tone mapping) the Adjust keys tune.");
-        tips.SetToolTip(inputs["key_gfx_prev"], "Lowers the selected graphics effect's intensity (hold to repeat).");
-        tips.SetToolTip(inputs["key_gfx_next"], "Raises the selected graphics effect's intensity (hold to repeat).");
+        tips.SetToolTip(inputs["key_gfx_cycle"], Loc.T("Picks which graphics effect (flashlight, post-process, tone mapping) the Adjust keys change."));
+        tips.SetToolTip(inputs["key_gfx_prev"], Loc.T("Lowers the selected effect's intensity (hold to repeat)."));
+        tips.SetToolTip(inputs["key_gfx_next"], Loc.T("Raises the selected effect's intensity (hold to repeat)."));
 
         // Exit Game — quits at the title/main menu, warm-reboots to the title
         // otherwise. Default Esc; unbind with Del/Backspace/Esc like any other bind.
         int exitGameY = gfxCycleY + rowH * 3;
         AddKeyRow("Exit Game", "key_exit_game", colKbX, exitGameY, labelW, inputW, false);
-        tips.SetToolTip(inputs["key_exit_game"],
-            "Quits to desktop at the title/main menu; warm-reboots to the title during gameplay or a cutscene. Unbind to disable.");
+        tips.SetToolTip(inputs["key_exit_game"], Loc.T("Quits to desktop at the title/main menu; restarts to the title during play. Unbind to disable."));
 
         // PC-only action binds (keyboard). Reload is a standard row under Inventory
         // above; Cycle Weapons / Quick Heal / Quick Turn / Rear Look are here. Rear
@@ -451,14 +468,10 @@ public class ControlsForm : Form
         TextBox boxRearLookKb = MakeBindBox("key_rear_look", colKbX + labelW, cycleHealY + rowH * 3 - 3, inputW);
         rearLookControls.Add(lblRearLookKb);
         rearLookControls.Add(boxRearLookKb);
-        tips.SetToolTip(inputs["key_cycle_weapons"],
-            "Cycles the equipped weapon through the weapons you own, weakest to strongest.");
-        tips.SetToolTip(inputs["key_quick_heal"],
-            "Uses the most sensible healing item you are carrying (a stronger one when badly hurt, a drink otherwise).");
-        tips.SetToolTip(inputs["key_quick_turn"],
-            "Quick 180 turn — Harry spins to face the opposite direction (animated, not a snap).");
-        tips.SetToolTip(boxRearLookKb,
-            "Hold to swing the camera behind Harry (Thirdperson / Over-the-Shoulder only). Bind it with the alt-cam scheme selected.");
+        tips.SetToolTip(inputs["key_cycle_weapons"], Loc.T("Switches to the next weapon you own, weakest to strongest."));
+        tips.SetToolTip(inputs["key_quick_heal"], Loc.T("Uses the best healing item you carry (a stronger one when badly hurt)."));
+        tips.SetToolTip(inputs["key_quick_turn"], Loc.T("Quick 180° turn (animated, not a snap)."));
+        tips.SetToolTip(boxRearLookKb, Loc.T("Hold to look behind Harry (Thirdperson / Over-the-Shoulder only). Bind it with Alt. Cam Controls ticked."));
 
         // Controller binds — primary + an alternate (second button) per action.
         for (int i = 0; i < ControllerBinds.Length; i++)
@@ -492,19 +505,18 @@ public class ControlsForm : Form
         AddPadCombo("pad_quick_turn", colPadX + labelW, padQtY - 3, padInputW);
         Label lblRearLookPad = AddLabel("Rear Look", colPadX, padRlY, labelW);
         AddPadCombo("pad_rear_look", colPadX + labelW, padRlY - 3, padInputW);
+        int padQuickOptY = padRlY + rowH;
+        AddLabel("Quick Options", colPadX, padQuickOptY, labelW);
+        AddPadCombo("pad_quick_options", colPadX + labelW, padQuickOptY - 3, padInputW);
         rearLookControls.Add(lblRearLookPad);
         rearLookControls.Add(inputs["pad_rear_look"]);
         foreach (Control _rl in rearLookControls) _rl.Enabled = chkAltCamControls.Checked;
-        tips.SetToolTip(inputs["pad_reload"],
-            "Reload the equipped firearm on the controller (same action as the keyboard Reload).");
-        tips.SetToolTip(inputs["pad_cycle_weapons"],
-            "Cycles the equipped weapon through the weapons you own, weakest to strongest.");
-        tips.SetToolTip(inputs["pad_quick_heal"],
-            "Uses the most sensible healing item you are carrying (a stronger one when badly hurt).");
-        tips.SetToolTip(inputs["pad_quick_turn"],
-            "Quick 180 turn — Harry spins to face the opposite direction (animated, not a snap).");
-        tips.SetToolTip(inputs["pad_rear_look"],
-            "Hold to swing the camera behind Harry (Thirdperson / Over-the-Shoulder only). Bind it with the alt-cam scheme selected.");
+        tips.SetToolTip(inputs["pad_reload"], Loc.T("Reloads the equipped firearm."));
+        tips.SetToolTip(inputs["pad_cycle_weapons"], Loc.T("Switches to the next weapon you own, weakest to strongest."));
+        tips.SetToolTip(inputs["pad_quick_heal"], Loc.T("Uses the best healing item you carry (a stronger one when badly hurt)."));
+        tips.SetToolTip(inputs["pad_quick_turn"], Loc.T("Quick 180° turn (animated, not a snap)."));
+        tips.SetToolTip(inputs["pad_quick_options"], Loc.T("Optional controller button for the quick options overlay. Unbound by default."));
+        tips.SetToolTip(inputs["pad_rear_look"], Loc.T("Hold to look behind Harry (Thirdperson / Over-the-Shoulder only). Bind it with Alt. Cam Controls ticked."));
 
         // --- Experimental section (right column) ---
         // The whole left column (header, Control Style, all checkboxes) is shifted
@@ -512,7 +524,7 @@ public class ControlsForm : Form
         // / Quick Heal). The sensitivity sliders keep the original styleY so they do
         // NOT move; only the checkbox column (chkY) shifts.
         int styleY = padChangeCamY + rowH + 16 + 30;   // sensitivity column (unshifted)
-        int chkY = styleY + 5 * rowH;                  // Experimental left column (shifted below the 5 controller PC rows)
+        int chkY = styleY + 6 * rowH;                  // Experimental left column (shifted below the 5 controller PC rows)
         AddHeader("Experimental", colPadX, chkY - 30);
         AddLabel("Control Style", colPadX, chkY, 90);
         cmbControlStyle = new ComboBox
@@ -592,22 +604,24 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(chk2dControls);
-        tips.SetToolTip(chk2dControls,
-            "Screen-relative movement for every camera except First Person (Classic fixed cameras + Thirdperson / " +
-            "Over-the-Shoulder): the stick / movement keys push Harry relative to the screen and he turns to face the " +
-            "direction you press, instead of tank controls. Off = the original per-camera controls.");
+        tips.SetToolTip(chk2dControls, Loc.T("Screen-relative movement for every camera except First-person: Harry turns toward the direction you press instead of using tank controls. Off = original controls."));
 
         // --- Sensitivity column (second column, right of the checkbox stack):
         // label + value box on one row, a slider line underneath (mirrors the
         // numeric box both ways).
         int sensX = colPadX + 235;
         int sensW = 190;
+        /* The group sits at x=655+, inside the controller ALTERNATE combo column
+         * (x 626..706), so it cannot rise above those combos -- they end at
+         * padChangeCamY. Start just under them and stack at the original 66px
+         * pitch; the whole group moves as one from this base. */
+        int sensY = padChangeCamY + 14;
 
-        AddLabel("Mouse Sensitivity", sensX, styleY + 30, 125);
+        AddLabel("Mouse Sensitivity", sensX, sensY, 125);
         numMouseSens = new NumericUpDown
         {
             Left = sensX + sensW - 60,
-            Top = styleY + 27,
+            Top = sensY - 3,
             Width = 60,
             DecimalPlaces = 1,
             Increment = 0.1m,
@@ -617,14 +631,14 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(numMouseSens);
-        trkMouseSens = MakeSensSlider(sensX, styleY + 52, sensW);
+        trkMouseSens = MakeSensSlider(sensX, sensY + 22, sensW);
         WireSensPair(numMouseSens, trkMouseSens);
 
-        AddLabel("Controller Sensitivity", sensX, styleY + 96, 125);
+        AddLabel("Controller Sensitivity", sensX, sensY + 66, 125);
         numControllerSens = new NumericUpDown
         {
             Left = sensX + sensW - 60,
-            Top = styleY + 93,
+            Top = sensY + 63,
             Width = 60,
             DecimalPlaces = 1,
             Increment = 0.1m,
@@ -634,82 +648,111 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(numControllerSens);
-        trkControllerSens = MakeSensSlider(sensX, styleY + 118, sensW);
+        trkControllerSens = MakeSensSlider(sensX, sensY + 88, sensW);
         WireSensPair(numControllerSens, trkControllerSens);
 
-        AddLabel("First-person FOV", sensX, styleY + 162, 125);
+        AddLabel("First-person FOV", sensX, sensY + 132, 125);
         numFpsFov = new NumericUpDown
         {
             Left = sensX + sensW - 60,
-            Top = styleY + 159,
+            Top = sensY + 129,
             Width = 60,
             DecimalPlaces = 1,
             Increment = 1m,
-            Minimum = 55m,
-            Maximum = 110m,
+            Minimum = 40m,
+            Maximum = 140m,
             BackColor = PanelBack,
             ForeColor = TextColor,
         };
         Controls.Add(numFpsFov);
-        trkFpsFov = MakeSensSlider(sensX, styleY + 184, sensW);
-        trkFpsFov.Minimum = 55;
-        trkFpsFov.Maximum = 110;
+        trkFpsFov = MakeSensSlider(sensX, sensY + 154, sensW);
+        trkFpsFov.Minimum = 40;
+        trkFpsFov.Maximum = 140;
         WirePair(numFpsFov, trkFpsFov, 1m);
-        tips.SetToolTip(numFpsFov,
-            "Horizontal field of view (degrees, 4:3 basis) used ONLY while playing in First-person mode — menus, " +
-            "cutscenes, and the other cameras keep the game's original projection. Default 71.1 = the game's " +
-            "original FOV; 90 = standard FPS feel.");
+        tips.SetToolTip(numFpsFov, Loc.T("Horizontal FOV in First-person only (degrees, 4:3 basis). 71.1 = original, 90 = typical FPS."));
 
-        AddLabel("Thirdperson FOV", sensX, styleY + 228, 125);
+        AddLabel("Thirdperson FOV", sensX, sensY + 198, 125);
         numTpsFov = new NumericUpDown
         {
             Left = sensX + sensW - 60,
-            Top = styleY + 225,
+            Top = sensY + 195,
             Width = 60,
             DecimalPlaces = 1,
             Increment = 1m,
-            Minimum = 55m,
-            Maximum = 110m,
+            Minimum = 40m,
+            Maximum = 140m,
             BackColor = PanelBack,
             ForeColor = TextColor,
         };
         Controls.Add(numTpsFov);
-        trkTpsFov = MakeSensSlider(sensX, styleY + 250, sensW);
-        trkTpsFov.Minimum = 55;
-        trkTpsFov.Maximum = 110;
+        trkTpsFov = MakeSensSlider(sensX, sensY + 220, sensW);
+        trkTpsFov.Minimum = 40;
+        trkTpsFov.Maximum = 140;
         WirePair(numTpsFov, trkTpsFov, 1m);
-        tips.SetToolTip(numTpsFov,
-            "Horizontal field of view (degrees, 4:3 basis) used ONLY while playing in Thirdperson or " +
-            "Over-the-Shoulder. The Classic fixed cameras always keep the game's original projection. " +
-            "Default 71.1 = the game's own FOV, so leaving it alone changes nothing.");
+        tips.SetToolTip(numTpsFov, Loc.T("Horizontal FOV in Thirdperson only (degrees, 4:3 basis). 71.1 = original."));
 
-        AddLabel("TPS/OTS Aim Zoom", sensX, styleY + 294, 125);
+        AddLabel("Over-the-Shoulder FOV", sensX, sensY + 264, 140);
+        numOtsFov = new NumericUpDown
+        {
+            Left = sensX + sensW - 60,
+            Top = sensY + 261,
+            Width = 60,
+            DecimalPlaces = 1,
+            Increment = 1m,
+            Minimum = 40m,
+            Maximum = 140m,
+            BackColor = PanelBack,
+            ForeColor = TextColor,
+        };
+        Controls.Add(numOtsFov);
+        trkOtsFov = MakeSensSlider(sensX, sensY + 286, sensW);
+        trkOtsFov.Minimum = 40;
+        trkOtsFov.Maximum = 140;
+        WirePair(numOtsFov, trkOtsFov, 1m);
+        tips.SetToolTip(numOtsFov, Loc.T("Horizontal FOV in Over-the-Shoulder only (degrees, 4:3 basis). 71.1 = original."));
+
+        AddLabel("Thirdperson Aim Zoom", sensX, sensY + 330, 140);
         numTpsAimZoom = new NumericUpDown
         {
             Left = sensX + sensW - 60,
-            Top = styleY + 291,
+            Top = sensY + 327,
             Width = 60,
             DecimalPlaces = 0,
             Increment = 5m,
-            Minimum = 0m,
+            Minimum = -200m,
             Maximum = 200m,
             BackColor = PanelBack,
             ForeColor = TextColor,
         };
         Controls.Add(numTpsAimZoom);
-        trkTpsAimZoom = MakeSensSlider(sensX, styleY + 316, sensW);
-        trkTpsAimZoom.Minimum = 0;
+        trkTpsAimZoom = MakeSensSlider(sensX, sensY + 352, sensW);
+        trkTpsAimZoom.Minimum = -200;
         trkTpsAimZoom.Maximum = 200;
         WirePair(numTpsAimZoom, trkTpsAimZoom, 1m);
-        tips.SetToolTip(numTpsAimZoom,
-            "How far the Thirdperson / Over-the-Shoulder camera pulls in behind Harry while you aim, as a percentage " +
-            "of the zoom range. 100 (default) = the original zoom, 200 = a deeper 2x zoom, 0 = no zoom at all (this " +
-            "replaces the old TPS/OTS Aim Zoom checkbox).");
+        tips.SetToolTip(numTpsAimZoom, Loc.T("How far the Thirdperson camera zooms in while aiming. 100 = original, 200 = closest, 0 = none, negative = pull back."));
 
-        tips.SetToolTip(numMouseSens,
-            "Mouse look-speed multiplier for the Thirdperson / Over-the-Shoulder / First-person cameras (1.0 = default).");
-        tips.SetToolTip(numControllerSens,
-            "Right-stick look-speed multiplier for the Thirdperson / Over-the-Shoulder / First-person cameras (1.0 = default).");
+        AddLabel("Over-the-Shoulder Aim Zoom", sensX, sensY + 396, 160);
+        numOtsAimZoom = new NumericUpDown
+        {
+            Left = sensX + sensW - 60,
+            Top = sensY + 393,
+            Width = 60,
+            DecimalPlaces = 0,
+            Increment = 5m,
+            Minimum = -200m,
+            Maximum = 200m,
+            BackColor = PanelBack,
+            ForeColor = TextColor,
+        };
+        Controls.Add(numOtsAimZoom);
+        trkOtsAimZoom = MakeSensSlider(sensX, sensY + 418, sensW);
+        trkOtsAimZoom.Minimum = -200;
+        trkOtsAimZoom.Maximum = 200;
+        WirePair(numOtsAimZoom, trkOtsAimZoom, 1m);
+        tips.SetToolTip(numOtsAimZoom, Loc.T("How far the Over-the-Shoulder camera zooms in while aiming. 100 = original, 200 = closest, 0 = none, negative = pull back."));
+
+        tips.SetToolTip(numMouseSens, Loc.T("Mouse look speed for the Thirdperson, Over-the-Shoulder and First-person cameras (1.0 = default)."));
+        tips.SetToolTip(numControllerSens, Loc.T("Right-stick look speed for the Thirdperson, Over-the-Shoulder and First-person cameras (1.0 = default)."));
 
         chkAimAssist = new CheckBox
         {
@@ -730,10 +773,7 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(chkButtonSprint);
-        tips.SetToolTip(chkButtonSprint,
-            "Walk by default and only sprint while the bound Run control is held — like the classic control " +
-            "style. Applies to the alternate cameras (Thirdperson / Over-the-Shoulder / First-person) and to " +
-            "2D Controls under any camera. Off = pushing the stick most of the way also sprints.");
+        tips.SetToolTip(chkButtonSprint, Loc.T("Walk by default and sprint only while Run is held, like the classic controls. Off = pushing the stick far also sprints."));
 
         chkTpsCameraCollision = new CheckBox
         {
@@ -746,10 +786,7 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(chkTpsCameraCollision);
-        tips.SetToolTip(chkTpsCameraCollision,
-            "Thirdperson / Over-the-Shoulder cameras only: when a wall would come between the camera and Harry, " +
-            "pull the camera in so it stays on his side of it (on = the default). Off = the camera holds its full " +
-            "orbit distance and is allowed to pass through geometry.");
+        tips.SetToolTip(chkTpsCameraCollision, Loc.T("Thirdperson / Over-the-Shoulder: pull the camera in when a wall gets between it and Harry. Off = the camera can pass through walls."));
 
         chkDisableDpad = new CheckBox
         {
@@ -760,29 +797,14 @@ public class ControlsForm : Form
             ForeColor = TextColor,
         };
         Controls.Add(chkDisableDpad);
-        tips.SetToolTip(chkDisableDpad,
-            "Stops the controller D-pad from walking / turning Harry, freeing it to be bound to actions — pick " +
-            "dpup / dpdown / dpleft / dpright for Reload, Cycle Weapons, Quick Heal, or any controller bind above. " +
-            "The D-pad still navigates menus and the inventory, and keyboard arrow keys are unaffected. " +
-            "Off = the D-pad moves Harry as usual.");
+        tips.SetToolTip(chkDisableDpad, Loc.T("Stops the D-pad from moving Harry so it can be bound to actions (dpup / dpdown / dpleft / dpright). Menus and arrow keys are unaffected."));
 
-        tips.SetToolTip(chkAimAssist,
-            "Thirdperson / Over-the-Shoulder free-aim only (NOT first person): when the reticle is over an enemy " +
-            "(mouse) or near one (controller), the shot is redirected onto the enemy's body so it connects instead of " +
-            "grazing the narrow hitbox. Mouse = light 'hit anywhere on the body'; controller = stronger auto-aim. " +
-            "Off = the bullet goes exactly where the reticle points.");
+        tips.SetToolTip(chkAimAssist, Loc.T("Thirdperson / Over-the-Shoulder only: shots near an enemy snap onto its body — light with the mouse, stronger on a controller. Off = shots go exactly where you aim."));
 
-        tips.SetToolTip(cmbControlStyle,
-            "Classic = original fixed cameras. Thirdperson Shooter = mouse / right-stick follow camera behind Harry. " +
-            "Over the Shoulder = the same, offset to one side (middle mouse swaps sides).");
-        tips.SetToolTip(chkTpsOtsAim,
-            "Thirdperson only: raising the gun eases the camera over Harry's shoulder, so you aim with the same framing " +
-            "as Over-the-Shoulder mode, then eases back to the centred camera when you lower it. The shoulder-swap bind " +
-            "works while aiming too. Off = Thirdperson keeps its centred camera while aiming.");
-        tips.SetToolTip(chkCrosshair,
-            "Draws a small crosshair at the center of the screen while you're aiming in Thirdperson / Over-the-Shoulder mode.");
-        tips.SetToolTip(cmbCrosshairStyle,
-            "Reticle shape: Cross (+), Dot, Circle, or Dashes. In game, Backspace cycles off -> the styles -> off.");
+        tips.SetToolTip(cmbControlStyle, Loc.T("Classic = original fixed cameras. Thirdperson Shooter = follow camera behind Harry. Over the Shoulder = the same, offset to one side (middle mouse swaps sides)."));
+        tips.SetToolTip(chkTpsOtsAim, Loc.T("Thirdperson only: aiming eases the camera over Harry's shoulder, and back when you lower the gun."));
+        tips.SetToolTip(chkCrosshair, Loc.T("Shows a crosshair while aiming in Thirdperson / Over-the-Shoulder."));
+        tips.SetToolTip(cmbCrosshairStyle, Loc.T("Crosshair shape. In game, Backspace cycles through the styles and off."));
 
         // Allow debug controls — on the bottom button row, to the right of Reset
         // to Defaults (clear of the keyboard column AND the Reset button).
@@ -824,6 +846,15 @@ public class ControlsForm : Form
         AcceptButton = btnSave;
         CancelButton = btnCancel;
 
+        // Before SetupResizable, so the AutoSize labels (the two column headers,
+        // "Experimental", the "Press Del to unbind" hint) are captured at their
+        // translated width rather than the English one. The bind boxes and the
+        // value combos are left alone by the walker — their text is config data.
+        Loc.Apply(this);
+        // Both are index-mapped to their config value, so only the painted text changes.
+        Loc.LocalizeItems(cmbControlStyle);
+        Loc.LocalizeItems(cmbCrosshairStyle);
+
         SetupResizable();
     }
 
@@ -842,7 +873,7 @@ public class ControlsForm : Form
 
     private Label AddLabel(string text, int x, int y, int w)
     {
-        Label l = new Label { Text = text, Left = x, Top = y, Width = w, ForeColor = TextColor };
+        Label l = new Label { Text = text, Left = x, Top = y, Width = w, ForeColor = TextColor, AutoEllipsis = true };
         Controls.Add(l);
         return l;
     }
@@ -1105,6 +1136,10 @@ public class ControlsForm : Form
         if (cb != null)
         {
             int idx = cb.Items.IndexOf(val);
+            // A value this list does not offer (set in game or by hand) is kept
+            // rather than replaced by the first entry on the next Save.
+            if (idx < 0 && !string.IsNullOrEmpty(val) && val != "NONE")
+                idx = cb.Items.Add(val);
             if (idx < 0) idx = cb.Items.IndexOf(fallback);
             cb.SelectedIndex = idx >= 0 ? idx : 0;
         }
@@ -1126,6 +1161,10 @@ public class ControlsForm : Form
 
     private void LoadValues()
     {
+        // The game's in-game Controls panel writes config.cfg too; show what is on
+        // disk now, not the launcher's startup snapshot.
+        config.RefreshFromDisk();
+
         // Per-scheme binds: classic from the base key, altcam from base + "_altcam".
         foreach (string key in SchemeKeys)
         {
@@ -1143,9 +1182,13 @@ public class ControlsForm : Form
             SetControlValue(kv.Value, config.Get(kv.Key, def), def);
         }
 
-        activeScheme = 0;
-        chkAltCamControls.Checked = false;
-        PopulateUiFromScheme(0);
+        // Open on the scheme the game will actually use: with any alternate
+        // camera style the classic binds only drive menus, so editing them (the
+        // old fixed default page) looked like the launcher not saving.
+        activeScheme = config.Get("control_style", "classic") != "classic" ? 1 : 0;
+        chkAltCamControls.Checked = activeScheme == 1;
+        foreach (Control c in rearLookControls) c.Enabled = activeScheme == 1;
+        PopulateUiFromScheme(activeScheme);
 
         PopulateControlStyles();
 
@@ -1169,6 +1212,7 @@ public class ControlsForm : Form
         numControllerSens.Value = ClampSens(config.Get("controller_sensitivity", "1.0"));
         numFpsFov.Value = ClampFov(config.Get("fps_fov", "71.1"));
         numTpsFov.Value = ClampFov(config.Get("tps_fov", "71.1"));
+        numOtsFov.Value = ClampFov(config.Get("ots_fov", "71.1"));
         // Migration: the aim zoom used to be the on/off "tps_aim_zoom" key. If the
         // slider key isn't there yet, land on the position that matches whatever the
         // old checkbox said, so an existing setting isn't silently lost. The old "on"
@@ -1176,6 +1220,7 @@ public class ControlsForm : Form
         // configs with tps_aim_zoom_amount=100 keep their original feel unchanged.
         numTpsAimZoom.Value = ClampAimZoom(
             config.Get("tps_aim_zoom_amount", config.Get("tps_aim_zoom", "1") == "1" ? "100" : "0"));
+        numOtsAimZoom.Value = ClampAimZoom(config.Get("ots_aim_zoom_amount", "100"));
 
         bool dbg = config.Get("allow_debug_controls", "0") == "1";
         debugYes.Checked = dbg;
@@ -1215,7 +1260,9 @@ public class ControlsForm : Form
         numControllerSens.Value = 1.0m;
         numFpsFov.Value = 71.1m;
         numTpsFov.Value = 71.1m;
+        numOtsFov.Value = 71.1m;
         numTpsAimZoom.Value = 100m;
+        numOtsAimZoom.Value = 100m;
 
         debugNo.Checked = true;
         debugYes.Checked = false;
@@ -1270,7 +1317,7 @@ public class ControlsForm : Form
         WirePair(num, trk, 0.1m);
     }
 
-    // Parse a camera FOV from config, clamped to [55, 110] degrees
+    // Parse a camera FOV from config, clamped to [40, 140] degrees
     // (one decimal kept so the 71.1 native default round-trips).
     private static decimal ClampFov(string s)
     {
@@ -1278,8 +1325,8 @@ public class ControlsForm : Form
         if (!double.TryParse(s, System.Globalization.NumberStyles.Float,
                              System.Globalization.CultureInfo.InvariantCulture, out v))
             v = 71.1;
-        if (v < 55.0) v = 55.0;
-        if (v > 110.0) v = 110.0;
+        if (v < 40.0) v = 40.0;
+        if (v > 140.0) v = 140.0;
         return (decimal)(Math.Round(v * 10.0) / 10.0);
     }
 
@@ -1290,8 +1337,8 @@ public class ControlsForm : Form
         if (!double.TryParse(s, System.Globalization.NumberStyles.Float,
                              System.Globalization.CultureInfo.InvariantCulture, out v))
             v = 100.0;
-        if (v < 0.0) v = 0.0;
-        if (v > 200.0) v = 200.0;
+        if (v < -200.0) v = -200.0;
+        if (v >  200.0) v =  200.0;
         return (decimal)Math.Round(v);
     }
 
@@ -1354,8 +1401,12 @@ public class ControlsForm : Form
             ((double)numFpsFov.Value).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
         config.Set("tps_fov",
             ((double)numTpsFov.Value).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
+        config.Set("ots_fov",
+            ((double)numOtsFov.Value).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
         config.Set("tps_aim_zoom_amount",
             ((double)numTpsAimZoom.Value).ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+        config.Set("ots_aim_zoom_amount",
+            ((double)numOtsAimZoom.Value).ToString("0", System.Globalization.CultureInfo.InvariantCulture));
 
         config.Set("allow_debug_controls", debugYes.Checked ? "1" : "0");
         config.Save();

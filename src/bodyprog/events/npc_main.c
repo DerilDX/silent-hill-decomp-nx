@@ -21,10 +21,12 @@
 #include "main/fsqueue.h"
 
 #ifdef SH_PC_PORT
+#include "pc_config.h"
 static s32 Camera_Distance2dGet(const VECTOR3* pos);
 extern int g_DebugAnimKfView;
 extern int g_DebugViewNpcSlot;
 void Pc_KeyframeViewerPoseNpc(s_AnmHeader* anmHdr, GsCOORDINATE2* boneCoords);
+#include "pc_pick.h"
 #endif
 
 void Savegame_EnemyStateUpdate(s_SubCharacter* chara) // 0x80037DC4
@@ -304,10 +306,20 @@ void Game_NpcRoomInitSpawn(bool cond) // 0x80037F24
             curCharaSpawn->flags != 0 &&
             g_SavegamePtr->gameDifficulty >= curCharaSpawn->gameDifficultyMin &&
             func_8008F914(curCharaSpawn->positionX, curCharaSpawn->positionZ) &&
+#ifdef SH_PC_PORT
+            /* The PSX spawn ring (20..22u) sits inside the fog. With the fog
+             * thinned the ring is in plain sight, so spawn anywhere out of the
+             * camera's view instead, nearer or further than the ring. */
+            (Pc_LongViewActive()
+                 ? (!Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(30.0f)) &&
+                    (!cond || (Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(12.0f)) &&
+                               !Pc_WorldPointInView(curCharaSpawn->positionX, curCharaSpawn->positionZ))))
+                 : (!Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(22.0f)) &&
+                    (!cond || Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(20.0f)))))
+            && _slotSpawnCooldown[i] == 0
+#else
             !Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(22.0f)) &&
             (!cond || Math_Distance2dCheck(&g_SysWork.playerWork.player.position, pos, Q12(20.0f)))
-#ifdef SH_PC_PORT
-            && _slotSpawnCooldown[i] == 0
 #endif
             )
         {
@@ -415,16 +427,57 @@ static bool Pc_ActorIdleClipGet(s32 charaId, s16* outStartKf, s16* outEndKf, q19
 }
 #endif
 
+// Un-nested from Game_NpcUpdate: Clang has no GCC nested-function extension, so
+// every Apple toolchain rejects the original form. The captured parent locals
+// (field_0[], field_40) are threaded through explicitly, which is why field_40
+// arrives by pointer — func_800382EC writes to it. The typedef moves out with
+// them because both signatures name it.
+typedef struct
+{
+    s8      bitIdx_0;
+    u8      unk_1[3];
+    s32     field_4;
+    VECTOR3 field_8;
+} s_func_800382EC_0;
+
+static s32 func_800382B0(const s_func_800382EC_0* field_0, s32 arg0)
+{
+    s32 i;
+
+    for (i = 0; i < 2; i++)
+    {
+        if (arg0 == field_0[i].bitIdx_0)
+        {
+            return i;
+        }
+    }
+
+    return NO_VALUE;
+}
+
+static s32 func_800382EC(const s_func_800382EC_0* field_0, u32* field_40)
+{
+    s32 i;
+
+    for (i = 0; i < 2; i++)
+    {
+        if (field_0[i].bitIdx_0 == NO_VALUE)
+        {
+            break;
+        }
+
+        if ((*field_40 & (1 << field_0[i].bitIdx_0)) == 0)
+        {
+            *field_40 |= (1 << field_0[i].bitIdx_0);
+            return i;
+        }
+    }
+
+    return NO_VALUE;
+}
+
 void Game_NpcUpdate(void) // 0x80038354
 {
-    typedef struct
-    {
-        s8      bitIdx_0;
-        u8      unk_1[3];
-        s32     field_4;
-        VECTOR3 field_8;
-    } s_func_800382EC_0;
-
     s_func_800382EC_0  field_0[3];
     u32                field_40;
     s32                posZShift6;
@@ -452,43 +505,6 @@ void Game_NpcUpdate(void) // 0x80038354
     GsCOORDINATE2*     boneCoords;
     s_SubCharacter*    npc;
     s_func_800382EC_0* temp_s0_3;
-
-    // GCC extension funcs.
-    s32 func_800382B0(s32 arg0)
-    {
-        s32 i;
-
-        for (i = 0; i < 2; i++)
-        {
-            if (arg0 == field_0[i].bitIdx_0)
-            {
-                return i;
-            }
-        }
-
-        return NO_VALUE;
-    }
-
-    s32 func_800382EC()
-    {
-        s32 i;
-
-        for (i = 0; i < 2; i++)
-        {
-            if (field_0[i].bitIdx_0 == NO_VALUE)
-            {
-                break;
-            }
-
-            if ((field_40 & (1 << field_0[i].bitIdx_0)) == 0)
-            {
-                field_40 |= (1 << field_0[i].bitIdx_0);
-                return i;
-            }
-        }
-
-        return NO_VALUE;
-    }
 
     posXShift6 = Q12_TO_Q6(g_SysWork.playerWork.player.position.vx);
     posZShift6 = Q12_TO_Q6(g_SysWork.playerWork.player.position.vz);
@@ -602,7 +618,17 @@ void Game_NpcUpdate(void) // 0x80038354
 
                 new_var = temp_t3;
 
+#ifdef SH_PC_PORT
+                /* Thinned fog: despawn only out of view, and alive ones further
+                 * out than the 30u spawn reach. 80u frees the slot regardless. */
+                if (Pc_LongViewActive()
+                        ? (new_var > SQUARE(80) ||
+                           (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(48)) &&
+                            !Pc_WorldPointInView(npc->position.vx, npc->position.vz)))
+                        : (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(40))))
+#else
                 if (new_var > ((var_t5 == 0 && npc->health < Q12(0.0f)) ? SQUARE(24) : SQUARE(40)))
+#endif
                 {
                     npc->model.charaId = Chara_None;
                     SysWork_NpcFlagClear(k);
@@ -618,9 +644,18 @@ void Game_NpcUpdate(void) // 0x80038354
                     continue;
                 }
 
+#ifdef SH_PC_PORT
+                /* The 15u hide is the fog's edge; past it a thinned fog would
+                 * show monsters blinking out mid-street. */
+                if (!Pc_LongViewActive() &&
+                    ((g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2 && temp_t3 > SQUARE(15)) ||
+                     (!(g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2) &&
+                      Camera_Distance2dGet(&npc->position) > SQUARE(15))))
+#else
                 if ((g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2 && temp_t3 > SQUARE(15)) ||
                     (!(g_SysWork.field_2388.field_154.effectsInfo_0.field_0.s_field_0.field_0 & 0x2) &&
                      Camera_Distance2dGet(&npc->position) > SQUARE(15)))
+#endif
                 {
                     npc->model.anim.flags &= ~AnimFlag_Visible;
                 }
@@ -685,6 +720,10 @@ void Game_NpcUpdate(void) // 0x80038354
                     {
                         /* Keep render-only NPCs alive even while ANM is still loading. */
                         if (animLoaded && (npc->model.anim.flags & AnimFlag_Visible)) {
+#ifdef SH_PC_PORT
+                            Pc_Pick_CharaPreDraw(npc, (int)(npc - g_SysWork.npcs),
+                                                 g_CharaModelAnimsData[animDataInfoIdx].boneCoords);
+#endif
                             func_8003DA9C(npc->model.charaId,
                                           g_CharaModelAnimsData[animDataInfoIdx].boneCoords,
                                           1, npc->timer_C6,
@@ -747,6 +786,10 @@ void Game_NpcUpdate(void) // 0x80038354
                             statueBc->coord.t[2] = Q12_TO_Q8(npc->position.vz);
                             statueBc->flg = 0;
                         }
+#ifdef SH_PC_PORT
+                        Pc_Pick_CharaPreDraw(npc, (int)(npc - g_SysWork.npcs),
+                                             g_CharaModelAnimsData[animDataInfoIdx].boneCoords);
+#endif
                         func_8003DA9C(npc->model.charaId,
                                       g_CharaModelAnimsData[animDataInfoIdx].boneCoords,
                                       1, npc->timer_C6,
@@ -832,7 +875,12 @@ void Game_NpcUpdate(void) // 0x80038354
             }
 #endif
 #ifdef SH_PC_PORT
-            if (g_DebugAnimKfView && g_DebugViewNpcSlot == k)
+            if (Pc_Pick_NpcTick(npc, (int)(npc - g_SysWork.npcs)))
+            {
+                /* Console FREEZE: no AI tick, so the bones keep last frame's
+                 * pose and the enemy neither moves nor attacks. */
+            }
+            else if (g_DebugAnimKfView && g_DebugViewNpcSlot == k)
             {
                 /* Keyframe viewer is inspecting this NPC: pose it from the
                  * inspector (freeze/loop) instead of running its AI + per-frame
@@ -844,6 +892,14 @@ void Game_NpcUpdate(void) // 0x80038354
 #endif
             {
                 g_MapOverlayHdr.charaUpdateFuncs[npc->model.charaId](npc, g_CharaModelAnimsData[animDataInfoIdx].activeAnmHdr, boneCoords);
+#ifdef SH_PC_PORT
+                /* Randomizer enemy-HP scale: the AI update above sets an enemy's
+                 * health on its first tick; latch + multiply once (no-op off). */
+                {
+                    extern void Pc_Rando_ScaleEnemyHealth(void* npc, int slot);
+                    Pc_Rando_ScaleEnemyHealth(npc, (int)(npc - g_SysWork.npcs));
+                }
+#endif
 
                 Collision_FlagsUpdate();
                 func_80037E78(npc);
@@ -852,6 +908,9 @@ void Game_NpcUpdate(void) // 0x80038354
 
             if (npc->model.anim.flags & AnimFlag_Visible)
             {
+#ifdef SH_PC_PORT
+                Pc_Pick_CharaPreDraw(npc, (int)(npc - g_SysWork.npcs), boneCoords);
+#endif
                 func_8003DA9C(npc->model.charaId, boneCoords, 1, npc->timer_C6, (s8)npc->model.paletteIdx);
             }
         }
@@ -883,7 +942,7 @@ void Game_NpcUpdate(void) // 0x80038354
         }
         else
         {
-            var_v0_4 = func_800382B0(temp_s0_2);
+            var_v0_4 = func_800382B0(field_0, temp_s0_2);
         }
 
         if (var_v0_4 >= 0)
@@ -902,7 +961,7 @@ void Game_NpcUpdate(void) // 0x80038354
         temp_s1 = D_800BCDA8[l].field_1;
         if (temp_s1 == NO_VALUE)
         {
-            temp_v0_4 = func_800382EC();
+            temp_v0_4 = func_800382EC(field_0, &field_40);
             if (temp_v0_4 != temp_s1)
             {
                 var_v0_5 = field_0[temp_v0_4].bitIdx_0;
@@ -919,22 +978,6 @@ void Game_NpcUpdate(void) // 0x80038354
 
     for (l = 0; l < ARRAY_SIZE(D_800BCDA8); l++)
     {
-#ifdef SH_PC_PORT
-        /* One-shot per-slot keyon diagnostic so we can verify the radio
-         * voice actually starts when an enemy first enters range. */
-        static s8 _radioKeyonLogged[2] = { 0, 0 };
-        if (l < 2 && !_radioKeyonLogged[l] &&
-            D_800BCDA8[l].field_0 == NO_VALUE && D_800BCDA8[l].field_1 >= 0) {
-            _radioKeyonLogged[l] = 1;
-        }
-        /* Throttled state-snapshot â€” every ~1s log the actual D_800BCDA8 values
-         * so we can confirm whether field_0 is stuck at non-NO_VALUE. */
-        {
-            static u32 _radStateTickCnt = 0;
-            if (l == 0 && (++_radStateTickCnt % 60) == 0) {
-            }
-        }
-#endif
         if (D_800BCDA8[l].field_0 == NO_VALUE)
         {
             if (D_800BCDA8[l].field_1 >= 0)

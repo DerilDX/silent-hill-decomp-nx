@@ -14,20 +14,25 @@
 #include "bodyprog/bodyprog.h"
 #include "sh_log.h"
 #include "dbg_overlay.h"
+#include "pc_pick.h"
+#include "pc_binds.h"
+#include <PsyX/PsyX_backend.h>
 #include "screens/options.h" /* OptionsMenuState_* — Escape backs out of the brightness screen */
 #include "pc_config.h"
 
 #include <PsyX/common/glad.h>
 
 extern int g_windowWidth;
+extern GLuint GR_ScreenFBO(void);
 extern int g_windowHeight;
 extern void vcGetNowCamPos(VECTOR3* cam_pos);
 extern void Collision_SurfaceGet(s_CollisionSurface* coll, q19_12 posX, q19_12 posZ);
 
-/* Keyframe inspector state (game_main.c). The K key toggles g_DebugAnimKfView and
- * , / . step g_DebugAnimKf; player_control.c poses Harry on that frame and publishes
- * the active anim header's keyframe count as g_DebugAnimKfMax. The anim info panel
- * below mirrors the collision panel, shown while the inspector is on. */
+/* Keyframe inspector state (game_main.c). The console kf command toggles
+ * g_DebugAnimKfView and , / . step g_DebugAnimKf; player_control.c poses Harry
+ * on that frame and publishes the active anim header's keyframe count as
+ * g_DebugAnimKfMax. The anim info panel below mirrors the collision panel,
+ * shown while the inspector is on. */
 extern int g_DebugAnimKfView;
 extern int g_DebugAnimKf;
 extern int g_DebugAnimKfMax;
@@ -93,6 +98,11 @@ static int s_sel_active = 0; /* left button held, drag in progress */
 static int s_sel_a_line, s_sel_a_col; /* anchor */
 static int s_sel_b_line, s_sel_b_col; /* drag end */
 static int s_prev_lmb = 0;
+static int s_prev_rmb = 0;
+/* Hold TAB while the console is open: the panel stops drawing so the half of
+ * the screen it covers is clickable, while the pointer and picking stay live.
+ * Nothing about the console state changes -- it is purely a peek. */
+static int s_console_peek = 0;
 /* Panel hit-test geometry: the GL viewport the console was last drawn in
  * (window pixels, GL bottom-left origin). Captured in Render. */
 static int s_hit_vp[4];
@@ -109,6 +119,7 @@ int g_PcConsoleSwallowInput = 0;
 #define INPUT_BUF_CAP    (LINE_LEN - 4) /* room for "> " + "_" */
 static char          s_input_buf[INPUT_BUF_CAP];
 static int           s_input_len = 0;
+static int           s_input_cur = 0; /* caret, 0..s_input_len */
 
 /* Console command history: Up/Down recall recently entered commands. */
 #define CONSOLE_HIST_MAX 8
@@ -122,6 +133,7 @@ static void Console_LoadHist(int nav) {
     strncpy(s_input_buf, s_hist[idx], INPUT_BUF_CAP - 1);
     s_input_buf[INPUT_BUF_CAP - 1] = '\0';
     s_input_len = (int)strlen(s_input_buf);
+    s_input_cur = s_input_len;
 }
 static unsigned char s_prev_keys[128]; /* must cover arrow keys (scancodes 79-82) */
 
@@ -161,14 +173,13 @@ static int    s_gl_inited = 0;
 static char   s_coll_lines[COLL_LINES][COLL_COLS];
 static int    s_coll_count = 0;
 static int    s_coll_on    = 0;
-static int    s_prev_apos  = 0;
 static GLuint s_coll_tex   = 0;
 
 /* Read by collision.c (func_8006B318) to capture the wall segments the player's
  * collision evaluates while the visualizer is on. Set by the ' toggle. */
 int g_CollVisEnabled = 0;
 
-/* ---- Animation inspector panel (shown while the K keyframe inspector is on) ----
+/* ---- Animation inspector panel (shown while the keyframe inspector is on) ----
  * Mirrors the collision panel: a live text panel surfacing the player's current
  * anim state (the forced keyframe + its max, the active anim index/flags, control
  * state) so the keyframe being scrubbed is readable next to Harry's pose. */
@@ -531,6 +542,37 @@ static void Console_CopySelection(void)
     SDL_SetClipboardText(out);
 }
 
+static void Console_InsertChar(char c)
+{
+    if (s_input_len >= INPUT_BUF_CAP - 1)
+        return;
+    memmove(&s_input_buf[s_input_cur + 1], &s_input_buf[s_input_cur], (size_t)(s_input_len - s_input_cur + 1));
+    s_input_buf[s_input_cur++] = c;
+    s_input_len++;
+    s_console_dirty = 1;
+}
+
+/* Press edge, then after a short delay a steady 25/sec while held -- the
+ * text-editor feel Backspace already had, shared by the caret keys. */
+static int Console_KeyRepeat(const Uint8* ks, const Uint8* prev, int sc, Uint32* press, Uint32* last)
+{
+    Uint32 now;
+
+    if (!ks[sc])
+        return 0;
+    now = SDL_GetTicks();
+    if (!prev[sc]) {
+        *press = now;
+        *last  = now;
+        return 1;
+    }
+    if (now - *press >= 350 && now - *last >= 40) {
+        *last = now;
+        return 1;
+    }
+    return 0;
+}
+
 static void Console_Paste(void)
 {
     char*       clip = SDL_GetClipboardText();
@@ -546,9 +588,8 @@ static void Console_Paste(void)
             continue;
         if (c >= 'a' && c <= 'z')
             c -= 32; /* commands arrive uppercase */
-        s_input_buf[s_input_len++] = (char)c;
+        Console_InsertChar((char)c);
     }
-    s_input_buf[s_input_len] = '\0';
     s_console_dirty = 1;
     SDL_free(clip);
 }
@@ -561,8 +602,18 @@ static void Console_Paste(void)
  * failure was SILENT, leaving the console and cursor as solid white rectangles
  * (reported on a Radeon HD 7290, Crimson 16.2.1, GL 3.3 core). 140 matches what
  * PsyCross's own desktop shaders already declare, so it is proven to compile on
- * the hardware that hit this. */
-#define OVERLAY_GLSL "#version 140\n"
+ * the hardware that hit this.
+ *
+ * The version line itself is no longer baked in: with the D3D11/Vulkan
+ * backends the live context may be OpenGL ES 3.0 (ANGLE), where "#version 140"
+ * is not a legal directive at all. PsyX_Shader_Preamble supplies whichever of
+ * the two this context wants; the bodies below are in the in/out/texture()
+ * dialect that both accept. */
+static void overlay_shader_source(GLuint sh, const char* body, int fragmentStage)
+{
+    const char* src[2] = { PsyX_Shader_Preamble(fragmentStage, PSYX_GLSL_MODERN), body };
+    glShaderSource(sh, 2, src, NULL);
+}
 
 /* Never silent again, on any driver: a shader that will not build says so in
  * the log with the driver's own message, whether or not this build is a debug
@@ -611,7 +662,6 @@ static void overlay_gl_init(void)
 {
     GLuint vs, fs;
     static const char* vs_src =
-        OVERLAY_GLSL
         "in vec2 a_pos;\n"
         "in vec2 a_uv;\n"
         "out vec2 v_uv;\n"
@@ -620,7 +670,6 @@ static void overlay_gl_init(void)
         "    gl_Position = vec4(a_pos, 0.0, 1.0);\n"
         "}\n";
     static const char* fs_src =
-        OVERLAY_GLSL
         "in vec2 v_uv;\n"
         "out vec4 fragColor;\n"
         "uniform sampler2D u_tex;\n"
@@ -637,12 +686,12 @@ static void overlay_gl_init(void)
     }
 
     vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &vs_src, NULL);
+    overlay_shader_source(vs, vs_src, 0);
     glCompileShader(vs);
     overlay_shader_ok(vs, "text vertex");
 
     fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &fs_src, NULL);
+    overlay_shader_source(fs, fs_src, 1);
     glCompileShader(fs);
     overlay_shader_ok(fs, "text fragment");
 
@@ -775,20 +824,18 @@ static void overlay_gl_init(void)
     /* Colored-line program for the collision wireframe (a_pos = NDC, a_col = RGB). */
     {
         static const char* lvs_src =
-            OVERLAY_GLSL
-            "in vec2 a_pos;\n"
+                "in vec2 a_pos;\n"
             "in vec3 a_col;\n"
             "out vec3 v_col;\n"
             "void main() { v_col = a_col; gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
         static const char* lfs_src =
-            OVERLAY_GLSL
-            "in vec3 v_col;\n"
+                "in vec3 v_col;\n"
             "out vec4 fragColor;\n"
             "void main() { fragColor = vec4(v_col, 1.0); }\n";
         GLuint lvs = glCreateShader(GL_VERTEX_SHADER);
         GLuint lfs = glCreateShader(GL_FRAGMENT_SHADER);
-        glShaderSource(lvs, 1, &lvs_src, NULL); glCompileShader(lvs);
-        glShaderSource(lfs, 1, &lfs_src, NULL); glCompileShader(lfs);
+        overlay_shader_source(lvs, lvs_src, 0); glCompileShader(lvs);
+        overlay_shader_source(lfs, lfs_src, 1); glCompileShader(lfs);
         overlay_shader_ok(lvs, "line vertex");
         overlay_shader_ok(lfs, "line fragment");
         s_line_prog = glCreateProgram();
@@ -872,8 +919,19 @@ static void overlay_update_texture(void)
 
     {
         char prompt[LINE_LEN];
-        snprintf(prompt, LINE_LEN, "> %s_", s_input_buf);
+        int caretCol = 2 + s_input_cur;
+        int x, y;
+        snprintf(prompt, LINE_LEN, "> %s", s_input_buf);
         overlay_render_row(s_vis_rows, prompt);
+        if (caretCol < CON_COLS) {
+            for (y = GLYPH_H - 2; y < GLYPH_H; y++)
+                for (x = 0; x < GLYPH_W; x++) {
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][0] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][1] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][2] = 255;
+                    s_pixels[s_vis_rows * GLYPH_H + y][caretCol * GLYPH_W + x][3] = 255;
+                }
+        }
     }
 
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, TEX_W, TEX_H,
@@ -1393,8 +1451,9 @@ static int Dbg_GfxBindActive(const unsigned char* ks, const char* name)
 
 void DbgOverlay_Update(void)
 {
-    static int s_mark_a = 0;
-    static int s_mark_b = 0;
+    /* A click parked last frame has had a frame of drawing to resolve. */
+    Pc_Pick_FrameEnd();
+
     static int s_prev_tilde = 0;
     VECTOR3 hpos, cpos;
     s_SubCharacter* player;
@@ -1404,6 +1463,15 @@ void DbgOverlay_Update(void)
     extern int g_PcAllowDebugControls;
 
     const unsigned char* ks = SDL_GetKeyboardState(NULL);
+    /* PsyCross owns Ctrl+<key> for its renderer diagnostics (Ctrl+F1
+     * wireframe, Ctrl+F2 textureless, Ctrl+F5 fast-forward, Ctrl+F10 VRAM
+     * dump, Ctrl+F12 screenshot). The game-side binds below read the same raw
+     * key state, so without this every one of those shortcuts ALSO fired the
+     * game's action on the same key -- Ctrl+F1 toggled PGXP while it toggled
+     * wireframe. Suppress the ACTION only: the edge state below still tracks
+     * the physical key, so letting go of Ctrl while the key is still held
+     * cannot manufacture a fresh press. */
+    const int ctrlHeld = (SDL_GetModState() & KMOD_CTRL) ? 1 : 0;
     if (!ks) return;
 
     /* First Update runs inside MainLoop — arm the top-left message toast now so
@@ -1436,6 +1504,7 @@ void DbgOverlay_Update(void)
             if (s_console_open) {
                 g_PcConsoleInputActive = 1;
                 s_input_len            = 0;
+                s_input_cur            = 0;
                 s_input_buf[0]         = '\0';
                 s_scroll               = 0;
                 s_console_apply_until  = 0;
@@ -1461,6 +1530,16 @@ void DbgOverlay_Update(void)
                 s_console_dirty        = 1;
             }
         }
+    }
+
+    s_console_peek = (s_console_open && ks[SDL_SCANCODE_TAB]) ? 1 : 0;
+
+    /* Custom key binds. Not while the console owns the keyboard, or typing a
+     * command would fire whatever its letters are bound to. */
+    {
+        extern int g_PcQuickOptionsActive;
+        if (!s_console_open && !g_PcQuickOptionsActive)
+            PcBinds_Update(ks);
     }
 
     /* Scrollback while open: PgUp/PgDn (with hold-repeat) and the mouse wheel.
@@ -1519,6 +1598,9 @@ void DbgOverlay_Update(void)
                 }
             }
 
+            if (s_console_peek)
+                line = -2; /* panel hidden: the whole picture is clickable */
+
             if (lmb && !s_prev_lmb) {
                 if (line != -2) {
                     s_sel_a_line = s_sel_b_line = line;
@@ -1527,6 +1609,8 @@ void DbgOverlay_Update(void)
                     s_sel_active = 1;
                 } else {
                     s_sel_valid = 0; /* click off the text clears it */
+                    /* Below the panel is the scene: pick whatever is there. */
+                    Pc_Pick_RequestAt(wx, wy);
                 }
             } else if (lmb && s_sel_active) {
                 if (line != -2) {
@@ -1537,6 +1621,13 @@ void DbgOverlay_Update(void)
                 s_sel_active = 0;
             }
             s_prev_lmb = lmb;
+
+            {
+                int rmb = (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+                if (rmb && !s_prev_rmb)
+                    Pc_Pick_Clear(1);
+                s_prev_rmb = rmb;
+            }
         }
     }
 
@@ -1566,39 +1657,45 @@ void DbgOverlay_Update(void)
                     c = '0';
                 else
                     c = (char)('1' + (sc - SDL_SCANCODE_1));
-                if (s_input_len < INPUT_BUF_CAP - 1) {
-                    s_input_buf[s_input_len++] = c;
-                    s_input_buf[s_input_len]   = '\0';
-                    s_console_dirty            = 1;
-                }
+                Console_InsertChar(c);
             }
         }
         /* Space separates command from argument; `-` types `_` (map and FMV
          * names use underscores, and the console has no shift handling). */
         if (ks[SDL_SCANCODE_SPACE] && !s_prev_keys[SDL_SCANCODE_SPACE] &&
-            s_input_len > 0 && s_input_len < INPUT_BUF_CAP - 1) {
-            s_input_buf[s_input_len++] = ' ';
-            s_input_buf[s_input_len]   = '\0';
-            s_console_dirty            = 1;
+            s_input_cur > 0) {
+            Console_InsertChar(' ');
         }
-        /* `-`/`_`, `=`/`+`, `.` for numeric and path args (e.g. `weld 2.5`,
-         * `inveqy -50`, map names with `_`). Shift gives the upper glyph; there's
-         * no full shift handling, just these three keys. */
+        /* Punctuation. Shift gives the upper glyph; there is no full shift
+         * handling, just this table.
+         *
+         * `;` is load-bearing: it is how `bind` separates the commands in one
+         * bind ("bind k kill;spawn groaner"), and without a key for it that
+         * syntax could not be typed at all. The quote keys are here for the
+         * same reason -- they are the other thing people reach for when a
+         * separator does not work.
+         *
+         * `[`, `]` and `\` are also the graphics-effect binds, but
+         * Dbg_GfxBindActive returns 0 while the console is open, so typing
+         * them cannot also fire the effect. */
         {
             int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
             const struct { int sc; char lo, hi; } syms[] = {
-                { SDL_SCANCODE_MINUS,  '-', '_' },
-                { SDL_SCANCODE_EQUALS, '=', '+' },
-                { SDL_SCANCODE_PERIOD, '.', '.' },
+                { SDL_SCANCODE_MINUS,        '-',  '_' },
+                { SDL_SCANCODE_EQUALS,       '=',  '+' },
+                { SDL_SCANCODE_PERIOD,       '.',  '.' },
+                { SDL_SCANCODE_SEMICOLON,    ';',  ':' },
+                { SDL_SCANCODE_APOSTROPHE,   '\'', '"' },
+                { SDL_SCANCODE_COMMA,        ',',  '<' },
+                { SDL_SCANCODE_SLASH,        '/',  '?' },
+                { SDL_SCANCODE_LEFTBRACKET,  '[',  '{' },
+                { SDL_SCANCODE_RIGHTBRACKET, ']',  '}' },
+                { SDL_SCANCODE_BACKSLASH,    '\\', '|' },
             };
             int i;
-            for (i = 0; i < 3; i++) {
-                if (ks[syms[i].sc] && !s_prev_keys[syms[i].sc] &&
-                    s_input_len < INPUT_BUF_CAP - 1) {
-                    s_input_buf[s_input_len++] = shift ? syms[i].hi : syms[i].lo;
-                    s_input_buf[s_input_len]   = '\0';
-                    s_console_dirty            = 1;
-                }
+            for (i = 0; i < (int)(sizeof(syms) / sizeof(syms[0])); i++) {
+                if (ks[syms[i].sc] && !s_prev_keys[syms[i].sc])
+                    Console_InsertChar(shift ? syms[i].hi : syms[i].lo);
             }
         }
         /* Backspace hold-repeats like a text editor: one delete on the press
@@ -1606,22 +1703,35 @@ void DbgOverlay_Update(void)
          * than Dbg_HoldRepeat's 100ms floor, which felt sluggish for text). */
         {
             static Uint32 s_bsPress = 0, s_bsLast = 0;
-            int del = 0;
+            static Uint32 s_delPress = 0, s_delLast = 0;
+            static Uint32 s_lPress = 0, s_lLast = 0, s_rPress = 0, s_rLast = 0;
 
-            if (ks[SDL_SCANCODE_BACKSPACE]) {
-                Uint32 now = SDL_GetTicks();
-                if (!s_prev_keys[SDL_SCANCODE_BACKSPACE]) {
-                    s_bsPress = now;
-                    s_bsLast  = now;
-                    del       = 1;
-                } else if (now - s_bsPress >= 350 && now - s_bsLast >= 40) {
-                    s_bsLast = now;
-                    del      = 1;
-                }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_BACKSPACE, &s_bsPress, &s_bsLast) && s_input_cur > 0) {
+                memmove(&s_input_buf[s_input_cur - 1], &s_input_buf[s_input_cur], (size_t)(s_input_len - s_input_cur + 1));
+                s_input_cur--;
+                s_input_len--;
+                s_console_dirty = 1;
             }
-            if (del && s_input_len > 0) {
-                s_input_buf[--s_input_len] = '\0';
-                s_console_dirty            = 1;
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_DELETE, &s_delPress, &s_delLast) && s_input_cur < s_input_len) {
+                memmove(&s_input_buf[s_input_cur], &s_input_buf[s_input_cur + 1], (size_t)(s_input_len - s_input_cur));
+                s_input_len--;
+                s_console_dirty = 1;
+            }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_LEFT, &s_lPress, &s_lLast) && s_input_cur > 0) {
+                s_input_cur--;
+                s_console_dirty = 1;
+            }
+            if (Console_KeyRepeat(ks, s_prev_keys, SDL_SCANCODE_RIGHT, &s_rPress, &s_rLast) && s_input_cur < s_input_len) {
+                s_input_cur++;
+                s_console_dirty = 1;
+            }
+            if (ks[SDL_SCANCODE_HOME] && !s_prev_keys[SDL_SCANCODE_HOME]) {
+                s_input_cur = 0;
+                s_console_dirty = 1;
+            }
+            if (ks[SDL_SCANCODE_END] && !s_prev_keys[SDL_SCANCODE_END]) {
+                s_input_cur = s_input_len;
+                s_console_dirty = 1;
             }
         }
         /* Up / Down: recall recently entered commands (most-recent first). */
@@ -1640,6 +1750,7 @@ void DbgOverlay_Update(void)
                 strncpy(s_input_buf, s_hist_edit, INPUT_BUF_CAP - 1);
                 s_input_buf[INPUT_BUF_CAP - 1] = '\0';
                 s_input_len = (int)strlen(s_input_buf);
+                s_input_cur = s_input_len;
             }
             s_console_dirty = 1;
         }
@@ -1667,6 +1778,7 @@ void DbgOverlay_Update(void)
                  * at the top of the function). Lets the user run several
                  * commands without reopening. */
                 s_input_len    = 0;
+                s_input_cur    = 0;
                 s_input_buf[0] = '\0';
                 s_scroll       = 0;
                 g_PcConsoleInputActive  = 0;          /* unfreeze for the window */
@@ -1700,23 +1812,18 @@ void DbgOverlay_Update(void)
         }
     }
 
-    /* `'` toggles the collision visualizer panel; gather data each frame while
-     * on. Handled before the showConsole gate so it works independently of the
-     * scrolling console's visibility. */
+    /* Collision visualizer. The `'` key is gone -- Quick Options > Debug owns
+     * the toggle, so the panel follows g_CollVisEnabled and gathers while it
+     * is on. Kept ahead of the showConsole gate so it works with the console
+     * closed. */
     {
-        int cur_apos = ks[SDL_SCANCODE_APOSTROPHE];
-        if (cur_apos && !s_prev_apos && g_PcAllowDebugControls) {
-            s_coll_on = !s_coll_on;
-            g_CollVisEnabled = s_coll_on;
-            SH_DBG_ECHO("[DEBUG] ' Collision visualizer: %s", s_coll_on ? "ON" : "OFF");
-        }
-        s_prev_apos = cur_apos;
+        s_coll_on = g_CollVisEnabled;
         if (s_coll_on)
             coll_gather();
     }
 
-    /* Anim inspector panel: gather live data while the K keyframe inspector is on
-     * (the K / , / . keys themselves are handled in game_main.c's DebugCamera_Update
+    /* Anim inspector panel: gather live data while the keyframe inspector is on
+     * (the , / . keys themselves are handled in game_main.c's DebugCamera_Update
      * next to the other debug toggles). */
     if (g_DebugAnimKfView)
         anim_gather();
@@ -1727,7 +1834,7 @@ void DbgOverlay_Update(void)
     {
         static int s_prev_f1 = 0;
         int cur_f1 = ks[SDL_SCANCODE_F1];
-        if (cur_f1 && !s_prev_f1) {
+        if (cur_f1 && !s_prev_f1 && !ctrlHeld) {
             extern int g_PsxUsePgxp;
             g_PsxUsePgxp = !g_PsxUsePgxp;
             g_PcConfig.usePgxp = g_PsxUsePgxp ? 1 : 0;
@@ -1737,13 +1844,55 @@ void DbgOverlay_Update(void)
         s_prev_f1 = cur_f1;
     }
 
+    /* key_quick_options (default F10 -- F9 is the camera-style cycle) toggles
+     * the in-game quick options overlay (pc_quick_options.c). A user-facing
+     * menu like F1/F2, so not gated on g_PcAllowDebugControls; in-game only
+     * (the title/main menu has the real Options screen), and not while the
+     * console has the keyboard. */
+    {
+        extern int  PsyX_LookupGameControllerMapping(const char* str, int default_value);
+        extern bool PC_RawControllerButtonClicked(int sdlButton);
+        static SDL_Scancode s_scQuick   = SDL_SCANCODE_UNKNOWN;
+        static int          s_padQuick  = -1;
+        static int          s_quickRes  = 0;
+        static int          s_prevQuick = 0;
+        int curQuick;
+        int padQuick;
+        /* Re-resolved on g_PcBindsGen: the in-game controls panel rebinds it. */
+        if (s_quickRes != g_PcBindsGen + 1) {
+            s_scQuick  = SDL_GetScancodeFromName(g_PcConfig.keyQuickOptions);
+            /* Optional controller bind, unbound by default -- an empty string
+             * leaves it at -1 and nothing is polled. */
+            s_padQuick = (g_PcConfig.padQuickOptions[0] != '\0')
+                       ? (int)PsyX_LookupGameControllerMapping(g_PcConfig.padQuickOptions,
+                                                              -1)
+                       : -1;
+            s_quickRes = g_PcBindsGen + 1;
+        }
+        curQuick = (s_scQuick != SDL_SCANCODE_UNKNOWN) ? ks[s_scQuick] : 0;
+        /* Already edge-detected, so it is tested separately from the keyboard
+         * level below rather than folded into curQuick. */
+        padQuick = (s_padQuick >= 0) && PC_RawControllerButtonClicked(s_padQuick);
+        /* Not during an attract demo. The demo drives g_Controller0 with
+         * recorded input, and the panel reads that same controller, so every
+         * playback frame pressed its rows for you. GameState is InGame
+         * throughout a demo, so the state test above cannot see it. */
+        if (((curQuick && !s_prevQuick && !ctrlHeld) || padQuick) && !g_PcConsoleInputActive &&
+            g_GameWork.gameState == GameState_InGame &&
+            !(g_SysWork.sysFlags & SysFlag_DemoActive)) {
+            extern void Pc_QuickOptions_Toggle(void);
+            Pc_QuickOptions_Toggle();
+        }
+        s_prevQuick = curQuick;
+    }
+
     /* F2 cycles the full-screen post-process look (0=Off..8). Like F1/PGXP this
      * is a user-facing graphics option, not a debug feature, so it is NOT gated
      * on g_PcAllowDebugControls. Order must match the post fragment shader. */
     {
         static int s_prev_f2 = 0;
         int cur_f2 = ks[SDL_SCANCODE_F2];
-        if (cur_f2 && !s_prev_f2) {
+        if (cur_f2 && !s_prev_f2 && !ctrlHeld) {
             extern int g_cfg_postProcess;
             static const char* const s_postNames[] = {
                 "Off", "CRT", "Scanlines", "Vignette", "Color Grade",
@@ -1765,7 +1914,7 @@ void DbgOverlay_Update(void)
     {
         static int s_prev_f3 = 0;
         int cur_f3 = ks[SDL_SCANCODE_F3];
-        if (cur_f3 && !s_prev_f3) {
+        if (cur_f3 && !s_prev_f3 && !ctrlHeld) {
             extern int g_cfg_tonemap;
             static const char* const s_toneNames[] = { "Off", "Reinhard", "ACES", "Filmic" };
             const int count = (int)(sizeof(s_toneNames) / sizeof(s_toneNames[0]));
@@ -1783,7 +1932,7 @@ void DbgOverlay_Update(void)
     {
         static int s_prev_f4 = 0;
         int cur_f4 = ks[SDL_SCANCODE_F4];
-        if (cur_f4 && !s_prev_f4) {
+        if (cur_f4 && !s_prev_f4 && !ctrlHeld) {
             Pc_FlashlightModeApply((g_PcConfig.flashlightMode + 1) & 3, 1);
             SH_DBG_ECHO("F4 Flashlight: %s",
                         Pc_FlashlightModeLabel(g_PcConfig.flashlightMode));
@@ -1800,7 +1949,19 @@ void DbgOverlay_Update(void)
     {
         static int s_prev_exit = 0;
         int cur_exit = Dbg_GfxBindActive(ks, g_PcConfig.keyExitGame);
-        if (cur_exit && !s_prev_exit && !g_PcConsoleInputActive) {
+        /* The quick options overlay closes on Escape, the default exit bind:
+         * without this gate closing it also warm-reset the game to the title. */
+        extern int g_PcQuickOptionsActive;
+        /* The controls panel and screen use Escape to back out and to cancel a
+         * rebind; the Achievements screen uses it to back out, and stays open
+         * through its fade out, so no Escape during it quits from the main menu. */
+        extern int Pc_BindPanel_IsOpen(void);
+        extern int Pc_ControlsScreen_IsOpen(void);
+        extern int Pc_AchScreen_IsOpen(void);
+        extern int Pc_TitleAchievementsActive(void);
+        if (cur_exit && !s_prev_exit && !g_PcConsoleInputActive && !g_PcQuickOptionsActive &&
+            !Pc_BindPanel_IsOpen() && !Pc_ControlsScreen_IsOpen() && !Pc_AchScreen_IsOpen() &&
+            !Pc_TitleAchievementsActive()) {
             /* The brightness screen owns the whole display (its calibration bar is
              * drawn outside the normal menu path), so warm-resetting out of it left
              * the bar on screen over the title. Back out to the options list the
@@ -1896,6 +2057,17 @@ void DbgOverlay_Update(void)
 
 void DbgOverlay_Render(void)
 {
+    /* Publish whether this frame renders the 3D world, for the image-adjustment
+     * scope in GR_PostProcess (which runs immediately after this hook). The
+     * movie, menu, inventory, paper-map, save and load screens draw no world,
+     * so a brightness/contrast grade has no business touching them. */
+    {
+        extern int g_cfg_sceneFrame;
+
+        g_cfg_sceneFrame = (g_GameWork.gameState == GameState_InGame ||
+                            g_GameWork.gameState == GameState_MapEvent);
+    }
+
     GLint   vp[4];
     GLint   prev_prog, prev_tex, prev_vao, prev_vbo, prev_fb;
     GLint   prev_active_tex, prev_blend_src, prev_blend_dst;
@@ -1921,14 +2093,37 @@ void DbgOverlay_Render(void)
      * it would never run during normal gameplay. */
     { extern void Pc_RaToast_Draw(void); Pc_RaToast_Draw(); }
 
-    /* Main-menu achievement browser — same self-contained-GL arrangement as the
-     * toast above, and drawn after it so an unlock popup stays on top. */
-    { extern void Pc_RaBrowser_Draw(void); Pc_RaBrowser_Draw(); }
+    /* Free camera controls panel, same self-contained-GL arrangement. */
+    { extern void Pc_FreeCamHud_Draw(void); Pc_FreeCamHud_Draw(); }
+
+    /* FPS counter (Debug Actions > FPS Display), same GL objects as the panel;
+     * drawn before the quick menu so the menu stays on top. */
+    { extern void Pc_FpsHud_Draw(void); Pc_FpsHud_Draw(); }
+
+    /* In-game randomizer settings panel — same self-contained-GL arrangement,
+     * opened by tapping the Map button during a run. */
+    { extern void Pc_RandoSettings_Draw(void); Pc_RandoSettings_Draw(); }
+
+    /* In-game quick options overlay (F9) -- same self-contained-GL arrangement,
+     * translucent so live setting changes show through it. */
+    { extern void Pc_QuickOptions_Draw(void); Pc_QuickOptions_Draw(); }
+
+    /* Modal Yes/No message box (options-screen "reset to defaults") — same
+     * self-contained-GL arrangement; drawn last so it sits over every panel. */
+    /* In-game controls panel (Options > Controller Config) -- same arrangement;
+     * under the Yes/No box, which it opens for its reset. */
+    { extern void Pc_BindPanel_Draw(void); Pc_BindPanel_Draw(); }
+
+    { extern void Pc_ConfirmDialog_Draw(void); Pc_ConfirmDialog_Draw(); }
+
+    /* Mouse pointer above every panel. Before the early-out below, which skips
+     * the rest of this function on nearly every frame. */
+    { extern void Pc_MouseCursor_GlDraw(void); Pc_MouseCursor_GlDraw(); }
 
     /* Console is hidden once fully slid off-screen (toggled by `~`); the ring
      * buffer keeps filling while hidden. The collision panel draws whenever it's
      * toggled on (`'`), independent of the console. The anim panel draws while the
-     * K keyframe inspector is on. */
+     * keyframe inspector is on. */
     drawConsole = (s_console_slide > 0.0f && (s_console_count > 0 || s_console_open));
     drawColl    = (s_coll_on && s_coll_count > 0);
     drawAnim    = (g_DebugAnimKfView && s_anim_count > 0);
@@ -1976,7 +2171,14 @@ void DbgOverlay_Render(void)
     if (!s_gl_inited)
         overlay_gl_init();
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    /* The SCENE target, not the window. In borderless the scene renders into an
+     * internal target that is stretched to the window at present, and that blit
+     * covers the whole window -- so an overlay drawn straight to framebuffer 0
+     * here was being painted over a moment later and never appeared. Drawing
+     * into the scene target puts the console and toasts back in the frame, and
+     * they scale with it. GR_ScreenFBO() is 0 in every other mode, so this is
+     * the same bind it always was. */
+    glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2029,9 +2231,10 @@ void DbgOverlay_Render(void)
 
         /* Backdrop first (full width), then the selection highlight, then the
          * text at its natural glyph scale, cropping to the rows in use. */
-        draw_panel(s_bg_tex, x0, y0, x1, y1);
+        if (!s_console_peek)
+            draw_panel(s_bg_tex, x0, y0, x1, y1);
 
-        if (s_sel_valid) {
+        if (s_sel_valid && !s_console_peek) {
             int fl, fc, ll, lc, r;
 
             console_sel_order(&fl, &fc, &ll, &lc);
@@ -2072,6 +2275,7 @@ void DbgOverlay_Render(void)
             }
         }
 
+        if (!s_console_peek)
         {
             /* Draw only the columns that fit the window at the natural 2x glyph
              * size, stretched from the left edge, so the text spans the full

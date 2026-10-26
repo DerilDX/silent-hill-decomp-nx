@@ -130,6 +130,18 @@ real table into `pc_port/src/<name>_anim_infos.c` and init it at startup
   Larval [`554b38e90`](https://github.com/SlickAmogus/silent-hill-decomp/commit/554b38e90),
   Creeper+Hanged [`675fdbaf7`](https://github.com/SlickAmogus/silent-hill-decomp/commit/675fdbaf7).
 
+- **`D_800DB238` — Twinfeeler stayed fully visible underground.** The worm's
+  burrow has two halves and only one of them had been fixed. `func_800D59EC`
+  clears bit 0 of all 56 bones each frame and re-sets it on the segments listed
+  in this table for the current burrow-anim frame; bit 0 zeroes that bone's whole
+  view-matrix rotation ([`bodyprog_bone_80044F14.c:371`](https://github.com/SlickAmogus/silent-hill-decomp/blob/pc-port/src/bodyprog/gfx/bodyprog_bone_80044F14.c)),
+  collapsing the segment to a point — that IS how the game buries the body. With
+  the table zeroed nothing was ever collapsed, so the whole worm drew through the
+  ground, and `idx == 0` wrote the bit into `bones[-1]` six times a row. Real
+  `s8[11][6]` (PSX `0x800DB238`, 0x44 B, -1 terminated) extracted from
+  `MAP4_S03.BIN`. The earlier `D_800DB1D8..F8` batch made it SINK; this made it
+  HIDE. commit [`365970af1`](https://github.com/SlickAmogus/silent-hill-decomp/commit/365970af1)
+
 ## 3. IPD chunk streaming & buffer sizing
 
 The map chunk pipeline was reworked for PC (synchronous reads, wider Hor+ view,
@@ -1921,12 +1933,12 @@ arena with a canary, and the worst-case document is ~38 KiB of `POLY_FT4`.
 ## Play as another character — Lisa / Cybil / Kaufmann / Dahlia (2026-08-03)
 
 **Feature, PC-only.** `player_character` config key, console `PLAYAS <name>`, and
-in-game cycling: with `allow_debug_controls = 1`, turn on the K keyframe viewer
-and press `-` / `=` to cycle Harry → Lisa → Cybil → Kaufmann → Dahlia (the amber
-panel shows the selection; the rifle/shotgun give cheats on those keys stand
-down while K view is on). Turning K view off leaves you playing as the selected
-character; the choice persists to `config.cfg`. Groundwork for character
-selection (and eventually co-op skins).
+in-game cycling: with `allow_debug_controls = 1`, turn on the keyframe viewer
+(console `kf`) and press `-` / `=` to cycle Harry → Lisa → Cybil → Kaufmann →
+Dahlia (the amber panel shows the selection; the rifle/shotgun give cheats on
+those keys stand down while the viewer is on). Turning the viewer off leaves you
+playing as the selected character; the choice persists to `config.cfg`.
+Groundwork for character selection (and eventually co-op skins).
 
 **Mechanism** (`pc_port/src/pc_playas.c`): retarget
 `CHARA_FILE_INFOS[Chara_Harry].modelFileIdx/textureFileIdx` — the same row
@@ -3006,3 +3018,267 @@ Editor side: `map2ipd --full` output is no longer capped at the original file
 size; `sh1/tools/chunk_budget.py` reports which threshold a compiled cell
 crosses, and `validate_port_compat.py` mirrors the header validation so a
 rejected file is diagnosed instead of looking like "my edit did nothing".
+
+## Russian fan translations (SLUS-00707 + SLES-01514)
+
+Ten-odd Russian patches circulate for SH1. They translate everything the DISC
+owns and repaint FONT16 so its Latin cells draw Cyrillic. The port already
+re-reads item text (`FanTextInit`/`AdoptItemArrays`) and map messages
+(`UsaPatchMapMessages`, or the EUR overlay walk), so story and inventory text
+came out correct — but menus, options, pause, save/load and the inventory
+labels are COMPILED INTO the port and stayed English ASCII, which a Cyrillic
+atlas renders as nonsense. The port also adds option rows no disc ever had, so
+adopting the disc's own menu strings could not have covered them.
+
+- **Russian menu layer** (`pc_port/src/lang_ru.c`, `lang_ru_menu.inc`): the port
+  carries its own Russian UI text, keyed by the exact compiled US literal, and
+  encodes it into whatever byte-to-glyph mapping the mounted patch uses. Charset
+  tables are selected by an FNV-1a hash of that disc's FONT16.TIM; an
+  unrecognized font logs its hash and keeps English, so a new patch is one table
+  (33 uppercase + 33 lowercase bytes) plus one hash. Shipped charsets:
+  `vitco` (ViT Co / Metallist / Team Raccoon 2021-2022, all three variants share
+  one font), `consolgames` (consolgames.ru v1.1 2011, PAL), `kudos`, `vitotiv`
+  (ViToTiV/VovaMal 2006, PAL). Every table was derived by decoding that disc's
+  own item and message text back to fluent Russian, then round-trip verified
+  against the atlas cell map.
+- **EUR atlas is 126 cells, not 120** (`font_region.c`, `lang_text.c`): retail
+  PAL declares 120 glyphs but its grid is 21x6, and consolgames fills the six
+  spare cells with `ъ ы ь э ю я` and extends the BODYPROG kerning table to match.
+  At the retail count those six letters failed `Font_MapChar`'s range check and
+  vanished from every line of PAL Russian text, subtitles included.
+  `Font_SetGlyphWidths` now takes the glyph count from the disc alongside the
+  widths, and `EurFanFontInit` adopts both (52 of 120 advances differ on that
+  disc — rendering it with retail widths mis-spaced everything). Retail EUR
+  leaves those cells at width 0, which is the signal used to tell the two apart.
+- **Glyph range in the drawer** (`text_draw.c`, `lang_menu.c`): `Gfx_StringDraw`
+  stopped at `'z'`, the last cell of the 84-glyph US strip. Bytes 0x7B-0x7F are
+  EUR cells 84-88 (`Ъ Ы Ь Э Ю` on a Cyrillic repaint) and were silently dropped.
+  `Font_MapChar` already range-checks against the active layout, so US/NTSC-J
+  emit nothing for them exactly as before.
+- The Language row stands down on a Russian disc (no other language is legible
+  in that font), and a PC-side pack is refused there — the pack's 0xA2-0xB3 byte
+  window is Cyrillic letters on those discs and `Font_PatchPolishGlyphs` would
+  paint over cells the repaint uses.
+
+The seven 1999-2003 SLUS repacks (FireCross, Golden Leon, Paradox, Playbox,
+RGR Studio, Sacson, Русские Версии) are covered too, as five more charsets
+(Paradox and Sacson ship the same font). These rebuild the disc rather than
+patching in place, so their text arrives through `Fs_RemapFromDiscTable` and the
+relinked-overlay scan — that already worked; only the charset was missing. Each
+is a transliteration scheme (Latin letters standing in for the Cyrillic they
+resemble) and most of the fonts carry a single case, so both halves of those
+tables hold the same bytes.
+
+One of them needed a code fix as well: `BrazilFindItemArray` required EVERY item
+pointer to start on a string boundary, and FireCross's string pool is missing one
+terminator, so its "РУЖЬЕ" entry legitimately points into the middle of the
+preceding name. That single aliased pointer rejected the whole array, and the
+disc fell through to the decrypt path and kept compiled English item names — on a
+Cyrillic font. The boundary rule now has to hold for 15 of every 16 pointers
+instead of all of them, which still pins the link base exactly (at a wrong base
+essentially none of them land on a boundary) while tolerating a patch's own
+malformed pool. Verified against all ten discs: FireCross starts matching at the
+same base/offset the others already used, and no other disc's result changes.
+
+## Apple-toolchain prep: GCC nested functions and Mach-O symbol aliases (2026-08-14)
+
+Groundwork for the iOS port, landed on `pc-port` because it also fixes a live
+macOS bug and unblocks Android.
+
+### The decomp's four GCC nested functions
+
+`build.sh` refuses AppleClang and selects Homebrew GCC on macOS, on the grounds
+that "AppleClang rejects the PSX decomp C". That is far more alarming than the
+reality, and it matters because iOS has no such escape hatch: Homebrew GCC cannot
+target `arm64-apple-ios` at all, so the Apple toolchain is Clang or nothing.
+
+Measured rather than assumed, with `clang -fsyntax-only` over the real source
+list using the real build defines (`-DSH_PC_PORT -DSKIP_ASM -DVER_<region>
+-Dstatic_assert=_Static_assert`): the tree compiles under Clang with nothing but
+`-Wno-` flags, except for GCC's nested-function extension, which no flag can
+rescue. There were exactly four uses, identical across all five regional builds:
+
+| File | Function | Captured parent locals |
+|---|---|---|
+| `events_main.c` | `Event_ItemTriggersClear` | none |
+| `cutscene_border.c` | `Screen_BlackBorderDraw` | none (all by parameter) |
+| `npc_main.c` | `func_800382B0` | `field_0[]` |
+| `npc_main.c` | `func_800382EC` | `field_0[]`, `field_40` |
+
+All four are now file-scope statics. The two in `npc_main.c` take their captured
+state explicitly, `field_40` by pointer because `func_800382EC` writes to it, and
+the `s_func_800382EC_0` typedef moves out with them since both signatures name
+it. `bodyprog.h` carried a stale one-argument `func_800382B0` prototype that
+never had an external definition; it is removed, and nothing else referenced it.
+
+This mirrors what `xbox-port` already did (nxdk's compiler is also Clang), so the
+two branches now agree. `src/main/memcpy.c` needs nothing: it holds MIPS inline
+asm with an invalid `"r="` constraint, but it is excluded from the build by
+`list(FILTER MAIN_SOURCES EXCLUDE REGEX "(main|memcpy)\.c$")`.
+
+Verified: zero nested functions remain under all five region defines, the three
+touched files are Clang-error-free, and the MinGW GCC build still links.
+
+### `map7_s03_boss_motion.c` aliases were invisible on Mach-O
+
+The generated boss-projectile pool defines `D_800EC5A8`, `D_800EC614`,
+`D_800EC680` and `D_800EC6EC` as exact offset aliases into `D_800EC53C` using
+raw `__asm__(".global ...\n.set ...")` directives, because the five symbols must
+stay contiguous for the boss to index across their bounds.
+
+Those directives spelled the names bare. Mach-O prefixes C symbols with an
+underscore, so on macOS the assembler defined `D_800EC680` while the C side in
+`map7_s03_2.c` referenced `_D_800EC680`. Nothing catches this at build time,
+which is why CI stayed green: the main binary links, and the failure surfaces
+when `map7_s03` is loaded and the final boss attacks.
+
+An `SH_SYM()` macro now supplies the platform prefix (`"_"` under `__APPLE__`,
+empty elsewhere). The fix is in both the generated file and
+`gen_map7_s03_boss_motion.py`, so a regeneration keeps it. ELF and x86_64 COFF
+are unaffected: the preprocessed directives are byte-identical to before, and
+`nm` confirms the four aliases still land at their 24-byte strides.
+
+## Chinese on NTSC-J (font selection + language row)
+
+The Chinese fan translation of SH1 runs on a patched NTSC-J disc plus a patched
+PSX BIOS: the disc's text keeps the Japanese script's JIS **kuten codes** and the
+BIOS's kanji ROM is rewritten so those codes draw Chinese glyphs. The port has no
+BIOS — it rasterizes from its own embedded Shinonome JIS font — so the same disc
+came out as mojibake: right codes, wrong glyphs. A fan
+(`SH1PC_CN_Font_Patch_Beta`) worked out the BIOS font's layout and got Chinese
+rendering by overwriting `pc_port/src/kanji_font.inc` wholesale, which forks the
+build and loses Japanese.
+
+- **Both fonts, switched at runtime.** Only ku 16..47 is redefined, and every
+  glyph that touches lands in one contiguous run of the port's glyph blob
+  (524..3488), so `kanji_font_cn.inc` carries that run alone — 2965 glyphs,
+  ~93KB — and `GlyphBits` picks between it and the Japanese blob. The kuten
+  index table is shared unchanged. `pc_port/tools/make_kanji_font_cn.py`
+  regenerates the block from the extracted BIOS font; its output is byte-identical
+  to the fan's working build over that range.
+- **Language row on NTSC-J.** `Pc_LangMenuRowActive` now covers NTSC-J, so the
+  title-screen options menu shows Language in place of Auto Load and cycles
+  Japanese/Chinese. The row was rewritten to work in **slots** —
+  `Pc_LangSlotCount/Current/Set/Name/NameX` — so the screen no longer knows which
+  languages a region offers, and the PAL name/x tables moved out of options.c.
+  Chinese is its own config key (`jp_language` = ja/zh), deliberately not an id in
+  the PAL `language` list: the two share no code path, since the PAL setting picks
+  which localized files to read and this one only picks a glyph set.
+- **Item text off the disc on NTSC-J.** Story text already came from the disc, but
+  item names and descriptions were the compiled Japanese tables, so a Chinese disc
+  showed Chinese subtitles and Japanese inventory. `JpnFanTextInit` reads them from
+  BODYPROG the way the USA fan path does, adopting only when they differ from the
+  compiled tables — a guaranteed no-op on a stock JP disc, whose text the
+  decompile matches byte for byte. Addresses from `configs/JAP1/sym.bodyprog.txt`
+  (load base 0x80024B60, same as US; names 0x800B0044, descs 0x800B0350).
+  `AdoptItemArrays` takes the comparison tables as parameters now instead of
+  hardcoding the US ones.
+
+Not done: **Chinese menu text.** The translation's font is not a standard charset
+— it holds only the ~2965 characters the translators needed, at kuten slots of
+their own choosing — so authoring new Chinese strings needs a kuten-to-character
+map that neither the font nor the port can supply on its own. Template-matching
+the glyphs against system CJK fonts does not identify them (best distance 51, not
+0). NTSC-J menus are English in retail and stay readable English here, so this is
+a missing feature rather than a regression. Finishing it needs the Chinese-patched
+disc image: its own menu strings can either be adopted directly or used to derive
+the character map.
+
+### NTSC-J menu text off the disc (and with it, the Chinese menus)
+
+The note above said Chinese menu text was blocked on a character map. It was not
+— the answer was in the patch itself. `SLPM_861.92` is a **PPF2 disc patch**, and
+parsing it showed it rewrites `VIN/OPTION.BIN` and `VIN/SAVELOAD.BIN` among 361
+sectors. So the translation *does* cover the menus, and a PPF can only replace
+bytes in place, so its strings sit at exactly the offsets the Japanese ones do.
+
+That also exposed a plain bug: retail NTSC-J draws its option and save/load text
+**in Japanese**, from those two overlays. The port compiles the decomp's US
+branch, so it drew the compiled English literals there instead — wrong for a
+stock Japanese disc, never mind a translated one. `lang_jpn.c` reads the strings
+back off the mounted disc, which fixes Japanese and gets Chinese for free; which
+language appears is simply whatever disc is mounted, and the Japanese/Chinese
+setting only picks the glyph set.
+
+`lang_jpn_menu.inc` maps each compiled literal to (overlay, offset, length).
+Length 0 is a NUL-terminated string; a non-zero length is a fixed-width field
+inside a longer blob, because the game slices several values out of one string —
+and the field boundaries are identical in both languages, the shorter one padding
+with the SJIS ideographic space (0x8140). Currently 40 entries: all 25 save
+locations (their order in the overlay is the exact reverse of
+`g_Savegame_SaveLocationNames`, which is what pins the mapping), the option
+values (On/Off/Stereo/Monaural, Press/Switch, Reverse/Normal/Green/Violet/Black/
+Self_View) and the save-slot chrome.
+
+Two things the extraction has to get right, both verified against the stock and
+patched discs together:
+- The overlays write colour markup as `~Cn`, not the `\x0n` the port's drawer
+  wants, so it is converted on the way in.
+- **The walk must be SJIS-pair-aware.** A trail byte may legally be 0x7E ('~') or
+  0x81, so a byte-at-a-time scan lets the second half of a kanji masquerade as
+  markup or as padding — two of the Chinese location names do contain a 0x7E
+  trail byte.
+
+Still English: the option ROW labels. On the JP disc those are full sentences
+("画面の明るさを調節します" — *adjusts the screen brightness*) belonging to a
+differently-shaped JP options screen, not short labels for the US-shaped one the
+port draws, and the JP and CN sentences do not share field boundaries, so they
+cannot be sliced into labels the way the values can.
+
+## Item models drew semi-transparent primitives opaque (2026-08-14, commit `365970af1`)
+
+Every item model that goes through `GsSortObject4J` — the inventory carousel, the
+world-pickup preview, the puzzle-item view — rendered its semi-transparent
+primitives solid.
+
+The port's sixteen `GsTMDfast*` emitters in
+[`libgs_stub.c`](https://github.com/SlickAmogus/silent-hill-decomp/blob/pc-port/pc_port/src/stubs/libgs_stub.c) build each
+output packet with `setPoly*()`, which writes the **opaque base code**
+(0x20/0x24/0x30/0x34/…), and never carried across the TMD mode byte's ABE bit.
+PsyCross decides blending on `polyTag->code & 2` alone, so the bit has to be
+there. Fix: `setSemiTrans(poly, (prim->cd >> 1) & 1)` after every `setPoly*`
+(17 sites — the NG3 handler emits from two).
+
+The TMD mode byte is byte 3 of every primitive header, named `cd` in the psyq
+structs (`out, in, dummy, cd`) and `mode` in the port-local `TMD_P_NTG3_SH`.
+Bits: 0 = TGE, 1 = ABE, 2 = TME, 3 = QUAD, 4 = IIP.
+
+Reported as "the bottle with liquid does not appear to contain any liquid".
+`ITEM/UNQ66.TMD` (item 102, Unknown liquid) is 220 primitives: 212 of mode 0x36
+(ABE set — the bottle shell) wrapped around **8 of mode 0x34** (opaque — the
+liquid). An opaque shell hides the liquid completely. `UNQ65.TMD`, the empty
+Plastic Bottle, is the same model with 184 primitives and no opaque group, which
+is how the two were told apart offline. Useful fact for the next one: the item id
+IS the UNQ number (`InvItemId_UnknownLiquid` 102 = 0x66 → `UNQ66`).
+
+## Alternate cameras: footsteps while aiming, forward sprint that moves (2026-08-14, commit `572eb740f`)
+
+Both affect only the alternate cameras; classic is untouched.
+
+**Silent while moving and aiming.** The PC shim pins `extra->lowerBodyState` to
+plain `PlayerLowerBodyState_Aim` the moment a weapon goes up, and the block that
+derives the movement state for the footstep dispatcher was gated
+`if (!g_Player_IsAiming …)` — so walking, running or strafing with a weapon out
+matched the dispatcher's standing-still case and played nothing.
+
+The game already encodes "this movement, but aiming" as the movement state plus
+`PlayerLowerBodyState_Aim` (20) — see the literal `+=` / `-=` pairs in
+`player_control.c`. WalkForward(1) → AimWalkForward(21), SidestepLeft(6) →
+AimSidestepLeft(26), and so on. The shim now derives the movement state exactly
+as before and adds that offset.
+
+`func_8007B924`'s switch has cases for AimWalkForward/Backward and
+AimQuickTurn\* but none for AimRunForward(22), AimRunRight(27), AimRunLeft(28),
+AimSidestepRight(25) or AimSidestepLeft(26). Added, reusing the non-aiming
+keyframes, because aiming does not change the LEG animation. Gated on
+`g_DebugThirdPersonCam`: classic sets AimSidestep\* too, and on PSX that
+combination genuinely plays no footstep — faithful, so don't "fix" it there.
+
+**Forward sprint ran in place.** Speed was clamped to walk whenever a gun was up
+(a deliberate no-sprint-while-aiming choice), but the leg animation is chosen
+from `g_Player_IsRunning` alone — so the run cycle played over 1.5 movement and
+Harry scrubbed. Strafing never had the clamp (its position comes from the anim
+keyframes), which is why sideways sprint always worked. Clamp dropped so forward
+matches, and the aim-run states joined the exhaustion group so sprinting with a
+weapon up tires him at the usual rate.
+

@@ -9,6 +9,8 @@
 #include "main/fsqueue.h"
 #ifdef SH_PC_PORT
 #include "main/fileinfo.h" /* g_GameRegion — PAL FONT16 reload */
+#include "pc_title_style.h"
+#include "font_region.h"
 #endif
 
 void GameFs_TitleGfxSeek(void) // 0x80032BD0
@@ -18,7 +20,7 @@ void GameFs_TitleGfxSeek(void) // 0x80032BD0
      * US TITLE_E, different artwork: black bg + scratched logo + copyright —
      * all baked pixels). Runtime mirror of the retail NTSCJ branch below;
      * everything downstream (draw, menu, fog) is region-identical. */
-    if (g_GameRegion == Region_JPN)
+    if (Pc_TitleUsesJpArt())
     {
         Fs_QueueStartSeek(FILE_TIM_TITLE_TIM);
         return;
@@ -34,23 +36,12 @@ void GameFs_TitleGfxSeek(void) // 0x80032BD0
 void GameFs_TitleGfxLoad(void) // 0x80032BF0
 {
 #ifdef SH_PC_PORT
-    if (g_GameRegion == Region_JPN)
-    {
-        Fs_QueueStartReadTim(FILE_TIM_TITLE_TIM, FS_BUFFER_3, &g_TitleImg);
-    }
-    else
-#endif
-    {
-#if VERSION_REGION_IS(NTSC)
-    Fs_QueueStartReadTim(FILE_TIM_TITLE_E_TIM, FS_BUFFER_3, &g_TitleImg);
-#elif VERSION_REGION_IS(NTSCJ)
-    Fs_QueueStartReadTim(FILE_TIM_TITLE_TIM, FS_BUFFER_3, &g_TitleImg);
-#endif
-    }
+    /* Three title screens, none of which every disc has; the style module
+     * decides which to show and where to get it. */
+    Pc_TitleArtLoad();
 
-#ifdef SH_PC_PORT
     /* PAL: the boot-time FONT16 upload at (768,128) is stomped by the Konami
-     * logo (768,0..383) and BG_ETC (768,0..127) queued right after it — retail
+     * logo (768,0..383) and BG_ETC (768,0..127) queued right after it -- retail
      * SLES reloads the font from the B_KONAMI overlay for the same reason.
      * This is the universal pre-title chokepoint (normal boot, no-memcard,
      * skip_intros, warm reboot); FIFO queue order makes the font upload land
@@ -59,6 +50,12 @@ void GameFs_TitleGfxLoad(void) // 0x80032BF0
     {
         Fs_QueueStartReadTim(FILE_1ST_FONT16_TIM, FS_BUFFER_1, &g_Font16AtlasImg);
     }
+#else
+#if VERSION_REGION_IS(NTSC)
+    Fs_QueueStartReadTim(FILE_TIM_TITLE_E_TIM, FS_BUFFER_3, &g_TitleImg);
+#elif VERSION_REGION_IS(NTSCJ)
+    Fs_QueueStartReadTim(FILE_TIM_TITLE_TIM, FS_BUFFER_3, &g_TitleImg);
+#endif
 #endif
 }
 

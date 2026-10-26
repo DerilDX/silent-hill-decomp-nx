@@ -342,29 +342,6 @@ void func_800E1854(void) // 0x800E1854
     VECTOR3 sp20;
     q19_12  var_v0;
 
-#ifdef SH_PC_PORT
-    /* [BOSSFX2] pre-spawn fire/lightning diagnostic. Load the arena, let the
-     * wrong fire/lightning show, exit. Tells us: the FX mode (f0; -1/NO_VALUE =
-     * idle), the lightning-spline draw gate (spl0/spl1 pos/f12/f14 — func_800E24A0
-     * only draws when ALL three are nonzero), and the fire/mesh/world-object gates
-     * (D_800F4820 fire pool, D_800F4830 mesh, D_800F4811/18/19/1A WorldGfx). If f0
-     * != -1 the FX state is in/stomped into an active mode; if a spline's three
-     * fields are nonzero it's drawing; a set gate means that effect is drawing.
-     * TEMP — strip once diagnosed. */
-    {
-        static int _bfx2 = 0;
-        if ((_bfx2++ % 30) == 0) {
-            s_800F4B40_1C* _s0 = &D_800F4B40.field_1C[0];
-            s_800F4B40_1C* _s1 = &D_800F4B40.field_1C[1];
-            SH_DBG("[BOSSFX2] f0=%d f4=%d | spl0 pos=%d f12=%d f14=%d | spl1 pos=%d f12=%d f14=%d | fire4820=%d mesh4830=%d wo4811=%d 4818=%d 4819=%d 481A=%d",
-                   (int)D_800F4B40.field_0, (int)D_800F4B40.field_4,
-                   (int)_s0->pos_10, (int)_s0->field_12, (int)_s0->field_14,
-                   (int)_s1->pos_10, (int)_s1->field_12, (int)_s1->field_14,
-                   (int)D_800F4820, (int)D_800F4830, (int)D_800F4811,
-                   (int)D_800F4818, (int)D_800F4819, (int)D_800F481A);
-        }
-    }
-#endif
 
     switch (D_800F4B40.field_0)
     {
@@ -930,6 +907,11 @@ void Map_CutsceneObjectsUpdate(void) // 0x800E2E90
 {
     if (g_Cutscene_Timer >= Q12(0.0f))
     {
+#ifdef SH_PC_PORT
+        /* Ending shots are framed for the stock fog; thinner fog (whole map)
+         * reveals Kaufmann's body behind them. */
+        Pc_FogFloorRequest();
+#endif
         if (g_Cutscene_UpdateHero)
         {
             Dms_CharacterTransformGet(&g_SysWork.playerWork.player.position, &g_SysWork.playerWork.player.rotation, "HERO", g_Cutscene_Timer, D_800ED230[D_800F4806]);
@@ -999,18 +981,17 @@ void func_800E3390(void) // 0x800E3390
 {
     s32 i;
 
-#ifdef SH_PC_PORT
-    /* This is the ending cutscene the player actually reaches (event param 2;
-     * func_800E3C48 is the alternate-ending sibling). It LoadImage's each
-     * NPC's CLUT into the VRAM display region as they appear, so with the
-     * framebuffer->VRAM store active every frame stamps the rendered frame
-     * over the freshly-loaded CLUTs -> Dahlia/Alessa textures corrupt
-     * mid-scene, magenta walls, wrong floor. Suppress the store while this
-     * event runs, like the paper-map path. Re-set each frame (PsyX_EndScene
-     * auto-clears it). */
-    extern int g_PsxSkipFramebufferStore;
-    g_PsxSkipFramebufferStore = 1;
-#endif
+    /* PC: this ending used to force g_PsxSkipFramebufferStore every frame, which
+     * also killed the scene's dream overlay (the strips in func_800E3F30). The
+     * guard was right for the OLD store, which wrote (0,0)-(320,240) and so
+     * covered the y<32 CLUT strip: the background-image palette D_800A9A04 sits
+     * at (224,13), and stamping over it gave the magenta walls and garbled NPCs.
+     * The store now writes only the PSX display buffers, x 0..319 / y 32..479 --
+     * the real framebuffers on hardware, where nothing persistent can live. This
+     * scene's own uploads all land outside them: the NPC descriptors
+     * D_800ED218/220/228 put textures at x >= 768 and CLUTs at (704,464..496).
+     * Any upload that ever did overlap stands the store down on its own
+     * (GR_NoteVramUploadForFeedback). */
 
     if ((g_Controller0->clickedBtnFlags & g_GameWorkPtr->config.controllerConfig.skip) &&
         D_800F4805 > 0 && D_800F4805 < 4)
@@ -1328,17 +1309,9 @@ void func_800E3B6C(void) // 0x800E3B6C
 
 void func_800E3C48(void) // 0x800E3C48
 {
-#ifdef SH_PC_PORT
-    /* The ending cutscene LoadImage's NPC/floor CLUTs into the VRAM display
-     * region (e.g. CLUT at (224,13) — the same spot as the paper-map victim
-     * (224,15)). With the framebuffer->VRAM store active, every frame stamps
-     * the rendered frame over those CLUTs -> garbled NPC textures, magenta
-     * walls, wrong floor (CutsceneGlitch screenshots). Suppress the store
-     * while this ending event runs, like the paper-map path does. Re-set each
-     * frame because PsyX_EndScene auto-clears it. */
-    extern int g_PsxSkipFramebufferStore;
-    g_PsxSkipFramebufferStore = 1;
-#endif
+    /* PC: the store guard that used to sit here was lifted for the same reason
+     * as in func_800E3390 -- it protected the y<32 CLUT strip from the old
+     * (0,0)-(320,240) store, and the current store never writes there. */
     switch (D_800F4805)
     {
         case 0:

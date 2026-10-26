@@ -1,0 +1,471 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/*
+ * pc_cheats.c - the Cheats and Debug pages of the quick options overlay.
+ *
+ * One table per page. Every row here is the SAME action the top-row debug
+ * keys / console commands perform (same globals, same helpers), so a cheat
+ * turned on here reads as on for the key and the console, and vice versa.
+ * The overlay (pc_quick_options.c) only knows names, labels and a direction.
+ */
+
+#include "game.h"
+#include "bodyprog/bodyprog.h"
+#include "bodyprog/items.h"
+#include "bodyprog/item_screens.h"
+#include "bodyprog/math/math.h"
+#include "bodyprog/savegame.h"
+#include "bodyprog/sound/sfx_id_enum.h"
+#include "bodyprog/sound/sound_system.h"
+
+#include "pc_cheats.h"
+#include "pc_config.h"
+#include "lang_quick.h"
+#include "sh_log.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/* game_main.c */
+extern int  g_PcGodMode;
+extern int  g_DebugNoWallCollision;
+extern int  g_DebugNoTarget;
+extern int  g_PcFastForward;      /* toggle; Ctrl+F5 hold is separate */
+extern int  g_dbg_wireframeMode;  /* PsyCross renderer debug (also Ctrl+F1) */
+extern int  g_dbg_texturelessMode;/* PsyCross renderer debug (also Ctrl+F2) */
+extern int  g_DebugAnimKfView;
+extern int  g_DebugCamEnabled;
+extern void Pc_FreeCam_Set(int on);
+/* main_pc.c / dbg_overlay.c */
+#include "map_registry.h"
+#include "pc_config.h"
+
+extern int  g_PcAllowDebugControls;
+extern int  g_PcUnlimitedEnemies;
+extern int  g_CollVisEnabled;
+/* pc_console_cmd.c: the console SPAWN table, browsable. */
+extern int         Pc_SpawnList_Count(void);
+extern const char* Pc_SpawnList_Name(int i);
+extern int         Pc_SpawnList_Ready(int i);
+extern void        Pc_SpawnList_Spawn(int i);
+/* pc_playas.c */
+extern int         Pc_PlayAs_Count(void);
+extern int         Pc_PlayAs_Current(void);
+extern const char* Pc_PlayAs_Label(int idx);
+extern const char* Pc_PlayAs_Name(int idx);
+extern int         Pc_PlayAs_SetByName(const char* name, int save);
+
+enum { CH_TOGGLE = 0, CH_ACTION, CH_PLAYAS, CH_FREECAM, CH_DEBUGKEYS, CH_SPAWN, CH_MAP, CH_FPS };
+
+/* ---- big head mode ---------------------------------------------------- */
+
+int g_PcBigHead = 0;
+extern int g_PcInfiniteAmmo; /* game_main.c */
+
+#define BIGHEAD_BONE  2 /* the head on every 18-bone human rig (parent chain -1,0,1,...) */
+#define BIGHEAD_SCALE 2
+
+static int Pc_BigHead_IsHuman(int charaId)
+{
+    switch (charaId)
+    {
+        case Chara_Harry:
+        case Chara_MonsterCybil:
+        case Chara_Cybil:
+        case Chara_EndingCybil:
+        case Chara_Cheryl:
+        case Chara_Dahlia:
+        case Chara_EndingDahlia:
+        case Chara_Lisa:
+        case Chara_BloodyLisa:
+        case Chara_Alessa:
+        case Chara_GhostChildAlessa:
+        case Chara_Incubator:
+        case Chara_BloodyIncubator:
+        case Chara_Kaufmann:
+        case Chara_EndingKaufmann:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Scales the head bone's local rotation matrix, so the head grows about the
+ * neck joint and anything parented to it (Lisa's hair bones) rides along.
+ * The animation rewrites the matrix every frame it plays, but a paused
+ * character keeps last frame's, so only scale a row that is still unit
+ * length: a scaled one is never scaled again. */
+void Pc_BigHead_Apply(int charaId, GsCOORDINATE2* coords)
+{
+    MATRIX* m;
+    s32     len2;
+    int     i, j;
+
+    if (!g_PcBigHead || coords == NULL || !Pc_BigHead_IsHuman(charaId))
+    {
+        return;
+    }
+
+    m    = &coords[BIGHEAD_BONE].coord;
+    len2 = (s32)m->m[0][0] * m->m[0][0] + (s32)m->m[0][1] * m->m[0][1] + (s32)m->m[0][2] * m->m[0][2];
+    if (len2 > ((s32)Q12(1.0f) * Q12(1.0f)) * 2)
+    {
+        return;
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        for (j = 0; j < 3; j++)
+        {
+            m->m[i][j] = (short)(m->m[i][j] * BIGHEAD_SCALE);
+        }
+    }
+    coords[BIGHEAD_BONE].flg = 0;
+}
+
+static int s_spawnIdx; /* CH_SPAWN: the browsed entry; confirm spawns it */
+
+/* CH_MAP: the map a New Game starts on. Replaces the old 4/5 debug keys.
+ * Unlike Spawn, browsing IS the change -- it writes config.cfg straight away,
+ * because the value only takes effect on the next New Game anyway. */
+static int MapRow_Current(void)
+{
+    int id = MapRegistry_FindByName(g_PcConfig.mapName);
+    return (id < 0) ? 0 : id;
+}
+
+static void MapRow_Set(int id)
+{
+    const char* name;
+    int         count = MapRegistry_Count();
+
+    if (count <= 0)
+        return;
+    if (id < 0)      id = count - 1;
+    if (id >= count) id = 0;
+
+    name = MapRegistry_GetName(id);
+    strncpy(g_PcConfig.mapName, name, sizeof(g_PcConfig.mapName) - 1);
+    g_PcConfig.mapName[sizeof(g_PcConfig.mapName) - 1] = (char)0;
+    PcConfig_SaveMapName(name);
+    Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+    SH_DBG_ECHO("[CHEAT] Starting map: %s - %s", name, MapRegistry_GetDescription(id));
+}
+
+typedef struct
+{
+    const char* name;
+    int         kind;
+    int*        flag;      /* CH_TOGGLE */
+    void      (*action)(void); /* CH_ACTION */
+} CheatRow;
+
+/* ---- actions (mirrors of the debug keys / console commands) ---------- */
+
+/* Live slots only: past inventorySlotCount the table keeps stale entries
+ * (the ghost-slot bug quick heal had), which would skip granting the gun. */
+static int has_item(u8 id)
+{
+    int i;
+    for (i = 0; i < g_SavegamePtr->inventorySlotCount && i < INV_ITEM_COUNT_MAX; i++)
+        if (g_SavegamePtr->items[i].id_0 == id)
+            return 1;
+    return 0;
+}
+
+static void act_handgun_ammo(void)
+{
+    Inventory_AddSpecialItem(InvItemId_HandgunBullets, 15);
+    Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
+    SH_DBG_ECHO("[CHEAT] Added 15 handgun bullets");
+}
+
+static void act_rifle(void)
+{
+    int had = has_item(InvItemId_HuntingRifle);
+    if (!had) Inventory_AddSpecialItem(InvItemId_HuntingRifle, 1);
+    Inventory_AddSpecialItem(InvItemId_RifleShells, 30);
+    Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
+    SH_DBG_ECHO("[CHEAT] Added%s Rifle Shells x30", had ? "" : " Hunting Rifle +");
+}
+
+static void act_shotgun(void)
+{
+    int had = has_item(InvItemId_Shotgun);
+    if (!had) Inventory_AddSpecialItem(InvItemId_Shotgun, 1);
+    Inventory_AddSpecialItem(InvItemId_ShotgunShells, 30);
+    Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
+    SH_DBG_ECHO("[CHEAT] Added%s Shotgun Shells x30", had ? "" : " Shotgun +");
+}
+
+/* Same routing as debug key 6 / KILLALL: a huge damage.amount sends every
+ * nearby enemy through its own real death path. */
+static void act_kill_nearby(void)
+{
+    s_SubCharacter* hr = &g_SysWork.playerWork.player;
+    int killed = 0, i;
+    for (i = 0; i < NPC_COUNT_MAX; i++)
+    {
+        s_SubCharacter* npc = &g_SysWork.npcs[i];
+        if (npc->model.charaId == Chara_None || npc->model.charaId == Chara_Harry || npc->health <= Q12(0.0f))
+            continue;
+        if (ABS(npc->position.vx - hr->position.vx) > Q12(50.0f) || ABS(npc->position.vz - hr->position.vz) > Q12(50.0f))
+            continue;
+        npc->damage.amount = Q12(99999.0f);
+        killed++;
+    }
+    Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
+    SH_DBG_ECHO("[CHEAT] Killed %d nearby enemies", killed);
+}
+
+static void act_kill_harry(void)
+{
+    g_SysWork.playerWork.player.health = -Q12(1.0f);
+    SH_DBG_ECHO("[CHEAT] Killed Harry");
+}
+
+static void act_log_camera(void)
+{
+    extern void Pc_CamSnapDump(void);
+    Pc_CamSnapDump();
+}
+
+static void act_log_position(void)
+{
+    s_SubCharacter* p = &g_SysWork.playerWork.player;
+    SH_DBG_ECHO("HARRY POSITION LOGGED mapId=%d roomIdx=%d pos=(%ld,%ld,%ld) yaw=%d",
+                (int)g_SavegamePtr->mapIdx, (int)g_SavegamePtr->mapRoomIdx,
+                (long)p->position.vx, (long)p->position.vy, (long)p->position.vz,
+                (int)p->rotation.vy);
+}
+
+/* ---- tables ----------------------------------------------------------- */
+
+static const CheatRow s_cheats[] = {
+    { "God mode",             CH_TOGGLE,  &g_PcGodMode,           NULL },
+    { "Noclip",               CH_TOGGLE,  &g_DebugNoWallCollision, NULL },
+    { "Enemies ignore Harry", CH_TOGGLE,  &g_DebugNoTarget,       NULL },
+    { "Unlimited enemies",    CH_TOGGLE,  &g_PcUnlimitedEnemies,  NULL },
+    { "Infinite ammo",        CH_TOGGLE,  &g_PcInfiniteAmmo,      NULL },
+    { "Big head mode",        CH_TOGGLE,  &g_PcBigHead,           NULL },
+    { "Handgun bullets +15",  CH_ACTION,  NULL, act_handgun_ammo },
+    { "Hunting rifle +30",    CH_ACTION,  NULL, act_rifle },
+    { "Shotgun +30",          CH_ACTION,  NULL, act_shotgun },
+    { "Kill nearby enemies",  CH_ACTION,  NULL, act_kill_nearby },
+    { "Play as",              CH_PLAYAS,  NULL, NULL },
+    { "Free camera",          CH_FREECAM, NULL, NULL },
+};
+
+static const CheatRow s_debug[] = {
+    /* Named for what it gates in practice: the console toggle
+     * (dbg_overlay.c). It still carries the same allow_debug_controls
+     * config key and the handful of dev keys behind it. */
+    { "Allow console",        CH_DEBUGKEYS, NULL, NULL },
+    { "Collision visualizer", CH_TOGGLE,  &g_CollVisEnabled,  NULL },
+    { "Keyframe viewer (kf)", CH_TOGGLE,  &g_DebugAnimKfView, NULL },
+    /* Also on Ctrl+F5 / Ctrl+F1 / Ctrl+F2. The key and the row drive the same
+     * state, except fast-forward, where the key is a HOLD and this row is a
+     * sticky toggle -- they use separate flags so releasing the key cannot
+     * cancel the toggle. The toggle clears itself if Harry dies. */
+    { "Fast forward (Ctrl+F5)", CH_TOGGLE, &g_PcFastForward,     NULL },
+    { "Wireframe (Ctrl+F1)",  CH_TOGGLE,  &g_dbg_wireframeMode,  NULL },
+    { "No textures (Ctrl+F2)", CH_TOGGLE, &g_dbg_texturelessMode, NULL },
+    { "Starting map",         CH_MAP,     NULL, NULL },
+    { "Spawn",                CH_SPAWN,   NULL, NULL },
+    { "FPS Display",          CH_FPS,     NULL, NULL },
+    { "Log Harry position",   CH_ACTION,  NULL, act_log_position },
+    { "Log camera shot",      CH_ACTION,  NULL, act_log_camera },
+    { "Kill Harry",           CH_ACTION,  NULL, act_kill_harry },
+};
+
+static const CheatRow* row_at(int page, int idx, int* count)
+{
+    const CheatRow* t = (page == PC_CHEATS_PAGE_DEBUG) ? s_debug : s_cheats;
+    int n = (page == PC_CHEATS_PAGE_DEBUG) ? (int)(sizeof(s_debug) / sizeof(s_debug[0]))
+                                           : (int)(sizeof(s_cheats) / sizeof(s_cheats[0]));
+    if (count) *count = n;
+    return (idx >= 0 && idx < n) ? &t[idx] : NULL;
+}
+
+int Pc_Cheats_Count(int page)
+{
+    int n;
+    row_at(page, 0, &n);
+    return n;
+}
+
+const char* Pc_Cheats_Name(int page, int idx)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    return r ? r->name : "";
+}
+
+int Pc_Cheats_IsAction(int page, int idx)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    /* Decides which half of the page a row lands on. FPS Display is a setting,
+     * but it sits with the actions, whose page had room. */
+    return r ? (r->kind == CH_ACTION || r->kind == CH_FPS) : 0;
+}
+
+const char* Pc_Cheats_Label(int page, int idx, char* buf, int bufsz)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (!r) return "";
+    switch (r->kind)
+    {
+        case CH_TOGGLE:    return Pc_LangQuickMenu(*r->flag ? "On" : "Off");
+        /* Fog row stores "disabled", so present it the right way round. */
+        case CH_ACTION:    return "";
+        case CH_PLAYAS:    return Pc_PlayAs_Label(Pc_PlayAs_Current());
+        case CH_FREECAM:   return Pc_LangQuickMenu(g_DebugCamEnabled ? "On" : "Off");
+        case CH_DEBUGKEYS: return Pc_LangQuickMenu(g_PcAllowDebugControls ? "On" : "Off");
+        case CH_FPS:
+        {
+            static const char* const pos[5] = { "Off", "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
+            int v = g_PcConfig.fpsDisplay;
+            if (v < 0 || v > 4) v = 0;
+            return (v == 0) ? Pc_LangQuickMenu("Off") : Pc_LangQuick(pos[v]);
+        }
+        case CH_SPAWN:
+            snprintf(buf, bufsz, "< %s >%s%s", Pc_SpawnList_Name(s_spawnIdx),
+                     Pc_SpawnList_Ready(s_spawnIdx) ? "" : "  ",
+                     Pc_SpawnList_Ready(s_spawnIdx) ? "" : Pc_LangQuick("(not in this map)"));
+            return buf;
+        case CH_MAP:
+        {
+            int id = MapRow_Current();
+            snprintf(buf, bufsz, "< %s >  %s", MapRegistry_GetName(id),
+                     MapRegistry_GetDescription(id));
+            return buf;
+        }
+        default:           return "";
+    }
+}
+
+void Pc_Cheats_Adjust(int page, int idx, int dir)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (!r) return;
+    switch (r->kind)
+    {
+        case CH_TOGGLE:
+            *r->flag = !*r->flag;
+            Sd_PlaySfx(*r->flag ? Sfx_MenuConfirm : Sfx_MenuCancel, 0, 64);
+            SH_DBG_ECHO("[CHEAT] %s: %s", r->name, *r->flag ? "ON" : "OFF");
+            break;
+        case CH_ACTION:
+            if (r->action) r->action();
+            break;
+        case CH_PLAYAS:
+        {
+            int n = Pc_PlayAs_Count();
+            int i = (Pc_PlayAs_Current() + (dir < 0 ? -1 : 1) + n) % n;
+            if (Pc_PlayAs_SetByName(Pc_PlayAs_Name(i), 1))
+            {
+                Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+                SH_DBG_ECHO("[CHEAT] Playing as %s", Pc_PlayAs_Label(Pc_PlayAs_Current()));
+            }
+            break;
+        }
+        case CH_MAP:
+            MapRow_Set(MapRow_Current() + (dir < 0 ? -1 : 1));
+            break;
+        case CH_FREECAM:
+            Pc_FreeCam_Set(!g_DebugCamEnabled);
+            Sd_PlaySfx(g_DebugCamEnabled ? Sfx_MenuConfirm : Sfx_MenuCancel, 0, 64);
+            break;
+        case CH_SPAWN:
+        {
+            int n = Pc_SpawnList_Count();
+            if (n > 0) s_spawnIdx = (s_spawnIdx + (dir < 0 ? -1 : 1) + n) % n;
+            Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+            break;
+        }
+        case CH_FPS:
+        {
+            char v[4];
+            g_PcConfig.fpsDisplay = (g_PcConfig.fpsDisplay + (dir < 0 ? 4 : 1)) % 5;
+            snprintf(v, sizeof(v), "%d", g_PcConfig.fpsDisplay);
+            PcConfig_SaveKeyValue("fps_display", v);
+            Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+            break;
+        }
+        case CH_DEBUGKEYS:
+            g_PcAllowDebugControls = !g_PcAllowDebugControls;
+            g_PcConfig.allowDebugControls = g_PcAllowDebugControls;
+            PcConfig_SaveKeyValue("allow_debug_controls", g_PcAllowDebugControls ? "1" : "0");
+            Sd_PlaySfx(g_PcAllowDebugControls ? Sfx_MenuConfirm : Sfx_MenuCancel, 0, 64);
+            SH_DBG_ECHO("[CHEAT] Allow console: %s", g_PcAllowDebugControls ? "ON" : "OFF");
+            break;
+        default:
+            break;
+    }
+}
+
+/* Confirm on a row: the Spawn row fires its browsed entry; every other row
+ * behaves like a step up. */
+void Pc_Cheats_Confirm(int page, int idx)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (!r) return;
+    if (r->kind == CH_SPAWN)
+    {
+        if (!Pc_SpawnList_Ready(s_spawnIdx))
+        {
+            Sd_PlaySfx(Sfx_MenuError, 0, 64);
+            SH_DBG_ECHO("[CHEAT] %s is not loaded in this map (see 'spawn list')", Pc_SpawnList_Name(s_spawnIdx));
+            return;
+        }
+        Pc_SpawnList_Spawn(s_spawnIdx);
+        Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
+        SH_DBG_ECHO("[CHEAT] Spawned %s", Pc_SpawnList_Name(s_spawnIdx));
+        return;
+    }
+    Pc_Cheats_Adjust(page, idx, +1);
+}
+
+/* List rows (Spawn): the overlay draws these as a button on the left and a
+ * browsable value on the right, and can open the list as a dropdown. */
+int Pc_Cheats_ListCount(int page, int idx)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (r && r->kind == CH_MAP) return MapRegistry_Count();
+    return (r && r->kind == CH_SPAWN) ? Pc_SpawnList_Count() : 0;
+}
+
+const char* Pc_Cheats_ListName(int page, int idx, int i)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+
+    if (r && r->kind == CH_MAP)
+    {
+        /* Name plus as much of the description as the dropdown line fits. */
+        static char line[64];
+        snprintf(line, sizeof(line), "%s  %s", MapRegistry_GetName(i),
+                 MapRegistry_GetDescription(i));
+        return line;
+    }
+    return (r && r->kind == CH_SPAWN) ? Pc_SpawnList_Name(i) : "";
+}
+
+int Pc_Cheats_ListGet(int page, int idx)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (r && r->kind == CH_MAP) return MapRow_Current();
+    return (r && r->kind == CH_SPAWN) ? s_spawnIdx : 0;
+}
+
+void Pc_Cheats_ListSet(int page, int idx, int i)
+{
+    const CheatRow* r = row_at(page, idx, NULL);
+    if (r && r->kind == CH_MAP && i >= 0 && i < MapRegistry_Count())
+    {
+        MapRow_Set(i);
+        return;
+    }
+    if (r && r->kind == CH_SPAWN && i >= 0 && i < Pc_SpawnList_Count())
+    {
+        s_spawnIdx = i;
+        Sd_PlaySfx(Sfx_MenuMove, 0, 64);
+    }
+}
